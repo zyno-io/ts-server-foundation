@@ -1,0 +1,334 @@
+import type { App } from '../../app';
+import { withContextData } from '../../helpers';
+import { ScopedLogger } from '../logger';
+import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
+import { WorkerRecorderService } from './recorder';
+import { BaseJob, getRegisteredWorkerJobs, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
+import { notifyWorkerObservers } from './observer';
+import { Worker as BullWorker, type Job as BullJob } from 'bullmq';
+
+export interface WorkerExecutionResult<I = unknown, O = unknown> {
+    job: QueuedWorkerJob<I>;
+    result: O;
+}
+
+export class WorkerRunnerService {
+    private running = false;
+    private readonly timers = new Map<string, NodeJS.Timeout>();
+    private readonly executing = new Set<string>();
+    private readonly bullWorkers = new Map<string, BullWorker<BullMqWorkerJobData>>();
+
+    constructor(
+        private readonly app: App,
+        private readonly queueRegistry: WorkerQueueRegistry,
+        private readonly recorder: WorkerRecorderService,
+        private readonly logger: ScopedLogger
+    ) {}
+
+    async start(): Promise<void> {
+        if (this.running) return;
+        this.running = true;
+        if (this.queueRegistry.usesBullMq()) {
+            await this.startBullMqWorkers();
+            await this.scheduleBullMqCronJobs();
+            return;
+        }
+
+        this.scheduleCronJobs();
+        await this.drainReadyJobs();
+    }
+
+    async shutdown(): Promise<void> {
+        this.running = false;
+        for (const timer of this.timers.values()) clearTimeout(timer);
+        this.timers.clear();
+        await Promise.all([...this.bullWorkers.values()].map(worker => worker.close().catch(() => {})));
+        this.bullWorkers.clear();
+        while (this.executing.size) {
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
+
+    schedule(job: QueuedWorkerJob): void {
+        if (!this.running || job.status !== 'queued') return;
+        const delay = Math.max(0, job.shouldExecuteAt.getTime() - Date.now());
+        if (delay > 0) {
+            if (this.timers.has(job.id)) return;
+            const timer = setTimeout(() => {
+                this.timers.delete(job.id);
+                this.runScheduledJob(job).catch(error => {
+                    this.logger.error('Queued job failed', error, { job: { name: job.name, id: job.id } });
+                });
+            }, delay);
+            this.timers.set(job.id, timer);
+            return;
+        }
+
+        this.runScheduledJob(job).catch(error => {
+            this.logger.error('Queued job failed', error, { job: { name: job.name, id: job.id } });
+        });
+    }
+
+    async drainReadyJobs(queue?: string): Promise<void> {
+        if (this.queueRegistry.usesBullMq()) return;
+        const jobs = queue ? this.queueRegistry.getQueuedJobs(queue) : this.queueRegistry.getAllQueuedJobs();
+        for (const job of jobs) {
+            if (job.status !== 'queued') continue;
+            if (job.shouldExecuteAt.getTime() > Date.now()) {
+                this.schedule(job);
+                continue;
+            }
+            await this.runScheduledJob(job);
+        }
+    }
+
+    async executeQueuedJob<I, O>(job: QueuedWorkerJob<I>, options: IJobOptions = job.options): Promise<WorkerExecutionResult<I, O>> {
+        if (this.executing.has(job.id)) throw new Error(`Job ${job.name}:${job.id} is already executing`);
+
+        this.executing.add(job.id);
+        job.attemptsMade++;
+        job.data = this.queueRegistry.normalizeJobData(job.data);
+        notifyWorkerObservers({ type: 'active', job });
+        try {
+            const result = await withContextData(
+                {
+                    job: {
+                        queue: job.queue,
+                        id: job.id,
+                        name: job.name
+                    }
+                },
+                async () => this.resolveJob(job.jobClass).handle(job.data)
+            );
+            this.queueRegistry.markCompleted(job, result);
+            await this.recorder.recordCompleted(job, result, options);
+            return { job, result: result as O };
+        } catch (error) {
+            const failure = formatFailure(error);
+            this.queueRegistry.markFailed(job, failure);
+            await this.recorder.recordFailed(job, failure, options);
+            throw error;
+        } finally {
+            this.queueRegistry.remove(job);
+            this.executing.delete(job.id);
+        }
+    }
+
+    private scheduleCronJobs(): void {
+        for (const jobClass of getRegisteredWorkerJobs()) {
+            const schedule = jobClass.CRON_SCHEDULE;
+            if (!schedule || !this.isRegisteredJob(jobClass)) continue;
+            const repeatKey = `${jobClass.name}:${schedule}`;
+            if (this.hasQueuedRepeatJob(repeatKey)) continue;
+            const job = this.queueRegistry.add(jobClass, {}, { delay: getCronDelayMs(schedule), repeatKey });
+            this.schedule(job);
+        }
+    }
+
+    private rescheduleCronJob(job: QueuedWorkerJob): void {
+        const repeatKey = job.options.repeatKey;
+        const schedule = job.jobClass.CRON_SCHEDULE;
+        if (!this.running || !repeatKey || !schedule) return;
+        if (this.hasQueuedRepeatJob(repeatKey)) return;
+        const next = this.queueRegistry.add(job.jobClass, {}, { delay: getCronDelayMs(schedule), repeatKey });
+        this.schedule(next);
+    }
+
+    private async runScheduledJob<I, O>(job: QueuedWorkerJob<I>): Promise<WorkerExecutionResult<I, O>> {
+        try {
+            return await this.executeQueuedJob<I, O>(job);
+        } finally {
+            this.rescheduleCronJob(job);
+        }
+    }
+
+    private resolveJob<I, O>(jobClass: JobClass<I, O>): BaseJob<I, O> {
+        const registered = this.app.container.listRegisteredProviders().find(item => item.token === jobClass);
+        if (!registered) throw new Error(`Job handler is not registered as a provider: ${jobClass.name}`);
+        return this.app.container.resolve(jobClass, registered.moduleId);
+    }
+
+    private isRegisteredJob(jobClass: JobClass): boolean {
+        return this.app.container.listRegisteredProviders().some(item => item.token === jobClass);
+    }
+
+    private hasQueuedRepeatJob(repeatKey: string): boolean {
+        return this.queueRegistry.getAllQueuedJobs().some(job => job.status === 'queued' && job.options.repeatKey === repeatKey);
+    }
+
+    private async startBullMqWorkers(): Promise<void> {
+        for (const queueName of this.getRegisteredQueueNames()) {
+            if (this.bullWorkers.has(queueName)) continue;
+            const worker = new BullWorker<BullMqWorkerJobData>(
+                queueName,
+                async job => {
+                    await this.executeBullMqJob(job);
+                },
+                this.queueRegistry.getBullMqOptions()
+            );
+            worker.on('failed', (job, error) => {
+                this.logger.error('BullMQ job failed', error, {
+                    job: {
+                        queue: queueName,
+                        id: job?.id,
+                        name: job?.name
+                    }
+                });
+            });
+            this.bullWorkers.set(queueName, worker);
+        }
+    }
+
+    private async scheduleBullMqCronJobs(): Promise<void> {
+        for (const jobClass of getRegisteredWorkerJobs()) {
+            const schedule = jobClass.CRON_SCHEDULE;
+            if (!schedule || !this.isRegisteredJob(jobClass)) continue;
+            const repeatKey = `${jobClass.name}:${schedule}`;
+            const queue = this.queueRegistry.getBullQueue(this.queueRegistry.getQueueName(jobClass));
+            await queue.upsertJobScheduler(
+                repeatKey,
+                { pattern: schedule },
+                {
+                    name: jobClass.name,
+                    data: {
+                        data: {},
+                        options: { repeatKey }
+                    },
+                    opts: {
+                        removeOnComplete: 1000,
+                        removeOnFail: 1000
+                    }
+                }
+            );
+        }
+    }
+
+    private async executeBullMqJob<I, O>(job: BullJob<BullMqWorkerJobData<I>>): Promise<WorkerExecutionResult<I, O>> {
+        const jobClass = this.resolveJobClassByName<I, O>(job.name);
+        const queuedJob = this.queueRegistry.fromBullJob(job, jobClass);
+        return this.executeQueuedJob<I, O>(queuedJob, queuedJob.options);
+    }
+
+    private resolveJobClassByName<I, O>(name: string): JobClass<I, O> {
+        const jobClass = getRegisteredWorkerJobs().find(candidate => candidate.name === name && this.isRegisteredJob(candidate));
+        if (!jobClass) throw new Error(`Job handler is not registered as a provider: ${name}`);
+        return jobClass as JobClass<I, O>;
+    }
+
+    private getRegisteredQueueNames(): string[] {
+        const queues = new Set<string>([this.queueRegistry.getDefaultQueueName()]);
+        for (const jobClass of getRegisteredWorkerJobs()) {
+            if (this.isRegisteredJob(jobClass)) queues.add(this.queueRegistry.getQueueName(jobClass));
+        }
+        return [...queues];
+    }
+}
+
+function formatFailure(error: unknown): { message: string; stack?: string } {
+    if (error instanceof Error) return { message: error.message, stack: error.stack };
+    return { message: String(error) };
+}
+
+function getCronDelayMs(schedule: string): number {
+    const parts = schedule.trim().split(/\s+/);
+    if (parts.length !== 5 && parts.length !== 6) throw new Error(`Invalid cron schedule "${schedule}"`);
+    const fields = parts.length === 5 ? ['0', ...parts] : parts;
+    const cron = {
+        seconds: parseCronField(fields[0], 0, 59),
+        minutes: parseCronField(fields[1], 0, 59),
+        hours: parseCronField(fields[2], 0, 23),
+        daysOfMonth: parseCronField(fields[3], 1, 31),
+        months: parseCronField(fields[4], 1, 12),
+        daysOfWeek: uniqueSorted(parseCronField(fields[5], 0, 7).map(value => (value === 7 ? 0 : value)))
+    };
+    const now = new Date();
+    const next = nextCronDate(cron, now);
+    return Math.max(1, next.getTime() - now.getTime());
+}
+
+interface ParsedCron {
+    seconds: number[];
+    minutes: number[];
+    hours: number[];
+    daysOfMonth: number[];
+    months: number[];
+    daysOfWeek: number[];
+}
+
+function nextCronDate(cron: ParsedCron, now: Date): Date {
+    const candidate = new Date(now.getTime() + 1000);
+    candidate.setMilliseconds(0);
+    const maxMinutes = 366 * 5 * 24 * 60;
+
+    for (let attempt = 0; attempt < maxMinutes; attempt++) {
+        if (matchesCronMinute(candidate, cron)) {
+            const second = cron.seconds.find(value => value >= candidate.getSeconds());
+            if (second !== undefined) {
+                const next = new Date(candidate);
+                next.setSeconds(second, 0);
+                if (next > now) return next;
+            }
+        }
+        candidate.setMinutes(candidate.getMinutes() + 1, 0, 0);
+    }
+
+    throw new Error('Could not calculate next cron execution within five years');
+}
+
+function matchesCronMinute(date: Date, cron: ParsedCron): boolean {
+    if (!cron.minutes.includes(date.getMinutes())) return false;
+    if (!cron.hours.includes(date.getHours())) return false;
+    if (!cron.months.includes(date.getMonth() + 1)) return false;
+
+    const dayOfMonthWildcard = cron.daysOfMonth.length === 31;
+    const dayOfWeekWildcard = cron.daysOfWeek.length === 7;
+    const dayOfMonthMatches = cron.daysOfMonth.includes(date.getDate());
+    const dayOfWeekMatches = cron.daysOfWeek.includes(date.getDay());
+
+    if (dayOfMonthWildcard && dayOfWeekWildcard) return true;
+    if (dayOfMonthWildcard) return dayOfWeekMatches;
+    if (dayOfWeekWildcard) return dayOfMonthMatches;
+    return dayOfMonthMatches || dayOfWeekMatches;
+}
+
+function parseCronField(expression: string, min: number, max: number): number[] {
+    const values = new Set<number>();
+    for (const part of expression.split(',')) {
+        addCronPart(values, part.trim(), min, max);
+    }
+    return [...values].sort((a, b) => a - b);
+}
+
+function uniqueSorted(values: number[]): number[] {
+    return [...new Set(values)].sort((a, b) => a - b);
+}
+
+function addCronPart(values: Set<number>, expression: string, min: number, max: number): void {
+    if (!expression) throw new Error('Invalid empty cron field');
+    const [rangeExpression, stepExpression] = expression.split('/');
+    if (stepExpression !== undefined && !/^\d+$/.test(stepExpression)) throw new Error(`Invalid cron step "${expression}"`);
+    const step = stepExpression === undefined ? 1 : Number(stepExpression);
+    if (!Number.isInteger(step) || step < 1) throw new Error(`Invalid cron step "${expression}"`);
+
+    const [start, end] = parseCronRange(rangeExpression, min, max);
+    for (let value = start; value <= end; value += step) {
+        if (value < min || value > max) throw new Error(`Cron value ${value} is outside ${min}-${max}`);
+        values.add(value);
+    }
+}
+
+function parseCronRange(expression: string, min: number, max: number): [number, number] {
+    if (expression === '*') return [min, max];
+    const range = expression.match(/^(\d+)-(\d+)$/);
+    if (range) {
+        const start = Number(range[1]);
+        const end = Number(range[2]);
+        if (start > end) throw new Error(`Invalid cron range "${expression}"`);
+        return [start, end];
+    }
+    if (/^\d+$/.test(expression)) {
+        const value = Number(expression);
+        return [value, value];
+    }
+    throw new Error(`Unsupported cron field "${expression}"`);
+}

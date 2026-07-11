@@ -1,0 +1,26 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "commonjs",
+        "rootDir": ".",
+        "outDir": "dist",
+        "declaration": false,
+        "sourceMap": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": true,
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        "importHelpers": true,
+        "types": ["node"],
+        "plugins": [
+            {
+                "transform": "./node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs"
+            }
+        ]
+    },
+    "include": ["src/**/*.ts"],
+    "reflection": true
+}

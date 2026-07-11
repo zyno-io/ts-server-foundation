@@ -1,0 +1,286 @@
+syntax = "proto3";
+
+package sgnl24.DevConsole;
+
+///
+/// Framework
+///
+
+message PingPong {}
+
+message WriteByteStream { bytes chunk = 1; }
+message FinishByteStream {}
+message DestroyByteStream { optional string error = 1; }
+message ByteStreamOperation {
+  int32 streamId = 1;
+  oneof operation {
+    WriteByteStream write = 2;
+    FinishByteStream finish = 3;
+    DestroyByteStream destroy = 4;
+  }
+}
+message TraceContext {
+  string traceId = 1;
+  string spanId = 2;
+  int32 traceFlags = 3;
+}
+
+///
+/// Downstream requests (server-initiated push events)
+///
+
+message DEventRequest {
+  string type = 1;
+  string jsonData = 2;
+}
+message DEventResponse {}
+
+///
+/// Upstream requests (client-initiated)
+///
+
+// REPL
+
+message UReplEvalRequest {
+  string code = 1;
+}
+message UReplEvalResponse {
+  string output = 1;
+  optional string error = 2;
+}
+
+message UReplCompleteRequest {
+  string code = 1;
+  int32 cursorPos = 2;
+}
+message UReplCompleteItem {
+  string label = 1;
+  string kind = 2;
+}
+message UReplCompleteResponse {
+  repeated UReplCompleteItem items = 1;
+  int32 replaceStart = 2;
+  int32 replaceEnd = 3;
+}
+
+// Overview / Dashboard
+
+message UGetOverviewRequest {}
+message UGetOverviewResponse {
+  string name = 1;
+  string version = 2;
+  int64 uptime = 3;
+  string env = 4;
+  int32 httpEntries = 5;
+  int32 srpcMessages = 6;
+  int32 srpcActiveConnections = 7;
+  int32 srpcDisconnected = 8;
+}
+
+message UGetProcessRequest {}
+message UGetProcessResponse {
+  int32 pid = 1;
+  int64 rss = 2;
+  int64 heapTotal = 3;
+  int64 heapUsed = 4;
+  int64 external = 5;
+  int64 arrayBuffers = 6;
+  int64 cpuUser = 7;
+  int64 cpuSystem = 8;
+  double uptime = 9;
+  string nodeVersion = 10;
+  string platform = 11;
+  string arch = 12;
+}
+
+// Environment
+
+message UGetEnvRequest {}
+message UGetEnvResponse {
+  string jsonData = 1;
+}
+
+// HTTP Requests
+
+message UGetRequestsRequest {}
+message UGetRequestsResponse {
+  string jsonData = 1;
+}
+
+// Routes
+
+message UGetRoutesRequest {}
+message UGetRoutesRoute {
+  repeated string methods = 1;
+  string path = 2;
+  optional string controller = 3;
+  optional string methodName = 4;
+}
+message UGetRoutesResponse {
+  repeated UGetRoutesRoute routes = 1;
+}
+
+// sRPC
+
+message UGetSrpcRequest {}
+message UGetSrpcResponse {
+  string jsonData = 1;
+}
+
+message UGetSrpcMessagesRequest {
+  optional string streamId = 1;
+}
+message UGetSrpcMessagesResponse {
+  string jsonData = 1;
+}
+
+// Workers
+
+message UGetWorkersRequest {}
+message UGetWorkersResponse {
+  string jsonData = 1;
+}
+
+message UGetWorkersJobsRequest {}
+message UGetWorkersJobsResponse {
+  string jsonData = 1;
+}
+
+// Database
+
+message UGetDatabaseEntitiesRequest {}
+message UGetDatabaseEntity {
+  string name = 1;
+  string table = 2;
+  repeated string columns = 3;
+  string quotedTable = 4;
+}
+message UGetDatabaseEntitiesResponse {
+  repeated UGetDatabaseEntity entities = 1;
+}
+
+message UDatabaseQueryRequest {
+  string sql = 1;
+}
+message UDatabaseQueryRow {
+  repeated string values = 1;
+}
+message UDatabaseQueryResponse {
+  repeated string columns = 1;
+  repeated UDatabaseQueryRow rows = 2;
+  int32 rowCount = 3;
+  optional int32 affectedRows = 4;
+  optional string error = 5;
+}
+
+// Health Checks
+
+message UGetHealthChecksRequest {}
+message UGetHealthChecksResponse {
+  string jsonData = 1;
+}
+
+// Clear
+
+message UClearRequestsRequest {}
+message UClearRequestsResponse {}
+
+message UClearSrpcMessagesRequest {}
+message UClearSrpcMessagesResponse {}
+
+// Database Log
+
+message UGetDatabaseQueriesRequest {}
+message UGetDatabaseQueriesResponse {
+  string jsonData = 1;
+}
+
+message UClearDatabaseQueriesRequest {}
+message UClearDatabaseQueriesResponse {}
+
+// Mutexes
+
+message UGetMutexesRequest {}
+message UGetMutexesResponse {
+  string jsonData = 1;
+}
+
+///
+/// Client & Server message containers
+///
+
+message DevConsoleClientMessage {
+  string requestId = 1;
+  bool reply = 2;
+  optional string error = 3;
+  optional bool userError = 4;
+  optional TraceContext trace = 5;
+
+  oneof request {
+    // framework
+    PingPong pingPong = 50;
+    ByteStreamOperation byteStreamOperation = 51;
+
+    // downstream responses (responding to server)
+    DEventResponse dEventResponse = 2000;
+
+    // upstream requests (client-initiated)
+    UReplEvalRequest uReplEvalRequest = 2100;
+    UReplCompleteRequest uReplCompleteRequest = 2101;
+    UGetOverviewRequest uGetOverviewRequest = 2102;
+    UGetProcessRequest uGetProcessRequest = 2103;
+    UGetEnvRequest uGetEnvRequest = 2104;
+    UGetRequestsRequest uGetRequestsRequest = 2105;
+    UGetRoutesRequest uGetRoutesRequest = 2106;
+    UGetSrpcRequest uGetSrpcRequest = 2107;
+    UGetSrpcMessagesRequest uGetSrpcMessagesRequest = 2108;
+    UGetWorkersRequest uGetWorkersRequest = 2109;
+    UGetWorkersJobsRequest uGetWorkersJobsRequest = 2110;
+    UGetDatabaseEntitiesRequest uGetDatabaseEntitiesRequest = 2111;
+    UDatabaseQueryRequest uDatabaseQueryRequest = 2112;
+    UGetHealthChecksRequest uGetHealthChecksRequest = 2113;
+    UGetMutexesRequest uGetMutexesRequest = 2114;
+    UClearRequestsRequest uClearRequestsRequest = 2115;
+    UClearSrpcMessagesRequest uClearSrpcMessagesRequest = 2116;
+    UGetDatabaseQueriesRequest uGetDatabaseQueriesRequest = 2117;
+    UClearDatabaseQueriesRequest uClearDatabaseQueriesRequest = 2118;
+  }
+}
+
+message DevConsoleServerMessage {
+  string requestId = 1;
+  bool reply = 2;
+  optional string error = 3;
+  optional bool userError = 4;
+  optional TraceContext trace = 5;
+
+  oneof response {
+    // framework
+    PingPong pingPong = 50;
+    ByteStreamOperation byteStreamOperation = 51;
+
+    // downstream requests (server-initiated)
+    DEventRequest dEventRequest = 2000;
+
+    // upstream responses (replies to client)
+    UReplEvalResponse uReplEvalResponse = 2100;
+    UReplCompleteResponse uReplCompleteResponse = 2101;
+    UGetOverviewResponse uGetOverviewResponse = 2102;
+    UGetProcessResponse uGetProcessResponse = 2103;
+    UGetEnvResponse uGetEnvResponse = 2104;
+    UGetRequestsResponse uGetRequestsResponse = 2105;
+    UGetRoutesResponse uGetRoutesResponse = 2106;
+    UGetSrpcResponse uGetSrpcResponse = 2107;
+    UGetSrpcMessagesResponse uGetSrpcMessagesResponse = 2108;
+    UGetWorkersResponse uGetWorkersResponse = 2109;
+    UGetWorkersJobsResponse uGetWorkersJobsResponse = 2110;
+    UGetDatabaseEntitiesResponse uGetDatabaseEntitiesResponse = 2111;
+    UDatabaseQueryResponse uDatabaseQueryResponse = 2112;
+    UGetHealthChecksResponse uGetHealthChecksResponse = 2113;
+    UGetMutexesResponse uGetMutexesResponse = 2114;
+    UClearRequestsResponse uClearRequestsResponse = 2115;
+    UClearSrpcMessagesResponse uClearSrpcMessagesResponse = 2116;
+    UGetDatabaseQueriesResponse uGetDatabaseQueriesResponse = 2117;
+    UClearDatabaseQueriesResponse uClearDatabaseQueriesResponse = 2118;
+  }
+}

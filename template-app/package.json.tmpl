@@ -1,0 +1,25 @@
+{
+    "name": "%%PACKAGE_NAME%%",
+    "version": "0.1.0",
+    "private": true,
+    "main": "./dist/src/index.js",
+    "scripts": {
+        "build": "tsf-dev build",
+        "dev": "tsf-dev run -- server:start",
+        "migrate": "tsf-dev migrate",
+        "migrate:create": "tsf-dev migrate:create",
+        "test": "tsf-dev test",
+        "test:debug": "tsf-dev test --debug",
+        "postinstall": "tsf-install"
+    },
+    "dependencies": {
+        "@zyno-io/ts-server-foundation": "%%FOUNDATION_VERSION%%",
+        "tslib": "^2.8.1"
+    },
+    "devDependencies": {
+        "@types/node": "^26",
+        "ttsc": "%%TTSC_VERSION%%",
+        "typescript": "%%TYPESCRIPT_VERSION%%"
+    },
+    "packageManager": "yarn@4.17.1"
+}

@@ -1,0 +1,119 @@
+image: node:24-alpine
+
+default:
+  interruptible: true
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - build
+  - deploy
+  - mirror
+
+.test_services:
+  services:
+    - name: mysql:8
+      variables:
+        MYSQL_ROOT_PASSWORD: secret
+        MYSQL_DATABASE: default
+    - name: postgres:17-alpine
+      variables:
+        POSTGRES_USER: root
+        POSTGRES_PASSWORD: secret
+        POSTGRES_DB: default
+    - name: redis:alpine
+  variables:
+    MYSQL_HOST: mysql
+    MYSQL_PORT: 3306
+    MYSQL_DATABASE: default
+    PG_HOST: postgres
+    PG_PORT: 5432
+    PG_USER: root
+    PG_PASSWORD_SECRET: secret
+    PG_DATABASE: default
+    REDIS_HOST: redis
+    REDIS_PORT: 6379
+
+build:devconsole:
+  stage: build
+  script:
+    - corepack enable
+    - yarn --immutable
+    - yarn build:devconsole
+  artifacts:
+    paths:
+      - dist/devconsole/
+
+test-and-build:
+  stage: build
+  extends: .test_services
+  script:
+    - |
+      set -x
+
+      apk add git
+
+      # Export after services start so the MySQL image does not receive MYSQL_USER=root.
+      export MYSQL_USER=root
+      export MYSQL_PASSWORD_SECRET=secret
+
+      corepack enable
+      yarn --immutable
+
+      yarn test
+      yarn test-app
+      yarn docs:build
+
+      yarn build
+
+      BUILD_VERSION=$(TZ=UTC0 git show -s --format=%cd --date=format-local:'%y.%-m%d.%-H%M' HEAD)
+
+      if [ "$CI_COMMIT_BRANCH" != "main" ]; then
+        SHORT_SHA=$(echo "$CI_COMMIT_SHA" | head -c 7)
+        BUILD_VERSION="${BUILD_VERSION}-canary.${SHORT_SHA}"
+      fi
+
+      npm version ${BUILD_VERSION} --git-tag-version=false
+  artifacts:
+    paths:
+      - dist/
+      - package.json
+
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_MESSAGE =~ /\[skip deploy\]/
+      when: never
+    - when: on_success
+  needs:
+    - build:devconsole
+    - test-and-build
+  script:
+    - |
+      npm config set -- //${PRIVATE_NPM_HOST}/:_authToken="${PRIVATE_NPM_PUBLISHER_TOKEN}"
+
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        npm publish --registry https://${PRIVATE_NPM_HOST}/
+
+        npm config set //registry.npmjs.org/:_authToken="${NPM_PUBLISH_TOKEN}"
+        npm publish --registry https://registry.npmjs.org/ --access public
+      else
+        npm publish --registry https://${PRIVATE_NPM_HOST}/ --tag canary
+      fi
+
+mirror:
+  stage: mirror
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  image:
+    name: alpine/git
+    entrypoint: ['']
+  script: |
+    export GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no"
+    mkdir ~/.ssh
+    echo $GITHUB_SSH_KEY_B64 | base64 -d > ~/.ssh/id_ed25519
+    chmod 600 ~/.ssh/id_ed25519
+    git remote add github git@github.com:zyno-io/ts-server-foundation.git
+    git push -u github HEAD:main --force

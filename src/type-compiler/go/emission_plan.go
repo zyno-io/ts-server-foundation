@@ -1,0 +1,205 @@
+package main
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	shimast "github.com/microsoft/typescript-go/shim/ast"
+	"github.com/samchon/ttsc/packages/ttsc/driver"
+)
+
+type emissionPlans map[string]*fileEmissionPlan
+
+type fileEmissionPlan struct {
+	calls    map[int]callEmissionPlan
+	classes  map[int]classEmissionPlan
+	aliases  *expressionTemplate
+	commonJS bool
+}
+
+type callEmissionPlan struct {
+	name             string
+	metadataArgIndex int
+	metadata         expressionTemplate
+}
+
+type classEmissionPlan struct {
+	name     string
+	metadata expressionTemplate
+}
+
+func buildEmissionPlans(reg *registry, program *driver.Program) (emissionPlans, error) {
+	plans := emissionPlans{}
+	for _, info := range reg.files {
+		if info == nil || info.file == nil || info.file.IsDeclarationFile {
+			continue
+		}
+		plan := &fileEmissionPlan{
+			calls:   map[int]callEmissionPlan{},
+			classes: map[int]classEmissionPlan{},
+		}
+		if program != nil && program.TSProgram != nil {
+			plan.commonJS = program.TSProgram.GetEmitModuleFormatOfFile(info.file).String() == "CommonJS"
+		}
+		for _, call := range info.calls {
+			if call.nodePos < 0 {
+				return nil, fmt.Errorf("%s:%d: metadata call %s could not be correlated to a CallExpression", info.file.FileName(), call.pos, call.name)
+			}
+			expr := cachedTypeExpr(info, reg, call.typeText, call.typeNode, call.pos, call.metadataText)
+			template, err := parseExpressionTemplate(expr)
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: metadata call %s: %w", info.file.FileName(), call.pos, call.name, err)
+			}
+			plan.calls[call.nodePos] = callEmissionPlan{
+				name:             call.name,
+				metadataArgIndex: call.metadataArgIndex,
+				metadata:         template,
+			}
+		}
+		classes := append([]*classInfo(nil), info.classes...)
+		sort.Slice(classes, func(i, j int) bool { return classes[i].pos < classes[j].pos })
+		for _, class := range classes {
+			if class.ambient {
+				continue
+			}
+			template, err := parseExpressionTemplate(classMetadata(info, reg, class))
+			if err != nil {
+				return nil, fmt.Errorf("%s:%d: class metadata for %s: %w", info.file.FileName(), class.pos, class.name, err)
+			}
+			plan.classes[class.pos] = classEmissionPlan{name: class.name, metadata: template}
+		}
+		if !hasAliasMetadataSourceDeclaration(info.file) {
+			if expr := aliasMetadataExpression(info, reg); expr != "" {
+				template, err := parseExpressionTemplate(expr)
+				if err != nil {
+					return nil, fmt.Errorf("%s: alias metadata: %w", info.file.FileName(), err)
+				}
+				plan.aliases = &template
+			}
+		}
+		if len(plan.calls) != 0 || len(plan.classes) != 0 || plan.aliases != nil {
+			plans[info.file.FileName()] = plan
+		}
+	}
+	return plans, nil
+}
+
+func aliasMetadataExpression(info *fileInfo, reg *registry) string {
+	names := exportedTypeAliasNames(info, reg, map[string]bool{})
+	if len(names) == 0 {
+		return ""
+	}
+	entries := []string{}
+	for _, name := range names {
+		if alias, ok := info.aliases[name]; ok {
+			if len(alias.params) == 0 {
+				if expr := cachedAliasTypeExpr(info, reg, alias); expr != "" && !metadataExprTooLarge(expr) {
+					entries = append(entries, quote(name)+": "+withTypeName(expr, name))
+				}
+			}
+			continue
+		}
+		if decl, ok := chooseInterface(info, name, 0); ok {
+			if expr := interfaceObjectLiteralExpr(info, reg, name, decl, &typeContext{seen: map[string]bool{}}); !metadataExprTooLarge(expr) {
+				entries = append(entries, quote(name)+": "+expr)
+			}
+			continue
+		}
+		if alias, owner, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok {
+			if len(alias.params) == 0 {
+				if expr := cachedAliasTypeExpr(owner, reg, alias); expr != "" && !metadataExprTooLarge(expr) {
+					entries = append(entries, quote(name)+": "+withTypeName(expr, name))
+				}
+			}
+			continue
+		}
+		if decl, owner, _, ok := resolveExportedInterfaceDecl(info, reg, name, map[string]bool{}); ok {
+			if expr := interfaceObjectLiteralExpr(owner, reg, name, decl, &typeContext{seen: map[string]bool{}}); !metadataExprTooLarge(expr) {
+				entries = append(entries, quote(name)+": "+expr)
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	return "{" + strings.Join(entries, ", ") + "}"
+}
+
+func cachedAliasTypeExpr(info *fileInfo, reg *registry, alias aliasInfo) string {
+	if alias.metadataTooLarge {
+		return ""
+	}
+	if strings.TrimSpace(alias.metadataText) != "" {
+		return alias.metadataText
+	}
+	return internalTypeExprAt(info, reg, alias.body, alias.pos)
+}
+
+func metadataExprTooLarge(expr string) bool {
+	return len(expr) > 1000000
+}
+
+func hasAliasMetadataSourceDeclaration(file *shimast.SourceFile) bool {
+	if file == nil || file.Statements == nil {
+		return false
+	}
+	for _, statement := range file.Statements.Nodes {
+		if statement == nil || statement.Kind != shimast.KindVariableStatement {
+			continue
+		}
+		if statement.ModifierFlags()&shimast.ModifierFlagsAmbient != 0 {
+			continue
+		}
+		list := statement.AsVariableStatement().DeclarationList
+		if list == nil {
+			continue
+		}
+		for _, declaration := range list.AsVariableDeclarationList().Declarations.Nodes {
+			if declaration != nil && declaration.Name() != nil && declaration.Name().Kind == shimast.KindIdentifier && declaration.Name().Text() == "__tsfTypeAliases" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exportedTypeAliasNames(info *fileInfo, reg *registry, seen map[string]bool) []string {
+	if seen[info.moduleKey] {
+		return nil
+	}
+	seen[info.moduleKey] = true
+	names := map[string]bool{}
+	for name, alias := range info.aliases {
+		if len(alias.params) == 0 {
+			names[name] = true
+		}
+	}
+	for name := range info.interfaces {
+		names[name] = true
+	}
+	for name := range info.reexports {
+		if alias, _, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok && len(alias.params) == 0 {
+			names[name] = true
+			continue
+		}
+		if _, _, _, ok := resolveExportedInterfaceDecl(info, reg, name, map[string]bool{}); ok {
+			names[name] = true
+		}
+	}
+	for _, ref := range info.exportStar {
+		target := reg.byPath[ref.source]
+		if target == nil {
+			continue
+		}
+		for _, name := range exportedTypeAliasNames(target, reg, seen) {
+			names[name] = true
+		}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}

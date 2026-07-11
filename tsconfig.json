@@ -1,0 +1,27 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "lib": ["ES2022"],
+        "module": "commonjs",
+        "rootDir": ".",
+        "outDir": "dist",
+        "declaration": true,
+        "declarationMap": true,
+        "sourceMap": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "forceConsistentCasingInFileNames": true,
+        "skipLibCheck": true,
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        "importHelpers": true,
+        "types": ["node"],
+        "plugins": [
+            {
+                "transform": "./src/type-compiler/index.cjs"
+            }
+        ]
+    },
+    "include": ["src/**/*.ts", "tests/**/*.ts", "types.d.ts"],
+    "reflection": true
+}
