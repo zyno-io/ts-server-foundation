@@ -424,7 +424,9 @@ describe('CLI', () => {
                 {
                     private: true,
                     packageManager: 'yarn@4.17.1',
-                    workspaces: ['packages/*']
+                    workspaces: ['packages/*'],
+                    tsf: { compiler: false },
+                    devDependencies: { '@zyno-io/ts-server-foundation': '*' }
                 },
                 null,
                 4
