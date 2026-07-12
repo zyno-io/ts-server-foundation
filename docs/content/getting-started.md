@@ -73,7 +73,7 @@ Reflected type metadata is required for constructor injection, route parameter m
         "types": ["node"],
         "plugins": [
             {
-                "transform": "./node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs"
+                "transform": "@zyno-io/ts-server-foundation/type-compiler"
             }
         ]
     },

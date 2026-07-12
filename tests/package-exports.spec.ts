@@ -8,12 +8,13 @@ import { describe, it } from 'node:test';
 const requireFromTest = createRequire(__filename);
 
 describe('package exports', () => {
-    it('exports only the root API and the OTel bootstrap', () => {
+    it('exports only the root API, type compiler, and OTel bootstrap', () => {
         const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
-            exports: Record<string, { types: string; import: string; require: string }>;
+            exports: Record<string, string | { types: string; import: string; require: string }>;
         };
 
-        assert.deepStrictEqual(Object.keys(pkg.exports), ['.', './otel']);
+        assert.deepStrictEqual(Object.keys(pkg.exports), ['.', './type-compiler', './otel']);
+        assert.equal(pkg.exports['./type-compiler'], './dist/src/type-compiler/index.cjs');
         assert.deepStrictEqual(pkg.exports['./otel'], {
             types: './dist/src/telemetry/otel/index.d.ts',
             import: './dist/src/telemetry/otel/index.js',
@@ -50,7 +51,12 @@ describe('package exports', () => {
         assert.equal(root.init, undefined);
     });
 
-    it('loads only the OTel bootstrap subpath outside the root export', () => {
+    it('loads the type compiler subpath as a plugin descriptor', () => {
+        const typeCompiler = requireFromTest('@zyno-io/ts-server-foundation/type-compiler');
+        assert.equal(typeof typeCompiler, 'function');
+    });
+
+    it('loads the OTel bootstrap subpath outside the root export', () => {
         const otel = requireFromTest('@zyno-io/ts-server-foundation/otel');
         assert.equal(typeof otel.init, 'function');
     });

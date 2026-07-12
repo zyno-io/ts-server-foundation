@@ -4,17 +4,17 @@ TSF ships application scaffolding, compiler setup, development orchestration, te
 
 ## Package Binaries
 
-| Binary | Description |
-| --- | --- |
-| `tsf` | Umbrella CLI for `create-app`, `test`, and `gen-proto`. |
-| `ts-server-foundation` | Alias for the umbrella CLI. |
-| `tsf-create-app` | Scaffold a new app from `template-app`. |
-| `tsf-dev` | Build/watch/run/test and application development workflows. |
-| `tsf-test` | Compile-output-aware Node test runner. |
-| `tsf-migrate` | Create, run, reset, and charset migration commands. |
-| `tsf-gen-proto` | Generate TypeScript protobuf codecs through `ts-proto`. |
-| `tsf-install` | Configure the supported TypeScript 7/`ttsc` compiler and TSF transform. |
-| `tsf-update` | Reserved update command; currently reports that no automatic updater is available. |
+| Binary                 | Description                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| `tsf`                  | Umbrella CLI for `create-app`, `test`, and `gen-proto`.                            |
+| `ts-server-foundation` | Alias for the umbrella CLI.                                                        |
+| `tsf-create-app`       | Scaffold a new app from `template-app`.                                            |
+| `tsf-dev`              | Build/watch/run/test and application development workflows.                        |
+| `tsf-test`             | Compile-output-aware Node test runner.                                             |
+| `tsf-migrate`          | Create, run, reset, and charset migration commands.                                |
+| `tsf-gen-proto`        | Generate TypeScript protobuf codecs through `ts-proto`.                            |
+| `tsf-install`          | Configure the supported TypeScript 7/`ttsc` compiler and TSF transform.            |
+| `tsf-update`           | Reserved update command; currently reports that no automatic updater is available. |
 
 ## Umbrella Command
 
@@ -56,17 +56,17 @@ tsf-dev <command> [options]
 
 All commands resolve the project root from the working directory. `-p <file>` and `--tsconfig <file>` select a TypeScript config where applicable.
 
-| Command | Behavior |
-| --- | --- |
-| `clean` | Removes `dist/`. |
-| `build [--watch]` | Ensures compiler setup, cleans when needed, and compiles with the supported `ttsc`. |
+| Command                                   | Behavior                                                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `clean`                                   | Removes `dist/`.                                                                                        |
+| `build [--watch]`                         | Ensures compiler setup, cleans when needed, and compiles with the supported `ttsc`.                     |
 | `run [--debug] [script] -- <app-command>` | Ensures a watch build, then starts Node with source maps, file watching, and the requested app command. |
-| `test [--debug]` | Builds the test config and delegates to `tsf-test`. |
-| `migrate [--debug]` | Builds, then invokes the package entrypoint with `migrate:run`. |
-| `migrate:create [--debug]` | Builds, then delegates to `tsf-migrate create`. |
-| `migrate:reset [--debug]` | Builds, then delegates to `tsf-migrate reset`. |
-| `migrate:charset [--debug]` | Builds, then delegates to `tsf-migrate charset`. |
-| `openapi:generate` | Builds, then invokes the package entrypoint with `openapi:generate`. |
+| `test [--debug]`                          | Builds the test config and delegates to `tsf-test`.                                                     |
+| `migrate [--debug]`                       | Builds, then invokes the package entrypoint with `migrate:run`.                                         |
+| `migrate:create [--debug]`                | Builds, then delegates to `tsf-migrate create`.                                                         |
+| `migrate:reset [--debug]`                 | Builds, then delegates to `tsf-migrate reset`.                                                          |
+| `migrate:charset [--debug]`               | Builds, then delegates to `tsf-migrate charset`.                                                        |
+| `openapi:generate`                        | Builds, then invokes the package entrypoint with `openapi:generate`.                                    |
 
 ### Build And Watch
 
@@ -119,12 +119,12 @@ If a `tests/shared/globalSetup.ts` or `src/tests/shared/globalSetup.ts` source f
 
 When MySQL test configuration is available and savepoints are allowed, the runner starts a shared MySQL session manager. Its pool size follows `--test-concurrency` or defaults to available parallelism minus one. Control it with:
 
-| Environment key | Behavior |
-| --- | --- |
-| `TSF_TEST_MYSQL_SESSION_MANAGER=0` | Disable the shared manager. |
+| Environment key                    | Behavior                                                               |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| `TSF_TEST_MYSQL_SESSION_MANAGER=0` | Disable the shared manager.                                            |
 | `TSF_TEST_MYSQL_SESSION_MANAGER=1` | Force the manager on; missing MySQL configuration still fails startup. |
-| `TSF_TEST_ALLOW_SAVEPOINTS=0` | Disable savepoint-backed facade reuse globally. |
-| `TEST_RUN_TS=<value>` | Reuse an explicit run identifier for generated test database names. |
+| `TSF_TEST_ALLOW_SAVEPOINTS=0`      | Disable savepoint-backed facade reuse globally.                        |
+| `TEST_RUN_TS=<value>`              | Reuse an explicit run identifier for generated test database names.    |
 
 Database readiness is checked only by database-enabled facades, not as a runner-wide preflight.
 
@@ -139,23 +139,23 @@ tsf-migrate reset [options]
 tsf-migrate charset [charset collation] [options]
 ```
 
-| Command | Behavior |
-| --- | --- |
-| `create` | Diffs reflected entity schemas against the live database and writes a raw-SQL migration when changes exist. `create:raw` is an alias. |
-| `run` | Loads compiled migrations and runs migrations not recorded in `_migrations`. |
-| `reset` | Removes source migration files and creates one base migration from registered entities. |
-| `charset` | Standardizes the MySQL database and table charset/collation; PostgreSQL reports a skipped operation. |
+| Command   | Behavior                                                                                                                              |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `create`  | Diffs reflected entity schemas against the live database and writes a raw-SQL migration when changes exist. `create:raw` is an alias. |
+| `run`     | Loads compiled migrations and runs migrations not recorded in `_migrations`.                                                          |
+| `reset`   | Removes source migration files and creates one base migration from registered entities.                                               |
+| `charset` | Standardizes the MySQL database and table charset/collation; PostgreSQL reports a skipped operation.                                  |
 
 Options:
 
-| Option | Description |
-| --- | --- |
-| `--app <path>` | Compiled app module. Defaults to the emitted path for `src/app.ts`. |
-| `--description <text>`, `-d <text>` | Migration description. Defaults to `auto_migration`. |
-| `--migrations-dir <path>` | Source migration directory. Defaults to `src/migrations`. |
-| `--pg-schema <schema>` | PostgreSQL schema used for diff/reset. Defaults to the database reader's schema. |
-| `--table <name>` | Limits a create diff to one table. Repeatable. |
-| `--tables <a,b>` | Limits a create diff to a comma-separated table list. |
+| Option                              | Description                                                                      |
+| ----------------------------------- | -------------------------------------------------------------------------------- |
+| `--app <path>`                      | Compiled app module. Defaults to the emitted path for `src/app.ts`.              |
+| `--description <text>`, `-d <text>` | Migration description. Defaults to `auto_migration`.                             |
+| `--migrations-dir <path>`           | Source migration directory. Defaults to `src/migrations`.                        |
+| `--pg-schema <schema>`              | PostgreSQL schema used for diff/reset. Defaults to the database reader's schema. |
+| `--table <name>`                    | Limits a create diff to one table. Repeatable.                                   |
+| `--tables <a,b>`                    | Limits a create diff to a comma-separated table list.                            |
 
 Option values may also use `--name=value`. Table names are de-duplicated; empty values and unknown options fail rather than being ignored.
 
@@ -185,11 +185,11 @@ tsf-gen-proto resources/proto src/generated/proto --only-types
 
 The input may be one `.proto` file or a directory. Directory mode generates every direct `.proto` child and does not recurse. The output directory is created when necessary.
 
-| Flag | Effect |
-| --- | --- |
-| `--only-types` | Passes `onlyTypes=true` to `ts-proto`. |
-| `--use-date` | Uses `Date` for `google.protobuf.Timestamp`; the default is `useDate=false`. |
-| `--use-map-type` | Uses ES `Map` for protobuf maps; the default is `useMapType=false`. |
+| Flag             | Effect                                                                       |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `--only-types`   | Passes `onlyTypes=true` to `ts-proto`.                                       |
+| `--use-date`     | Uses `Date` for `google.protobuf.Timestamp`; the default is `useDate=false`. |
+| `--use-map-type` | Uses ES `Map` for protobuf maps; the default is `useMapType=false`.          |
 
 Generation always enables `esModuleInterop` and disables generated service clients because SRPC uses the message codecs directly. The command uses `PROTOC` when set, then the package's `protoc` binary, then a `protoc` executable on `PATH`. It resolves `ts-proto` from the app or TSF package.
 
@@ -199,11 +199,15 @@ Generation always enables `esModuleInterop` and disables generated service clien
 
 - adds itself to `postinstall` without replacing an existing postinstall command
 - moves the supported `typescript` and `ttsc` versions into `devDependencies`
-- keeps TSF/compiler versions aligned in other packages in the same workspace when those dependencies are present
+- keeps TSF/compiler versions aligned in every workspace package that directly depends on TSF
 - finds `tsconfig*.json` files outside generated/dependency directories
 - adds the TSF transform to `compilerOptions.plugins`
 - sets top-level `reflection: true`
 - avoids duplicating the plugin in configs that extend an already configured local base config
+
+Workspace packages without a direct TSF dependency keep their own compiler version and TypeScript configuration. Set `"tsf": { "compiler": true }` in a package to opt in; the installer adds TSF as a dev dependency so the compiler export remains resolvable. Set it to `false` to opt out despite a direct TSF dependency.
+
+When `tsf-install` runs from a workspace-root `postinstall`, declare TSF as a root dev dependency so the binary is available without relying on hoisting, and set `"tsf": { "compiler": false }` at the root if it only orchestrates child backends. The command still discovers and updates every compiler-enabled workspace before running one package-manager install from the root.
 
 When compiler dependencies change outside a package-manager lifecycle, it detects Yarn, npm, pnpm, or Bun and refreshes the install/lockfile. During `postinstall`, it reports that another install is needed instead of recursively starting the package manager.
 

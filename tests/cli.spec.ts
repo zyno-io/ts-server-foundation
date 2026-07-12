@@ -144,6 +144,10 @@ describe('CLI', () => {
         assert.equal(existsSync(join(target, '.yarn', 'patches')), false);
         assert.equal(existsSync(join(target, 'src', 'controllers', 'Example.controller.ts')), true);
         assert.match(readFileSync(join(target, '.env.development'), 'utf8'), /MYSQL_DATABASE=example_api/);
+        const tsconfig = JSON.parse(readFileSync(join(target, 'tsconfig.json'), 'utf8')) as {
+            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+        };
+        assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
     });
 
     it('installs baseline compiler setup for Yarn projects', () => {
@@ -199,10 +203,7 @@ describe('CLI', () => {
             compilerOptions?: { plugins?: Array<{ transform?: string }> };
         };
         assert.equal(tsconfig.reflection, true);
-        assert.equal(
-            tsconfig.compilerOptions?.plugins?.[0]?.transform,
-            './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs'
-        );
+        assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
     });
 
     it('preserves an existing postinstall script and installs itself only once', () => {
@@ -257,7 +258,9 @@ describe('CLI', () => {
                 {
                     private: true,
                     packageManager: 'yarn@4.17.1',
-                    workspaces: ['packages/*']
+                    workspaces: ['packages/*'],
+                    tsf: { compiler: false },
+                    devDependencies: { '@zyno-io/ts-server-foundation': '*' }
                 },
                 null,
                 4
@@ -297,6 +300,7 @@ describe('CLI', () => {
             )
         );
         writeFileSync(join(workspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+        writeFileSync(join(siblingWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
         const yarnPath = join(binDir, 'yarn');
         writeFileSync(
             yarnPath,
@@ -327,6 +331,12 @@ describe('CLI', () => {
         assert.equal(siblingPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
         assert.equal(siblingPkg.devDependencies?.ttsc, expectedTtscVersion);
         assert.equal(siblingPkg.devDependencies?.typescript, expectedTypescriptVersion);
+        const siblingTsconfig = JSON.parse(readFileSync(join(siblingWorkspace, 'tsconfig.json'), 'utf8')) as {
+            reflection?: boolean;
+            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+        };
+        assert.equal(siblingTsconfig.reflection, true);
+        assert.equal(siblingTsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
         assert.equal(existsSync(join(root, '.yarn', 'patches')), false);
         assert.equal(existsSync(join(workspace, '.yarn', 'patches')), false);
     });
@@ -398,7 +408,7 @@ describe('CLI', () => {
         assert.equal(existsSync(packageJsonAtInstallPath), false);
     });
 
-    it('updates framework and compiler versions wherever they are declared in workspace packages', () => {
+    it('updates TSF compiler workspaces without changing frontend or CLI compiler versions', () => {
         const root = tempDir();
         const ttscWorkspace = join(root, 'packages', 'ttsc');
         const typescriptWorkspace = join(root, 'packages', 'typescript');
@@ -414,12 +424,7 @@ describe('CLI', () => {
                 {
                     private: true,
                     packageManager: 'yarn@4.17.1',
-                    workspaces: ['packages/*'],
-                    devDependencies: {
-                        '@zyno-io/ts-server-foundation': '*',
-                        ttsc: '^0.1',
-                        typescript: '~5.9'
-                    }
+                    workspaces: ['packages/*']
                 },
                 null,
                 4
@@ -427,10 +432,13 @@ describe('CLI', () => {
         );
         writeFileSync(join(root, '.yarnrc.yml'), 'nodeLinker: node-modules\n');
         writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
-        writeFileSync(join(ttscWorkspace, 'package.json'), JSON.stringify({ name: '@fixture/ttsc', devDependencies: { ttsc: '^0.1' } }, null, 4));
+        writeFileSync(
+            join(ttscWorkspace, 'package.json'),
+            JSON.stringify({ name: '@fixture/cli', devDependencies: { ttsc: '^0.1', typescript: '7.0.2' } }, null, 4)
+        );
         writeFileSync(
             join(typescriptWorkspace, 'package.json'),
-            JSON.stringify({ name: '@fixture/typescript', dependencies: { typescript: '~5.9' } }, null, 4)
+            JSON.stringify({ name: '@fixture/ui', dependencies: { typescript: '~6.0.3' } }, null, 4)
         );
         writeFileSync(
             join(frameworkWorkspace, 'package.json'),
@@ -440,6 +448,9 @@ describe('CLI', () => {
             join(unrelatedWorkspace, 'package.json'),
             JSON.stringify({ name: '@fixture/unrelated', devDependencies: { eslint: '*' } }, null, 4)
         );
+        for (const workspace of [ttscWorkspace, typescriptWorkspace, frameworkWorkspace, unrelatedWorkspace]) {
+            writeFileSync(join(workspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+        }
 
         const result = runCli('tsf-install.js', ['--no-install'], root);
 
@@ -457,18 +468,77 @@ describe('CLI', () => {
         const unrelatedPkg = JSON.parse(readFileSync(join(unrelatedWorkspace, 'package.json'), 'utf8')) as {
             devDependencies?: Record<string, string>;
         };
-        assert.equal(rootPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
-        assert.equal(rootPkg.devDependencies?.ttsc, expectedTtscVersion);
-        assert.equal(rootPkg.devDependencies?.typescript, expectedTypescriptVersion);
-        assert.equal(ttscPkg.devDependencies?.ttsc, expectedTtscVersion);
-        assert.equal(ttscPkg.devDependencies?.typescript, undefined);
-        assert.equal(typescriptPkg.dependencies?.typescript, expectedTypescriptVersion);
+        assert.equal(rootPkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
+        assert.equal(rootPkg.devDependencies?.ttsc, undefined);
+        assert.equal(rootPkg.devDependencies?.typescript, undefined);
+        assert.equal(ttscPkg.devDependencies?.ttsc, '^0.1');
+        assert.equal(ttscPkg.devDependencies?.typescript, '7.0.2');
+        assert.equal(typescriptPkg.dependencies?.typescript, '~6.0.3');
         assert.equal(typescriptPkg.dependencies?.ttsc, undefined);
         assert.equal(frameworkPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
-        assert.equal(frameworkPkg.devDependencies?.ttsc, undefined);
+        assert.equal(frameworkPkg.devDependencies?.ttsc, expectedTtscVersion);
+        assert.equal(frameworkPkg.devDependencies?.typescript, expectedTypescriptVersion);
         assert.equal(unrelatedPkg.devDependencies?.ttsc, undefined);
         assert.equal(unrelatedPkg.devDependencies?.typescript, undefined);
         assert.equal(unrelatedPkg.devDependencies?.['@zyno-io/ts-server-foundation'], undefined);
+        assert.equal(JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8')).reflection, undefined);
+        assert.equal(JSON.parse(readFileSync(join(frameworkWorkspace, 'tsconfig.json'), 'utf8')).reflection, true);
+        assert.equal(JSON.parse(readFileSync(join(ttscWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
+        assert.equal(JSON.parse(readFileSync(join(typescriptWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
+        assert.equal(JSON.parse(readFileSync(join(unrelatedWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
+    });
+
+    it('honors explicit TSF compiler workspace overrides', () => {
+        const root = tempDir();
+        const includedWorkspace = join(root, 'packages', 'included');
+        const excludedWorkspace = join(root, 'packages', 'excluded');
+        mkdirSync(includedWorkspace, { recursive: true });
+        mkdirSync(excludedWorkspace, { recursive: true });
+        writeFileSync(
+            join(root, 'package.json'),
+            JSON.stringify({ private: true, packageManager: 'yarn@4.17.1', workspaces: ['packages/*'] }, null, 4)
+        );
+        writeFileSync(
+            join(includedWorkspace, 'package.json'),
+            JSON.stringify({ name: '@fixture/included', tsf: { compiler: true }, devDependencies: { typescript: '~5.9' } }, null, 4)
+        );
+        writeFileSync(
+            join(excludedWorkspace, 'package.json'),
+            JSON.stringify(
+                {
+                    name: '@fixture/excluded',
+                    tsf: { compiler: false },
+                    devDependencies: { '@zyno-io/ts-server-foundation': '*', typescript: '~6.0.3' }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(join(includedWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+        writeFileSync(join(excludedWorkspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+
+        const result = runCli('tsf-install.js', ['--no-install'], root);
+
+        assert.equal(result.status, 0, result.stderr);
+        const includedPkg = JSON.parse(readFileSync(join(includedWorkspace, 'package.json'), 'utf8')) as {
+            devDependencies?: Record<string, string>;
+        };
+        const excludedPkg = JSON.parse(readFileSync(join(excludedWorkspace, 'package.json'), 'utf8')) as {
+            devDependencies?: Record<string, string>;
+        };
+        assert.equal(includedPkg.devDependencies?.ttsc, expectedTtscVersion);
+        assert.equal(includedPkg.devDependencies?.typescript, expectedTypescriptVersion);
+        assert.equal(includedPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(excludedPkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
+        assert.equal(excludedPkg.devDependencies?.typescript, '~6.0.3');
+        assert.equal(excludedPkg.devDependencies?.ttsc, undefined);
+        const includedTsconfig = JSON.parse(readFileSync(join(includedWorkspace, 'tsconfig.json'), 'utf8')) as {
+            reflection?: boolean;
+            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+        };
+        assert.equal(includedTsconfig.reflection, true);
+        assert.equal(includedTsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
+        assert.equal(JSON.parse(readFileSync(join(excludedWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
     });
 
     it('installs compiler plugins shallowest-first and skips configs extending patched configs', () => {
@@ -487,7 +557,19 @@ describe('CLI', () => {
                 4
             )
         );
-        writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+        writeFileSync(
+            join(dir, 'tsconfig.json'),
+            JSON.stringify(
+                {
+                    compilerOptions: {
+                        target: 'ES2022',
+                        plugins: [{ transform: './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs' }]
+                    }
+                },
+                null,
+                4
+            )
+        );
         writeFileSync(join(dir, 'tsconfig.test.json'), JSON.stringify({ extends: './tsconfig.json' }, null, 4));
 
         mkdirSync(join(dir, 'aaa-child'), { recursive: true });
@@ -508,9 +590,7 @@ describe('CLI', () => {
             };
             return (
                 tsconfig.reflection === true &&
-                tsconfig.compilerOptions?.plugins?.some(
-                    plugin => plugin.transform === './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs'
-                ) === true
+                tsconfig.compilerOptions?.plugins?.some(plugin => plugin.transform === '@zyno-io/ts-server-foundation/type-compiler') === true
             );
         };
 

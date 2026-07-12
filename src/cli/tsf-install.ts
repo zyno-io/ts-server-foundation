@@ -9,13 +9,15 @@ import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from '
 const PACKAGE_NAME = '@zyno-io/ts-server-foundation';
 const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
-const PACKAGE_TYPE_COMPILER_PLUGIN = './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs';
-const TYPE_COMPILER_PLUGIN_RELATIVE_PATH = join('dist', 'src', 'type-compiler', 'index.cjs');
+const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
 
 interface PackageJson {
     version?: string;
     packageManager?: string;
     workspaces?: string[] | { packages?: string[] };
+    tsf?: {
+        compiler?: boolean;
+    };
     scripts?: Record<string, string>;
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
@@ -42,6 +44,12 @@ interface BaselineVersions {
     typescript: string;
 }
 
+interface WorkspacePackage {
+    dir: string;
+    packageJsonPath: string;
+    pkg: PackageJson;
+}
+
 interface TsconfigJson {
     extends?: unknown;
     compilerOptions?: {
@@ -64,21 +72,21 @@ export function install(options: InstallOptions = {}): number {
     const packageManager = detectPackageManager(workspaceRoot, workspacePkg);
     const baselineVersions = readBaselineVersions();
     const postinstallChanged = ensurePostinstallScript(pkg);
+    const changedPackages = new Map<string, PackageJson>();
     let compilerSetupChanged = false;
+    let tsconfigChanged = false;
 
-    compilerSetupChanged = ensureDevDependency(pkg, 'ttsc', baselineVersions.ttsc) || compilerSetupChanged;
-    compilerSetupChanged = ensureDevDependency(pkg, 'typescript', baselineVersions.typescript) || compilerSetupChanged;
-    compilerSetupChanged = setDependencyVersionIfPresent(pkg, PACKAGE_NAME, baselineVersions.framework) || compilerSetupChanged;
-    compilerSetupChanged =
-        ensureWorkspaceDependencyVersions(workspaceRoot, packageJsonPath, {
-            [PACKAGE_NAME]: baselineVersions.framework,
-            ttsc: baselineVersions.ttsc,
-            typescript: baselineVersions.typescript
-        }) || compilerSetupChanged;
+    if (postinstallChanged) changedPackages.set(resolve(packageJsonPath), pkg);
+    for (const workspace of findCompilerWorkspaces(workspaceRoot, workspacePkg, packageJsonPath, pkg)) {
+        const packageChanged = ensureCompilerSetup(workspace.pkg, baselineVersions);
+        if (packageChanged) {
+            changedPackages.set(workspace.packageJsonPath, workspace.pkg);
+            compilerSetupChanged = true;
+        }
+        tsconfigChanged = ensureTsconfigCompilerPlugins(workspace.dir) || tsconfigChanged;
+    }
 
-    const tsconfigChanged = ensureTsconfigCompilerPlugins(projectDir, pkg);
-
-    if (postinstallChanged || compilerSetupChanged) writePackageJson(packageJsonPath, pkg);
+    for (const [changedPackageJsonPath, changedPkg] of changedPackages) writePackageJson(changedPackageJsonPath, changedPkg);
     if (postinstallChanged) console.log('tsf-install: updated postinstall script');
     if (compilerSetupChanged) console.log('tsf-install: updated TypeScript compiler setup');
     if (tsconfigChanged) console.log('tsf-install: updated tsconfig compiler plugin');
@@ -88,6 +96,17 @@ export function install(options: InstallOptions = {}): number {
     }
 
     return 0;
+}
+
+function ensureCompilerSetup(pkg: PackageJson, versions: BaselineVersions): boolean {
+    let changed = false;
+    changed = ensureDevDependency(pkg, 'ttsc', versions.ttsc) || changed;
+    changed = ensureDevDependency(pkg, 'typescript', versions.typescript) || changed;
+    changed =
+        (pkg.tsf?.compiler === true && !hasFoundationPackageDependency(pkg)
+            ? ensureDevDependency(pkg, PACKAGE_NAME, versions.framework)
+            : setDependencyVersionIfPresent(pkg, PACKAGE_NAME, versions.framework)) || changed;
+    return changed;
 }
 
 function findInstallProjectRoot(): string {
@@ -152,34 +171,40 @@ function ensureDevDependency(pkg: PackageJson, name: string, version: string): b
     return changed;
 }
 
-function ensureWorkspaceDependencyVersions(workspaceRoot: string, projectPackageJsonPath: string, versions: Record<string, string>): boolean {
-    const workspacePackageJson = readPackageJsonIfExists(join(workspaceRoot, 'package.json'));
-    if (!workspacePackageJson) return false;
+function findCompilerWorkspaces(
+    workspaceRoot: string,
+    workspaceRootPkg: PackageJson,
+    projectPackageJsonPath: string,
+    projectPkg: PackageJson
+): WorkspacePackage[] {
+    const resolvedProjectPackageJsonPath = resolve(projectPackageJsonPath);
+    const rootPackageJsonPath = resolve(workspaceRoot, 'package.json');
+    const packages = new Map<string, WorkspacePackage>();
+    packages.set(rootPackageJsonPath, {
+        dir: resolve(workspaceRoot),
+        packageJsonPath: rootPackageJsonPath,
+        pkg: rootPackageJsonPath === resolvedProjectPackageJsonPath ? projectPkg : workspaceRootPkg
+    });
 
-    const workspaces = getWorkspacePatterns(workspacePackageJson);
-    if (!workspaces?.length) return false;
+    const workspaces = getWorkspacePatterns(workspaceRootPkg);
+    if (!workspaces?.length) return projectPkg.tsf?.compiler === false ? [] : [...packages.values()];
 
     const excludedPaths = new Set(
         workspaces.filter(pattern => pattern.startsWith('!')).flatMap(pattern => globWorkspacePackageJsonPaths(workspaceRoot, pattern.slice(1)))
     );
-    let changed = false;
-
     for (const packageJsonPath of workspaces
         .filter(pattern => !pattern.startsWith('!'))
-        .flatMap(pattern => globWorkspacePackageJsonPaths(workspaceRoot, pattern))) {
-        if (packageJsonPath === resolve(projectPackageJsonPath) || excludedPaths.has(packageJsonPath)) continue;
-
-        const workspacePkg = readPackageJson(packageJsonPath);
-        let packageChanged = false;
-        for (const [name, version] of Object.entries(versions)) {
-            packageChanged = setDependencyVersionIfPresent(workspacePkg, name, version) || packageChanged;
-        }
-        if (!packageChanged) continue;
-        writePackageJson(packageJsonPath, workspacePkg);
-        changed = true;
+        .flatMap(pattern => globWorkspacePackageJsonPaths(workspaceRoot, pattern))
+        .sort()) {
+        if (excludedPaths.has(packageJsonPath)) continue;
+        packages.set(packageJsonPath, {
+            dir: dirname(packageJsonPath),
+            packageJsonPath,
+            pkg: packageJsonPath === resolvedProjectPackageJsonPath ? projectPkg : readPackageJson(packageJsonPath)
+        });
     }
 
-    return changed;
+    return [...packages.values()].filter(workspace => usesTsfCompiler(workspace.pkg));
 }
 
 function findWorkspaceRoot(projectDir: string): string | undefined {
@@ -216,7 +241,7 @@ function setDependencyVersionIfPresent(pkg: PackageJson, name: string, version: 
     return changed;
 }
 
-function ensureTsconfigCompilerPlugins(projectDir: string, pkg: PackageJson): boolean {
+function ensureTsconfigCompilerPlugins(projectDir: string): boolean {
     const patchedTsconfigs = new Set<string>();
     let changed = false;
 
@@ -224,7 +249,7 @@ function ensureTsconfigCompilerPlugins(projectDir: string, pkg: PackageJson): bo
         const tsconfig = readTsconfigJson(tsconfigPath);
         if (extendsPatchedTsconfig(tsconfigPath, tsconfig, patchedTsconfigs)) continue;
 
-        const result = ensureTsconfigCompilerPlugin(projectDir, pkg, tsconfigPath, tsconfig);
+        const result = ensureTsconfigCompilerPlugin(tsconfigPath, tsconfig);
         if (result.hasCompilerSetup) patchedTsconfigs.add(tsconfigPath);
         changed = result.changed || changed;
     }
@@ -232,12 +257,7 @@ function ensureTsconfigCompilerPlugins(projectDir: string, pkg: PackageJson): bo
     return changed;
 }
 
-function ensureTsconfigCompilerPlugin(
-    projectDir: string,
-    pkg: PackageJson,
-    tsconfigPath: string,
-    tsconfig: TsconfigJson
-): { changed: boolean; hasCompilerSetup: boolean } {
+function ensureTsconfigCompilerPlugin(tsconfigPath: string, tsconfig: TsconfigJson): { changed: boolean; hasCompilerSetup: boolean } {
     let changed = false;
     tsconfig.compilerOptions ??= {};
     const plugins = Array.isArray(tsconfig.compilerOptions.plugins) ? tsconfig.compilerOptions.plugins : [];
@@ -246,13 +266,12 @@ function ensureTsconfigCompilerPlugin(
         changed = true;
     }
 
-    const pluginPath = preferredTypeCompilerPlugin(projectDir, pkg);
     const existingPlugin = plugins.find(isTypeCompilerPlugin) as { transform?: unknown } | undefined;
     if (!existingPlugin) {
-        plugins.push({ transform: pluginPath });
+        plugins.push({ transform: PACKAGE_TYPE_COMPILER_PLUGIN });
         changed = true;
-    } else if (existingPlugin.transform !== pluginPath) {
-        existingPlugin.transform = pluginPath;
+    } else if (existingPlugin.transform !== PACKAGE_TYPE_COMPILER_PLUGIN) {
+        existingPlugin.transform = PACKAGE_TYPE_COMPILER_PLUGIN;
         changed = true;
     }
 
@@ -270,6 +289,7 @@ function findTsconfigPaths(projectDir: string): string[] {
     const paths: string[] = [];
 
     const visit = (dir: string) => {
+        if (dir !== root && existsSync(join(dir, 'package.json'))) return;
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
             if (entry.isDirectory()) {
                 if (!SKIPPED_TSCONFIG_DIRS.has(entry.name)) visit(join(dir, entry.name));
@@ -355,19 +375,16 @@ function isTypeCompilerPlugin(plugin: unknown): boolean {
     return normalized.endsWith('/dist/src/type-compiler/index.cjs') || normalized === PACKAGE_TYPE_COMPILER_PLUGIN;
 }
 
-function preferredTypeCompilerPlugin(projectDir: string, pkg: PackageJson): string {
-    if (hasFoundationPackageDependency(pkg) || existsSync(join(projectDir, 'node_modules', PACKAGE_NAME, TYPE_COMPILER_PLUGIN_RELATIVE_PATH))) {
-        return PACKAGE_TYPE_COMPILER_PLUGIN;
-    }
-    return join(findPackageRoot(), TYPE_COMPILER_PLUGIN_RELATIVE_PATH);
-}
-
 function hasFoundationPackageDependency(pkg: PackageJson): boolean {
     return (
         pkg.dependencies?.[PACKAGE_NAME] !== undefined ||
         pkg.devDependencies?.[PACKAGE_NAME] !== undefined ||
         pkg.peerDependencies?.[PACKAGE_NAME] !== undefined
     );
+}
+
+function usesTsfCompiler(pkg: PackageJson): boolean {
+    return pkg.tsf?.compiler ?? hasFoundationPackageDependency(pkg);
 }
 
 function parseJsonC(contents: string): unknown {
