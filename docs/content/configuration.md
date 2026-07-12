@@ -113,24 +113,25 @@ Config loading reads from `Env` without deleting consumed keys from `process.env
 
 ### Redis And Workers
 
-| Variable              | Type                 | Default                 |
-| --------------------- | -------------------- | ----------------------- |
-| `REDIS_SENTINEL_HOST` | `string`             | unset                   |
-| `REDIS_SENTINEL_PORT` | `number`             | unset                   |
-| `REDIS_SENTINEL_NAME` | `string`             | unset                   |
-| `REDIS_HOST`          | `string`             | unset                   |
-| `REDIS_PORT`          | `number`             | unset                   |
-| `REDIS_PREFIX`        | `string`             | package name            |
-| `CACHE_REDIS_*`       | `string`/`number`    | falls back to `REDIS_*` |
-| `MUTEX_REDIS_*`       | `string`/`number`    | falls back to `REDIS_*` |
-| `BROADCAST_REDIS_*`   | `string`/`number`    | falls back to `REDIS_*` |
-| `MESH_REDIS_*`        | `string`/`number`    | falls back to `REDIS_*` |
-| `BULL_REDIS_*`        | `string`/`number`    | falls back to `REDIS_*` |
-| `BULL_QUEUE`          | `string`             | `default`               |
-| `MUTEX_MODE`          | `'local' \| 'redis'` | `local`                 |
-| `ENABLE_JOB_RUNNER`   | `boolean`            | unset                   |
-| `TEST_KEEP_DB`        | `string`             | unset                   |
-| `TEST_RUN_TS`         | `string`             | unset                   |
+| Variable                           | Type                 | Default                 |
+| ---------------------------------- | -------------------- | ----------------------- |
+| `REDIS_SENTINEL_HOST`              | `string`             | unset                   |
+| `REDIS_SENTINEL_PORT`              | `number`             | unset                   |
+| `REDIS_SENTINEL_NAME`              | `string`             | unset                   |
+| `REDIS_HOST`                       | `string`             | unset                   |
+| `REDIS_PORT`                       | `number`             | unset                   |
+| `REDIS_PREFIX`                     | `string`             | package name            |
+| `REDIS_UNAVAILABLE_ALERT_AFTER_MS` | `number`             | `60000`                 |
+| `CACHE_REDIS_*`                    | `string`/`number`    | falls back to `REDIS_*` |
+| `MUTEX_REDIS_*`                    | `string`/`number`    | falls back to `REDIS_*` |
+| `BROADCAST_REDIS_*`                | `string`/`number`    | falls back to `REDIS_*` |
+| `MESH_REDIS_*`                     | `string`/`number`    | falls back to `REDIS_*` |
+| `BULL_REDIS_*`                     | `string`/`number`    | falls back to `REDIS_*` |
+| `BULL_QUEUE`                       | `string`             | `default`               |
+| `MUTEX_MODE`                       | `'local' \| 'redis'` | `local`                 |
+| `ENABLE_JOB_RUNNER`                | `boolean`            | unset                   |
+| `TEST_KEEP_DB`                     | `string`             | unset                   |
+| `TEST_RUN_TS`                      | `string`             | unset                   |
 
 ### Observability
 

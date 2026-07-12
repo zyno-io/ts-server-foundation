@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { access, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +13,7 @@ import {
     Cache,
     chunk,
     createApp,
+    createAvailabilityMonitor,
     createSemaphore,
     createRedisOptions,
     extractDate,
@@ -26,6 +28,7 @@ import {
     getPackageVersion,
     isValidEmail,
     MutexAcquisitionError,
+    monitorRedisAvailability,
     objectEntries,
     objectKeys,
     patchObject,
@@ -253,7 +256,9 @@ describe('helper utilities', () => {
         process.env.CACHE_REDIS_PORT = '6380';
         process.env.CACHE_REDIS_PREFIX = 'cache-prefix';
         process.env.MUTEX_REDIS_HOST = 'redis-mutex';
-        process.env.BROADCAST_REDIS_HOST = 'redis-broadcast';
+        process.env.BROADCAST_REDIS_SENTINEL_HOST = 'redis-broadcast-sentinel';
+        process.env.BROADCAST_REDIS_SENTINEL_PORT = '26380';
+        process.env.BROADCAST_REDIS_SENTINEL_NAME = 'broadcast-master';
         process.env.MESH_REDIS_HOST = 'redis-mesh';
         process.env.BULL_REDIS_HOST = 'redis-bull';
         process.env.BULL_REDIS_PREFIX = 'bull-prefix';
@@ -274,10 +279,62 @@ describe('helper utilities', () => {
         assert.equal(cacheRedis.prefix, 'cache-prefix');
         assert.equal(mutexRedis.options.host, 'redis-mutex');
         assert.equal(mutexRedis.prefix, 'default-prefix');
-        assert.equal(broadcastRedis.options.host, 'redis-broadcast');
+        assert.deepStrictEqual(broadcastRedis.options.sentinels, [{ host: 'redis-broadcast-sentinel', port: 26380 }]);
+        assert.equal(broadcastRedis.options.name, 'broadcast-master');
+        assert.equal(broadcastRedis.options.failoverDetector, true);
+        assert.equal(broadcastRedis.options.sentinelMaxConnections, 1);
+        assert.equal(broadcastRedis.options.reconnectOnError?.(new Error('READONLY replica')), 2);
+        assert.equal(broadcastRedis.options.reconnectOnError?.(new Error('ERR unrelated')), false);
         assert.equal(meshRedis.options.host, 'redis-mesh');
         assert.equal(bullRedis.options.host, 'redis-bull');
         assert.equal(bullRedis.prefix, 'bull-prefix');
+    });
+
+    it('delays and deduplicates Redis unavailable errors until the connection recovers', () => {
+        const client = new EventEmitter();
+        const entries: Array<{ level: 'info' | 'warning' | 'error'; messages: unknown[] }> = [];
+        const logger = {
+            info: (...messages: unknown[]) => entries.push({ level: 'info', messages }),
+            warning: (...messages: unknown[]) => entries.push({ level: 'warning', messages }),
+            error: (...messages: unknown[]) => entries.push({ level: 'error', messages })
+        };
+        const monitor = monitorRedisAvailability(client, logger, { alertAfterMs: 60_000 });
+
+        client.emit('error', new Error('sentinel unavailable'));
+        client.emit('error', new Error('still unavailable'));
+        client.emit('reconnecting');
+        client.emit('ready');
+
+        assert.equal(entries.filter(entry => entry.level === 'warning').length, 1);
+        assert.equal(entries.filter(entry => entry.level === 'error').length, 0);
+        assert.equal(entries.filter(entry => entry.level === 'info').length, 1);
+        monitor.stop();
+        monitor.stop();
+        assert.equal(client.listenerCount('error'), 0);
+        assert.equal(client.listenerCount('reconnecting'), 0);
+        assert.equal(client.listenerCount('ready'), 0);
+    });
+
+    it('reports one availability error per sustained outage and rearms after recovery', () => {
+        const entries: Array<{ level: 'info' | 'warning' | 'error'; messages: unknown[] }> = [];
+        const logger = {
+            info: (...messages: unknown[]) => entries.push({ level: 'info', messages }),
+            warning: (...messages: unknown[]) => entries.push({ level: 'warning', messages }),
+            error: (...messages: unknown[]) => entries.push({ level: 'error', messages })
+        };
+        const monitor = createAvailabilityMonitor(logger, { alertAfterMs: 0, name: 'Dependency' });
+
+        monitor.unavailable(new Error('first outage'));
+        monitor.unavailable(new Error('duplicate outage error'));
+        assert.equal(entries.filter(entry => entry.level === 'error').length, 1);
+
+        monitor.available();
+        monitor.unavailable(new Error('second outage'));
+        assert.equal(entries.filter(entry => entry.level === 'error').length, 2);
+        monitor.stop();
+        monitor.available();
+        monitor.unavailable(new Error('ignored after stop'));
+        assert.equal(entries.filter(entry => entry.level === 'error').length, 2);
     });
 
     it('aborts Redis mutex callbacks when lock renewal fails', async () => {

@@ -1,5 +1,5 @@
 import type { App } from '../../app';
-import { withContextData } from '../../helpers';
+import { createAvailabilityMonitor, withContextData, type AvailabilityMonitor } from '../../helpers';
 import { ScopedLogger } from '../logger';
 import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
 import { WorkerRecorderService } from './recorder';
@@ -17,6 +17,8 @@ export class WorkerRunnerService {
     private readonly timers = new Map<string, NodeJS.Timeout>();
     private readonly executing = new Set<string>();
     private readonly bullWorkers = new Map<string, BullWorker<BullMqWorkerJobData>>();
+    private readonly bullWorkerRedisLifecycleCleanup = new Set<() => void>();
+    private bullWorkerRedisMonitor?: AvailabilityMonitor;
 
     constructor(
         private readonly app: App,
@@ -42,6 +44,10 @@ export class WorkerRunnerService {
         this.running = false;
         for (const timer of this.timers.values()) clearTimeout(timer);
         this.timers.clear();
+        for (const cleanup of this.bullWorkerRedisLifecycleCleanup) cleanup();
+        this.bullWorkerRedisLifecycleCleanup.clear();
+        this.bullWorkerRedisMonitor?.stop();
+        this.bullWorkerRedisMonitor = undefined;
         await Promise.all([...this.bullWorkers.values()].map(worker => worker.close().catch(() => {})));
         this.bullWorkers.clear();
         while (this.executing.size) {
@@ -157,6 +163,10 @@ export class WorkerRunnerService {
     }
 
     private async startBullMqWorkers(): Promise<void> {
+        this.bullWorkerRedisMonitor ??= createAvailabilityMonitor(this.logger, {
+            alertAfterMs: this.app.config.REDIS_UNAVAILABLE_ALERT_AFTER_MS,
+            name: 'BullMQ worker Redis'
+        });
         for (const queueName of this.getRegisteredQueueNames()) {
             if (this.bullWorkers.has(queueName)) continue;
             const worker = new BullWorker<BullMqWorkerJobData>(
@@ -175,7 +185,29 @@ export class WorkerRunnerService {
                     }
                 });
             });
+            worker.on('error', error => {
+                const timer = setTimeout(() => {
+                    if (!this.running) return;
+                    if (isBullWorkerRedisReady(worker)) {
+                        this.logger.error('BullMQ worker error', error, { queue: queueName });
+                    } else {
+                        this.bullWorkerRedisMonitor?.unavailable(error);
+                    }
+                }, 0);
+                timer.unref?.();
+            });
             this.bullWorkers.set(queueName, worker);
+            this.bullWorkerRedisLifecycleCleanup.add(
+                observeBullWorkerRedisLifecycle(
+                    worker,
+                    () => this.bullWorkerRedisMonitor?.unavailable(),
+                    () => {
+                        if ([...this.bullWorkers.values()].every(isBullWorkerRedisReady)) {
+                            this.bullWorkerRedisMonitor?.available();
+                        }
+                    }
+                )
+            );
         }
     }
 
@@ -222,6 +254,43 @@ export class WorkerRunnerService {
         }
         return [...queues];
     }
+}
+
+interface BullWorkerRedisClient {
+    status?: string;
+    on(event: 'ready' | 'reconnecting', listener: () => void): unknown;
+    removeListener(event: 'ready' | 'reconnecting', listener: () => void): unknown;
+}
+
+function getBullWorkerRedisClients(worker: BullWorker): BullWorkerRedisClient[] {
+    // RedisConnection.status remains "ready" while its ioredis client reconnects. Read the actual
+    // command and blocking clients so failover lifecycle events and recovery are both observable.
+    const internal = worker as unknown as {
+        connection?: { _client?: BullWorkerRedisClient };
+        blockingConnection?: { _client?: BullWorkerRedisClient };
+    };
+    return [internal.connection?._client, internal.blockingConnection?._client].filter(
+        (client): client is BullWorkerRedisClient => client !== undefined
+    );
+}
+
+function isBullWorkerRedisReady(worker: BullWorker): boolean {
+    const clients = getBullWorkerRedisClients(worker);
+    return clients.length === 2 && clients.every(client => client.status === 'ready');
+}
+
+function observeBullWorkerRedisLifecycle(worker: BullWorker, onUnavailable: () => void, onReady: () => void): () => void {
+    const clients = getBullWorkerRedisClients(worker);
+    for (const client of clients) {
+        client.on('reconnecting', onUnavailable);
+        client.on('ready', onReady);
+    }
+    return () => {
+        for (const client of clients) {
+            client.removeListener('reconnecting', onUnavailable);
+            client.removeListener('ready', onReady);
+        }
+    };
 }
 
 function formatFailure(error: unknown): { message: string; stack?: string } {

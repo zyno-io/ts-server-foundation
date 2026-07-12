@@ -1,3 +1,4 @@
+export * from './availability';
 export * from './async/context';
 export * from './async/process';
 export * from './async/promise';
@@ -7,6 +8,7 @@ export * from './data/serialization';
 export * from './data/transformer';
 export * from './io/package';
 export * from './io/stream';
+export * from './redis/availability';
 export * from './redis/cache';
 export * from './redis/broadcast';
 export {

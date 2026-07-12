@@ -1,3 +1,4 @@
+import { DEFAULT_AVAILABILITY_ALERT_AFTER_MS } from '../helpers/availability';
 import { isDevelopmentEnvironment, isTestEnvironment } from './const';
 
 export class BaseAppConfig {
@@ -47,6 +48,7 @@ export class BaseAppConfig {
     REDIS_HOST?: string;
     REDIS_PORT?: number;
     REDIS_PREFIX?: string;
+    REDIS_UNAVAILABLE_ALERT_AFTER_MS: number = DEFAULT_AVAILABILITY_ALERT_AFTER_MS;
 
     CACHE_REDIS_SENTINEL_HOST?: string;
     CACHE_REDIS_SENTINEL_PORT?: number;

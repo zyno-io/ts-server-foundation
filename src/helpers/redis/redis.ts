@@ -35,7 +35,10 @@ export function createRedisOptions(configPrefix?: string): {
                         port: Number(config.REDIS_SENTINEL_PORT ?? 26379)
                     }
                 ],
-                name: config.REDIS_SENTINEL_NAME ? String(config.REDIS_SENTINEL_NAME) : undefined
+                name: config.REDIS_SENTINEL_NAME ? String(config.REDIS_SENTINEL_NAME) : undefined,
+                failoverDetector: true,
+                sentinelMaxConnections: 1,
+                reconnectOnError: error => (error.message.startsWith('READONLY') ? 2 : false)
             }
         };
     }

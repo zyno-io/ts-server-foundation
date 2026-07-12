@@ -28,6 +28,8 @@ describe('package exports', () => {
         assert.equal(typeof root.Env, 'object');
         assert.equal(typeof root.HttpRequest, 'function');
         assert.equal(typeof root.HttpCorsOptions, 'function');
+        assert.equal(typeof root.createAvailabilityMonitor, 'function');
+        assert.equal(typeof root.monitorRedisAvailability, 'function');
         assert.equal(typeof root.BaseDatabase, 'function');
         assert.equal(typeof root.sql, 'function');
         assert.equal(typeof root.MigrationRunner, 'function');
@@ -83,10 +85,12 @@ describe('package exports', () => {
                     SrpcClient,
                     TestingHelpers,
                     WorkerService,
+                    createAvailabilityMonitor,
                     createLogger,
                     deserialize,
                     http,
                     installSentry,
+                    monitorRedisAvailability,
                     serializeOpenApiSchema,
                     sql,
                     typeOf,
@@ -94,6 +98,7 @@ describe('package exports', () => {
                     withResourceCleanup,
                     withSpan,
                     type DateString,
+                    type AvailabilityMonitor,
                     type HttpBody,
                     type Type
                 } from '@zyno-io/ts-server-foundation';
@@ -106,6 +111,7 @@ describe('package exports', () => {
                 type Input = HttpBody<{ birthday: DateString }>;
                 const reflected: Type = typeOf<Input>();
                 const telemetry: TelemetryInitOptions = { disabled: true };
+                const availability: AvailabilityMonitor | undefined = undefined;
                 void [
                     AlphanumericCharacters,
                     App,
@@ -130,11 +136,14 @@ describe('package exports', () => {
                     SrpcClient,
                     TestingHelpers,
                     WorkerService,
+                    availability,
+                    createAvailabilityMonitor,
                     createLogger,
                     deserialize,
                     http,
                     init,
                     installSentry,
+                    monitorRedisAvailability,
                     reflected,
                     serializeOpenApiSchema,
                     shutdownTelemetry,

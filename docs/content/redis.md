@@ -16,6 +16,25 @@ const { client, prefix } = createRedis('CACHE');
 
 Each call creates a separate connection. All clients are tracked and can be disconnected with `disconnectAllRedis()`.
 
+## Availability Alerts
+
+The generic `createAvailabilityMonitor()` state machine logs one warning when a dependency becomes unavailable, reports one error if the outage lasts past the configured delay, and rearms after recovery. Call `unavailable(error?)` and `available()` from any dependency's lifecycle events.
+
+`monitorRedisAvailability()` is the Redis-specific adapter. It maps ioredis `error` and `reconnecting` events to unavailable and `ready` to available:
+
+```typescript
+import { monitorRedisAvailability } from '@zyno-io/ts-server-foundation';
+
+const monitor = monitorRedisAvailability(client, logger, {
+    alertAfterMs: config.REDIS_UNAVAILABLE_ALERT_AFTER_MS,
+    name: 'SSE Redis'
+});
+```
+
+The default delay is 60 seconds. This changes alert timing only; it does not slow or limit ioredis reconnection attempts.
+
+Sentinel connections keep one subscription to Sentinel's `+switch-master` notifications so they reconnect as soon as a failover is announced without opening a detector connection to every discovered Sentinel. A `READONLY` response also forces master resolution and retries the rejected command, covering promotions where the old master socket remains open after becoming a replica.
+
 ## Cache
 
 Redis-backed cache with TTL support:
@@ -172,3 +191,5 @@ Common variables for each prefix:
 | `*_REDIS_SENTINEL_NAME` | Redis Sentinel master name | unset        |
 
 For the default shared connection, omit the utility prefix and use `REDIS_HOST`, `REDIS_PORT`, `REDIS_PREFIX`, and `REDIS_SENTINEL_*`.
+
+`REDIS_UNAVAILABLE_ALERT_AFTER_MS` controls the default outage grace period used with `monitorRedisAvailability()`. Its default is `60000`.

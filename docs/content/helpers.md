@@ -1,6 +1,6 @@
 # Helpers
 
-TSF exports small utility helpers from the package root. They are grouped by async context, data manipulation, streams, Redis, security, dates, errors, and package metadata.
+TSF exports small utility helpers from the package root. They are grouped by async context, availability monitoring, data manipulation, streams, Redis, security, dates, errors, and package metadata.
 
 ## Async Context
 
@@ -267,6 +267,26 @@ reportError(3, error, { scope: 'ImportJob', data: { fileId } });
 `reportError()` synchronously calls the registered global reporter, sends the exception to Sentry when installed, and starts a Slack webhook notification only for level `1`. A throwing global reporter is isolated and logged so it does not prevent Sentry or Slack handling. Level `1` maps to Sentry `fatal`, level `3` to `warning`, and other levels to `error`. Populate `SentryLiftKeysToTagsFromLoggerContext` with primitive logger-context keys that should be lifted to Sentry tags; the remaining logger context stays in the event details. Slack delivery is asynchronous and delivery errors are logged rather than thrown to the caller.
 
 See [Logging](./logging.md#error-handling) for logger integration and alert configuration.
+
+## Availability Monitoring
+
+`createAvailabilityMonitor()` turns dependency lifecycle events into delayed, deduplicated outage reporting:
+
+```ts
+import { createAvailabilityMonitor } from '@zyno-io/ts-server-foundation';
+
+const monitor = createAvailabilityMonitor(logger, {
+    name: 'Search service',
+    alertAfterMs: 60_000
+});
+
+dependency.on('error', error => monitor.unavailable(error));
+dependency.on('ready', () => monitor.available());
+```
+
+The first `unavailable()` call logs a warning and starts the grace period. Repeated failures update the retained error without producing duplicate warnings or alerts. If the dependency remains unavailable, one error is reported after `alertAfterMs`; `available()` cancels a pending alert, logs recovery, and rearms the monitor. `stop()` permanently cancels the monitor and its timer.
+
+The default grace period is 60 seconds. Dependency-specific adapters can translate their native lifecycle events to `unavailable()` and `available()`; `monitorRedisAvailability()` is the built-in ioredis adapter.
 
 ## Redis Helpers
 
