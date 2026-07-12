@@ -123,6 +123,7 @@ export interface EnvObject {
     PROTOC?: string;
     TEST_KEEP_DB?: string;
     TEST_RUN_TS?: string;
+    TSF_TSCONFIG?: string;
     TSF_TEST_DATABASE_NAME?: string;
     TSF_TEST_ALLOW_SAVEPOINTS?: string;
     TSF_TEST_MYSQL_SESSION_MANAGER?: string;

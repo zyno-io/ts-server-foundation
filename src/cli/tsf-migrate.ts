@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
 
 import {
     App,
@@ -13,6 +13,7 @@ import {
     standardizeDbCollation,
     writeMigrationFile
 } from '..';
+import { resolveTypeScriptOutputPath } from '../typescript-output';
 
 interface MigrateCliOptions {
     appPath: string;
@@ -58,7 +59,7 @@ Commands:
                             Standardize MySQL database/table charset and collation
 
 Options:
-  --app <path>              Compiled app module, default dist/src/app.js
+  --app <path>              Compiled app module, default emitted path for src/app.ts
   --description <text>      Migration description, default auto_migration
   --migrations-dir <path>   Source migrations dir for create, default src/migrations
   --pg-schema <schema>      PostgreSQL schema, default public
@@ -93,8 +94,7 @@ async function run(options: MigrateCliOptions): Promise<number> {
     const app = loadApp(options.appPath);
     const db = getDatabase(app);
     try {
-        const migrationsDir = sourceToDistMigrationsDir(options.migrationsDir);
-        const migrations = await loadMigrationsFromDirectory(migrationsDir);
+        const migrations = await loadMigrationsFromDirectory(options.migrationsDir);
         const executions = await new MigrationRunner(db).run(migrations);
         console.log(`Ran ${executions.length} migration(s).`);
         return 0;
@@ -142,7 +142,7 @@ async function charset(options: MigrateCliOptions): Promise<number> {
 }
 
 function parseOptions(args: string[], options: { allowPositionals?: boolean } = {}): MigrateCliOptions {
-    let appPath = 'dist/src/app.js';
+    let appPath: string | undefined;
     let description = 'auto_migration';
     let migrationsDir = 'src/migrations';
     let pgSchema: string | undefined;
@@ -184,7 +184,7 @@ function parseOptions(args: string[], options: { allowPositionals?: boolean } = 
     }
 
     return {
-        appPath: resolve(appPath),
+        appPath: appPath ? resolve(appPath) : (resolveTypeScriptOutputPath('src/app.ts') ?? resolve('dist/src/app.js')),
         description,
         migrationsDir: resolve(migrationsDir),
         pgSchema,
@@ -255,22 +255,6 @@ function getDatabase(app: App): BaseDatabase {
 
 async function closeDatabase(db: BaseDatabase): Promise<void> {
     await db.driver.close();
-}
-
-function sourceToDistMigrationsDir(sourceDir: string): string {
-    const absoluteSource = isAbsolute(sourceDir) ? sourceDir : resolve(sourceDir);
-    const segments = absoluteSource.split(/[\\/]/);
-    if (segments.includes('dist')) return absoluteSource;
-    const srcIndex = segments.lastIndexOf('src');
-    if (srcIndex !== -1) {
-        const base = segments.slice(0, srcIndex).join(sep) || sep;
-        return join(base, 'dist', ...segments.slice(srcIndex));
-    }
-    return join(dirname(absoluteSource), 'dist', basenameNoExt(absoluteSource));
-}
-
-function basenameNoExt(path: string): string {
-    return path.split(/[\\/]/).filter(Boolean).pop() ?? 'migrations';
 }
 
 if (require.main === module) {

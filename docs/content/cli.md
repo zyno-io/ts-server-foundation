@@ -113,9 +113,9 @@ The command selects `tsconfig.test.json` when present, otherwise `tsconfig.json`
 tsf-test [node-test-options] [test-files-or-dirs...]
 ```
 
-`tsf-test` sets `APP_ENV=test` and `TZ=UTC`, maps source selectors such as `tests/http.spec.ts` to compiled files under `dist/tests/`, and runs Node with source maps, a 180-second per-test timeout, and forced process exit. With no selector it discovers compiled `*.spec.js` files below `dist/tests`.
+`tsf-test` sets `APP_ENV=test` and `TZ=UTC`, maps source selectors to emitted files using the effective tsconfig's `rootDir` and `outDir`, and runs Node with source maps, a 180-second per-test timeout, and forced process exit. With no selector it discovers compiled `*.spec.js` files anywhere below the configured `outDir`.
 
-If `dist/tests/shared/globalSetup.js` exists, its optional `setup()` runs before the test subprocess and `teardown()` runs after it. See [Testing](./testing.md#global-setup-and-module-state).
+If a `tests/shared/globalSetup.ts` or `src/tests/shared/globalSetup.ts` source file emits under the configured `outDir`, its optional `setup()` runs before the test subprocess and `teardown()` runs after it. See [Testing](./testing.md#global-setup-and-module-state).
 
 When MySQL test configuration is available and savepoints are allowed, the runner starts a shared MySQL session manager. Its pool size follows `--test-concurrency` or defaults to available parallelism minus one. Control it with:
 
@@ -150,7 +150,7 @@ Options:
 
 | Option | Description |
 | --- | --- |
-| `--app <path>` | Compiled app module. Defaults to `dist/src/app.js`. |
+| `--app <path>` | Compiled app module. Defaults to the emitted path for `src/app.ts`. |
 | `--description <text>`, `-d <text>` | Migration description. Defaults to `auto_migration`. |
 | `--migrations-dir <path>` | Source migration directory. Defaults to `src/migrations`. |
 | `--pg-schema <schema>` | PostgreSQL schema used for diff/reset. Defaults to the database reader's schema. |

@@ -5,12 +5,13 @@
 import { spawn } from 'node:child_process';
 import { existsSync, globSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { BaseAppConfig, ConfigLoader } from '../app';
 import { Env, type EnvObject } from '../env';
 import { runNode } from './common';
+import { resolveTypeScriptOutDir, resolveTypeScriptOutputPath } from '../typescript-output';
 
 interface MySQLSessionManagerHandle {
     env: EnvObject;
@@ -26,14 +27,14 @@ export async function runTestCli(args = process.argv.slice(2)): Promise<number> 
     Env.TZ = 'UTC';
     Env.APP_ENV = 'test';
 
-    const distDir = resolve('dist');
+    const distDir = resolveTypeScriptOutDir({ tsconfigPath: Env.TSF_TSCONFIG }) ?? resolve('dist');
     const teardown = await runGlobalSetup(distDir);
     let manager: MySQLSessionManagerHandle | undefined;
     try {
         const { nodeArgs, fileArgs } = splitArgs(args);
         const testFiles = collectTestFiles(distDir, fileArgs);
         if (testFiles.length === 0) {
-            console.error('No compiled test files found in dist/tests.');
+            console.error(`No compiled test files found in ${distDir}.`);
             return 1;
         }
 
@@ -63,13 +64,13 @@ export async function runTestCli(args = process.argv.slice(2)): Promise<number> 
 function printUsage(): void {
     console.log(`Usage: tsf-test [node-test-options] [test-files-or-dirs...]
 
-Runs compiled node:test specs from dist/tests. Source paths like tests/foo.spec.ts
-are mapped to dist/tests/foo.spec.js.`);
+Runs compiled node:test specs from the configured TypeScript outDir. Source paths
+are mapped using rootDir and outDir from the effective tsconfig.`);
 }
 
 async function runGlobalSetup(distDir: string): Promise<(() => Promise<void>) | undefined> {
-    const setupPath = join(distDir, 'tests', 'shared', 'globalSetup.js');
-    if (!existsSync(setupPath)) return undefined;
+    const setupPath = findGlobalSetupPath(distDir);
+    if (!setupPath) return undefined;
     const beforeRequireEnv = snapshotProcessEnv();
     const globalSetup = require(setupPath) as {
         setup?: () => Promise<void> | void;
@@ -79,6 +80,15 @@ async function runGlobalSetup(distDir: string): Promise<(() => Promise<void>) | 
     if (globalSetup.setup) await globalSetup.setup();
     applyProcessEnvPatch(requireEnvPatch);
     return globalSetup.teardown ? () => Promise.resolve(globalSetup.teardown!()) : undefined;
+}
+
+function findGlobalSetupPath(distDir: string): string | undefined {
+    const candidates = [
+        resolveTypeScriptOutputPath('tests/shared/globalSetup.ts', { tsconfigPath: Env.TSF_TSCONFIG }),
+        resolveTypeScriptOutputPath('src/tests/shared/globalSetup.ts', { tsconfigPath: Env.TSF_TSCONFIG }),
+        join(distDir, 'tests', 'shared', 'globalSetup.js')
+    ].filter((path): path is string => !!path && existsSync(path));
+    return [...new Set(candidates)][0];
 }
 
 function snapshotProcessEnv(): NodeJS.ProcessEnv {
@@ -296,11 +306,11 @@ function splitArgs(args: string[]): { nodeArgs: string[]; fileArgs: string[] } {
 }
 
 function collectTestFiles(distDir: string, fileArgs: string[]): string[] {
-    if (fileArgs.length === 0) return globSync(join(distDir, 'tests', '**/*.spec.js'));
+    if (fileArgs.length === 0) return globSync(join(distDir, '**/*.spec.js'));
 
     const testFiles: string[] = [];
     for (const fileArg of fileArgs) {
-        const distPath = toDistTestPath(fileArg);
+        const distPath = toDistTestPath(fileArg, distDir);
         if (distPath.endsWith('/') || !distPath.split(/[\\/]/).pop()?.includes('.')) {
             testFiles.push(...globSync(join(distPath, '**/*.spec.js')));
         } else {
@@ -310,13 +320,23 @@ function collectTestFiles(distDir: string, fileArgs: string[]): string[] {
     return testFiles;
 }
 
-function toDistTestPath(fileArg: string): string {
+function toDistTestPath(fileArg: string, distDir: string): string {
+    const absoluteInput = isAbsolute(fileArg) ? fileArg : resolve(fileArg);
+    const relativeToDist = relative(distDir, absoluteInput);
+    if (relativeToDist !== '..' && !relativeToDist.startsWith(`..${sep}`) && !isAbsolute(relativeToDist)) {
+        return replaceTestExtension(absoluteInput);
+    }
+
+    const emitted = resolveTypeScriptOutputPath(absoluteInput, { tsconfigPath: Env.TSF_TSCONFIG });
+    if (emitted) return emitted;
+
     let normalized = isAbsolute(fileArg) ? relative(process.cwd(), fileArg) : fileArg;
     normalized = normalized.replace(/\\/g, '/').replace(/^\.\//, '');
-    if (normalized === 'dist' || normalized.startsWith('dist/')) return normalized;
-    if (normalized === 'tests') return 'dist/tests';
-    if (normalized.startsWith('tests/')) return `dist/${normalized}`.replace(/\.ts$/, '.js');
-    return normalized.replace(/\.ts$/, '.js');
+    return replaceTestExtension(resolve(distDir, normalized));
+}
+
+function replaceTestExtension(path: string): string {
+    return path.replace(/\.(?:cts|mts|tsx?)$/, extension => (extension === '.mts' ? '.mjs' : extension === '.cts' ? '.cjs' : '.js'));
 }
 
 function optionTakesValue(arg: string): boolean {

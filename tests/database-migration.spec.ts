@@ -214,6 +214,65 @@ describe('MigrationRunner', () => {
         }
     });
 
+    it('maps source migrations using tsconfig rootDir and outDir', async () => {
+        const root = tempDir();
+        const previousCwd = process.cwd();
+        process.chdir(root);
+        try {
+            writeFileSync(
+                'tsconfig.json',
+                JSON.stringify({
+                    compilerOptions: {
+                        rootDir: './src',
+                        outDir: './build'
+                    }
+                })
+            );
+            const sourceDir = join(root, 'src', 'migrations');
+            const outputDir = join(root, 'build', 'migrations');
+            mkdirSync(sourceDir, { recursive: true });
+            mkdirSync(outputDir, { recursive: true });
+            writeFileSync(join(sourceDir, '001_source.ts'), 'export default async function migration() {}\n');
+            writeFileSync(join(outputDir, '001_source.cjs'), 'exports.default = async () => {};\n');
+
+            assert.deepStrictEqual(
+                (await loadMigrationsFromDirectory('src/migrations')).map(migration => migration.name),
+                ['001_source']
+            );
+        } finally {
+            process.chdir(previousCwd);
+        }
+    });
+
+    it('fails clearly when source migrations have no compiled output', async () => {
+        const root = tempDir();
+        const previousCwd = process.cwd();
+        process.chdir(root);
+        try {
+            writeFileSync(
+                'tsconfig.json',
+                JSON.stringify({
+                    compilerOptions: {
+                        rootDir: './src',
+                        outDir: './dist'
+                    }
+                })
+            );
+            mkdirSync(join(root, 'src', 'migrations'), { recursive: true });
+            writeFileSync(join(root, 'src', 'migrations', '001_source.ts'), 'export default async function migration() {}\n');
+
+            await assert.rejects(
+                loadMigrationsFromDirectory('src/migrations'),
+                error =>
+                    error instanceof Error &&
+                    error.message.includes('Found source migrations') &&
+                    error.message.includes(join(root, 'dist', 'migrations'))
+            );
+        } finally {
+            process.chdir(previousCwd);
+        }
+    });
+
     it('resets source migrations and writes a base migration from entity metadata', async () => {
         const migrationsDir = tempDir();
         writeFileSync(join(migrationsDir, '99999999_999999_old.ts'), 'old');

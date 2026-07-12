@@ -31,7 +31,7 @@ The generated project is intentionally small:
 | `src/config.ts`                                      | Application config class extending `BaseAppConfig`.                                                                                               |
 | `src/database.ts`                                    | MySQL database class and entity registry used by the example.                                                                                     |
 | `src/controllers/`, `src/services/`, `src/entities/` | Example HTTP, service, and database layers.                                                                                                       |
-| `src/migrations/`                                    | Source migration files; their compiled output under `dist/src/migrations/` is used by migration commands.                                         |
+| `src/migrations/`                                    | Source migration files; compiled output is resolved from TypeScript `rootDir` and `outDir` (`dist/src/migrations/` in this scaffold).              |
 | `tests/`                                             | Node test-runner tests compiled with `tsconfig.test.json`.                                                                                        |
 | `.env.development`                                   | Local port, MySQL connection, database adapter, and Redis key prefix. Do not commit real secrets.                                                 |
 | `package.json`                                       | Sets `main` to `./dist/src/index.js`, allowing `node . <command>` to dispatch through the compiled entrypoint.                                    |

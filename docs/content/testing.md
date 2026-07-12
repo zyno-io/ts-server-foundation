@@ -176,6 +176,8 @@ Set `TEST_KEEP_DB=true` or `keepDatabase: true` to keep test databases during fa
 
 When `enableDatabase` is true, migrations run by default if the app has a database class. You can pass explicit `migrations`, point at `migrationsDir`, or set `enableMigrations: false`.
 
+Source migration directories are mapped to compiled output using the active tsconfig's `rootDir` and `outDir`. `tsf-dev test -p <file>` passes that config through to the test runtime, so both `rootDir: "."` and `rootDir: "./src"` layouts work without overriding `migrationsDir`.
+
 Set `schemaFromEntities: true` to create the registered entity schema through `createMigrationPlan()` before migrations run. Pass `{ tableNames, pgSchema }` instead of `true` to scope that schema generation.
 
 After migrations, the facade truncates tables by default. Set `truncateAfterMigrations: false` when a test needs migration-provided seed rows.
@@ -291,7 +293,7 @@ Use a test-specific alphanumeric prefix; cleanup is intentionally destructive fo
 
 ## Global Setup And Module State
 
-When `dist/tests/shared/globalSetup.js` exists, `tsf-test` loads it before discovering/running tests. An exported `setup()` may be synchronous or asynchronous; an exported `teardown()` runs after the test process and shared MySQL session manager finish.
+When `tests/shared/globalSetup.ts` or `src/tests/shared/globalSetup.ts` emits under the configured TypeScript `outDir`, `tsf-test` loads it before discovering/running tests. An exported `setup()` may be synchronous or asynchronous; an exported `teardown()` runs after the test process and shared MySQL session manager finish.
 
 ```typescript
 export async function setup() {

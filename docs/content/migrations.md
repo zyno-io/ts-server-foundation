@@ -89,7 +89,7 @@ Options:
 
 | Option                               | Description                                            |
 | ------------------------------------ | ------------------------------------------------------ |
-| `--app <path>`                       | Compiled app module. Default `dist/src/app.js`.        |
+| `--app <path>`                       | Compiled app module. Defaults to the emitted path for `src/app.ts`. |
 | `--description <text>` / `-d <text>` | Migration file description. Default `auto_migration`.  |
 | `--migrations-dir <path>`            | Source migration directory. Default `src/migrations`.  |
 | `--pg-schema <schema>`               | PostgreSQL schema for introspection.                   |
@@ -183,7 +183,9 @@ The charset command is MySQL/MariaDB-only. PostgreSQL databases are skipped.
 
 ## Loading Directories
 
-`loadMigrationsFromDirectory()` accepts a source or dist directory. When a source path under `src/` is passed and compiled files exist under `dist/src/`, it resolves the dist path automatically.
+`loadMigrationsFromDirectory()` accepts a source or compiled directory. For a source path, it reads the effective TypeScript `rootDir` and `outDir` (including inherited settings) and resolves the emitted directory. For example, `src/migrations` maps to `dist/src/migrations` with `rootDir: "."`, and to `dist/migrations` with `rootDir: "./src"`.
+
+When source migration files exist but no compiled migration files can be found, loading fails with the paths that were searched. This prevents a build-layout mismatch from being reported as a successful run with zero migrations. Projects without resolvable compiler settings retain the conventional `dist/src/migrations` and `dist/migrations` fallbacks.
 
 Supported compiled file extensions are `.js`, `.cjs`, and `.mjs`.
 

@@ -164,7 +164,8 @@ function cmdTest(args: string[]): number {
     return runNode([testCli, ...testArgs], projectDir, {
         APP_ENV: 'test',
         TZ: 'UTC',
-        TEST_RUN_TS: testRunTs
+        TEST_RUN_TS: testRunTs,
+        TSF_TSCONFIG: tsconfig
     }).status;
 }
 
@@ -176,9 +177,13 @@ function cmdMigrate(command: 'run' | 'create' | 'reset' | 'charset', args: strin
     const tscStatus = runTscIfNeeded(tsconfig);
     if (tscStatus !== 0) return tscStatus;
     if (command === 'run') {
-        return runNode([...(debug ? ['--inspect-brk=9226'] : []), '--enable-source-maps', '.', 'migrate:run', ...args], projectDir).status;
+        return runNode([...(debug ? ['--inspect-brk=9226'] : []), '--enable-source-maps', '.', 'migrate:run', ...args], projectDir, {
+            TSF_TSCONFIG: tsconfig
+        }).status;
     }
-    return runNode([...(debug ? ['--inspect-brk=9226'] : []), join(__dirname, 'tsf-migrate.js'), command, ...args], projectDir).status;
+    return runNode([...(debug ? ['--inspect-brk=9226'] : []), join(__dirname, 'tsf-migrate.js'), command, ...args], projectDir, {
+        TSF_TSCONFIG: tsconfig
+    }).status;
 }
 
 function cmdOpenApiGenerate(args: string[]): number {

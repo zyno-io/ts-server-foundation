@@ -917,30 +917,36 @@ describe('CLI', () => {
 
     it('runs tsf-dev test without opening an inspector for normal tests', () => {
         const dir = repoTempDir();
-        mkdirSync(join(dir, 'tests'), { recursive: true });
+        mkdirSync(join(dir, 'src', 'tests'), { recursive: true });
         const packageJsonPath = join(dir, 'package.json');
         const packageJson = '{"name":"fixture","type":"commonjs","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}';
         writeFileSync(packageJsonPath, packageJson);
+        writeFileSync(
+            join(dir, 'tsconfig.json'),
+            JSON.stringify({
+                compilerOptions: {
+                    target: 'ES2022',
+                    module: 'commonjs',
+                    rootDir: '.',
+                    outDir: 'dist',
+                    strict: true,
+                    skipLibCheck: true,
+                    types: ['node']
+                }
+            })
+        );
         const tsconfigPath = join(dir, 'tsconfig.test.json');
         const tsconfig = JSON.stringify({
-            compilerOptions: {
-                target: 'ES2022',
-                module: 'commonjs',
-                rootDir: '.',
-                outDir: 'dist',
-                strict: true,
-                skipLibCheck: true,
-                types: ['node']
-            },
-            include: ['tests/**/*.ts']
+            extends: './tsconfig.json',
+            include: ['src/tests/**/*.ts']
         });
         writeFileSync(tsconfigPath, tsconfig);
         writeFileSync(
-            join(dir, 'tests', 'probe.spec.ts'),
+            join(dir, 'src', 'tests', 'probe.spec.ts'),
             "import test from 'node:test'; import assert from 'node:assert/strict'; test('selected env', () => assert.equal(process.env.APP_ENV, 'test'));\n"
         );
 
-        const result = runCli('tsf-dev.js', ['test', '--test-name-pattern', 'selected', './tests/probe.spec.ts'], dir);
+        const result = runCli('tsf-dev.js', ['test', '--test-name-pattern', 'selected', './src/tests/probe.spec.ts'], dir);
         const output = `${result.stdout}\n${result.stderr}`;
 
         assert.equal(result.status, 0, result.stderr);
@@ -1032,12 +1038,12 @@ void app.run();
         assert.match(readFileSync(join(dir, 'openapi.yaml'), 'utf8'), /\/package-main-openapi:/);
     });
 
-    it('runs tsf-dev migrate through the app package entrypoint', () => {
+    it('runs tsf-dev migrate through an app emitted from a src rootDir', () => {
         const dir = repoTempDir();
         mkdirSync(join(dir, 'src', 'migrations'), { recursive: true });
         writeFileSync(
             join(dir, 'package.json'),
-            '{"name":"fixture","type":"commonjs","main":"./dist/src/index.js","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
+            '{"name":"fixture","type":"commonjs","main":"./dist/index.js","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
         );
         installLocalFoundationPackage(dir, process.cwd());
         writeFileSync(
@@ -1046,7 +1052,7 @@ void app.run();
                 compilerOptions: {
                     target: 'ES2022',
                     module: 'commonjs',
-                    rootDir: '.',
+                    rootDir: './src',
                     outDir: 'dist',
                     strict: true,
                     skipLibCheck: true,

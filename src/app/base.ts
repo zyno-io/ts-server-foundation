@@ -36,7 +36,7 @@ import {
     onServerShutdown,
     onServerShutdownRequested
 } from './lifecycle';
-import { parseEntrypointMigrationsDir, sourceToDistMigrationsDir } from './migrations-entrypoint';
+import { parseEntrypointMigrationsDir } from './migrations-entrypoint';
 import { getCommandMetadata } from './commands';
 import { setCurrentApp } from './current';
 
@@ -348,7 +348,7 @@ Examples:
         if (!this.options.db) throw new Error('Cannot run migrations without a configured database provider');
         const db = this.get(BaseDatabase);
         try {
-            const migrationsDir = sourceToDistMigrationsDir(parseEntrypointMigrationsDir(args));
+            const migrationsDir = parseEntrypointMigrationsDir(args);
             const migrations = await loadMigrationsFromDirectory(migrationsDir);
             const executions = await new MigrationRunner(db).run(migrations);
             console.log(`Ran ${executions.length} migration(s).`);

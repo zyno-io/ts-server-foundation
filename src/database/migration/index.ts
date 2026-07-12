@@ -1,10 +1,11 @@
 import { existsSync, readdirSync } from 'node:fs';
-import { basename, extname, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { sql } from '../sql';
 import type { BaseDatabase } from '../database';
 import { createLogger, type LoggerInterface } from '../../services/logger';
+import { resolveTypeScriptOutputPath } from '../../typescript-output';
 
 export * from './create';
 export * from './maintenance';
@@ -180,11 +181,15 @@ function resolveRunnableMigrationsDirectory(directory: string): string | undefin
     const absolute = resolve(directory);
     if (existsSync(absolute) && hasRunnableMigrationFiles(absolute)) return absolute;
 
-    const cwd = process.cwd();
-    const cwdRelative = relative(cwd, absolute);
-    if (cwdRelative === 'src' || cwdRelative.startsWith(`src${pathSeparator()}`)) {
-        const distDirectory = resolve(cwd, 'dist', cwdRelative);
-        if (existsSync(distDirectory)) return distDirectory;
+    const candidates = compiledMigrationDirectoryCandidates(absolute);
+    for (const candidate of candidates) {
+        if (existsSync(candidate) && hasRunnableMigrationFiles(candidate)) return candidate;
+    }
+
+    if (existsSync(absolute) && hasSourceMigrationFiles(absolute)) {
+        throw new Error(
+            `Found source migrations in ${absolute}, but no compiled migrations were found. Searched: ${candidates.join(', ') || '(no compiled path could be resolved)'}`
+        );
     }
 
     return existsSync(absolute) ? absolute : undefined;
@@ -194,8 +199,26 @@ function hasRunnableMigrationFiles(directory: string): boolean {
     return readdirSync(directory).some(file => /\.(c?js|mjs)$/.test(file));
 }
 
-function pathSeparator(): string {
-    return process.platform === 'win32' ? '\\' : '/';
+function hasSourceMigrationFiles(directory: string): boolean {
+    return readdirSync(directory).some(file => /\.(?:cts|mts|tsx?)$/.test(file) && !file.endsWith('.d.ts'));
+}
+
+function compiledMigrationDirectoryCandidates(sourceDirectory: string): string[] {
+    const candidates: string[] = [];
+    const configuredOutput = resolveTypeScriptOutputPath(sourceDirectory, { cwd: process.cwd() });
+    if (configuredOutput && configuredOutput !== sourceDirectory) candidates.push(configuredOutput);
+
+    const segments = sourceDirectory.split(/[\\/]/);
+    const srcIndex = segments.lastIndexOf('src');
+    if (srcIndex !== -1) {
+        const base = segments.slice(0, srcIndex).join(sep) || sep;
+        candidates.push(join(base, 'dist', ...segments.slice(srcIndex)));
+        candidates.push(join(base, 'dist', ...segments.slice(srcIndex + 1)));
+    } else if (!sourceDirectory.split(/[\\/]/).includes('dist')) {
+        candidates.push(join(dirname(sourceDirectory), 'dist', basename(sourceDirectory)));
+    }
+
+    return [...new Set(candidates.map(candidate => (isAbsolute(candidate) ? candidate : resolve(candidate))))];
 }
 
 export async function runMigrationsFromDirectory<T extends BaseDatabase>(db: T, directory: string): Promise<MigrationExecution[]> {
