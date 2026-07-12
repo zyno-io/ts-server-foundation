@@ -1,5 +1,5 @@
 import { databaseAnnotation, isDatabaseUUIDType, ReflectionKind, Type, typeAnnotation, validationAnnotation } from '../../../reflection';
-import { tryResolveClassType } from '../../../reflection/type-utils';
+import { flattenRuntimeUnionTypes, tryResolveClassType } from '../../../reflection/type-utils';
 import { Coordinate } from '../../../types/type-annotations';
 
 import type { Dialect } from '../../sql';
@@ -23,7 +23,7 @@ function resolveColumnTypeBase(type: Type, dialect: Dialect): ResolvedColumnType
     if (rawType) return parseRawSqlType(rawType, dialect);
 
     if (type.kind === ReflectionKind.union) {
-        const nonNull = type.types.filter(item => item.kind !== ReflectionKind.null && item.kind !== ReflectionKind.undefined);
+        const nonNull = flattenRuntimeUnionTypes(type).filter(item => item.kind !== ReflectionKind.null && item.kind !== ReflectionKind.undefined);
         if (nonNull.length === 1) return resolveColumnType(nonNull[0], dialect);
         if (
             nonNull.length > 0 &&

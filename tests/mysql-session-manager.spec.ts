@@ -125,6 +125,7 @@ describe('MySQL shared session manager', () => {
                         CREATE TABLE tsf_session_rows (
                             id int NOT NULL AUTO_INCREMENT,
                             label varchar(64) NOT NULL,
+                            recordedAt datetime(3) NOT NULL,
                             PRIMARY KEY (id)
                         ) ENGINE=InnoDB
                     `);
@@ -136,20 +137,34 @@ describe('MySQL shared session manager', () => {
                 const secondPreparation = await prepareSharedMySQLSessionSchema(key, database.leaseId);
                 assert.equal(secondPreparation.run, false);
 
-                const writeConnection = await createSharedMySQLSessionPool(key, 'writer-client', database.leaseId).getConnection();
-                await writeConnection.query('START TRANSACTION');
-                await writeConnection.query('INSERT INTO tsf_session_rows (label) VALUES (?)', ['rolled-back']);
-                await writeConnection.query('COMMIT');
-                await assert.rejects(
-                    () => writeConnection.query('CREATE TABLE tsf_session_runtime_ddl (id int NOT NULL) ENGINE=InnoDB'),
-                    error =>
-                        error instanceof Error &&
-                        error.message.includes('Shared MySQL session manager blocked runtime DDL (CREATE)') &&
-                        error.message.includes(databaseName) &&
-                        error.message.includes('CREATE TABLE tsf_session_runtime_ddl')
-                );
-                assert.equal(await countRows(writeConnection, 'tsf_session_rows'), 1);
-                await writeConnection.release();
+                const originalTimezone = process.env.TZ;
+                process.env.TZ = 'America/New_York';
+                let writeConnection: MySQLConnectionLike | undefined;
+                try {
+                    const connection = await createSharedMySQLSessionPool(key, 'writer-client', database.leaseId).getConnection();
+                    writeConnection = connection;
+                    await connection.query('START TRANSACTION');
+                    await connection.query('INSERT INTO tsf_session_rows (label, recordedAt) VALUES (?, ?)', [
+                        'rolled-back',
+                        '2026-07-12 21:31:43.123'
+                    ]);
+                    await connection.query('COMMIT');
+                    const [dateRows] = await connection.query<{ recordedAt: Date }[]>('SELECT recordedAt FROM tsf_session_rows');
+                    assert.equal(dateRows[0]?.recordedAt.toISOString(), '2026-07-12T21:31:43.123Z');
+                    await assert.rejects(
+                        () => connection.query('CREATE TABLE tsf_session_runtime_ddl (id int NOT NULL) ENGINE=InnoDB'),
+                        error =>
+                            error instanceof Error &&
+                            error.message.includes('Shared MySQL session manager blocked runtime DDL (CREATE)') &&
+                            error.message.includes(databaseName) &&
+                            error.message.includes('CREATE TABLE tsf_session_runtime_ddl')
+                    );
+                    assert.equal(await countRows(connection, 'tsf_session_rows'), 1);
+                } finally {
+                    await writeConnection?.release();
+                    if (originalTimezone === undefined) delete process.env.TZ;
+                    else process.env.TZ = originalTimezone;
+                }
 
                 const verifyConnection = await createSharedMySQLSessionPool(key, 'verify-client', database.leaseId).getConnection();
                 try {

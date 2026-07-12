@@ -21,7 +21,11 @@ export class MySQLDriver implements DatabaseDriver {
     constructor(configOrPool: PoolOptions | MySQLPoolLike) {
         this.pool = isMySQLPoolLike(configOrPool)
             ? configOrPool
-            : (createPool({ decimalNumbers: true, ...configOrPool }) as unknown as MySQLPoolLike);
+            : (createPool({
+                  decimalNumbers: true,
+                  ...configOrPool,
+                  timezone: configOrPool.timezone ?? 'Z'
+              }) as unknown as MySQLPoolLike);
     }
 
     async connect(): Promise<void> {

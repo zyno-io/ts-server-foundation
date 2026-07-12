@@ -90,6 +90,15 @@ class MigrationUnionUser extends BaseEntity {
     mixed!: DateString | UuidString;
 }
 
+type MigrationTargetPlatform = 'ios' | 'android';
+type MigrationAssetPlatform = MigrationTargetPlatform | 'all';
+
+@entity.name('migration_assets')
+class MigrationAsset extends BaseEntity {
+    id!: number & PrimaryKey;
+    platform!: MigrationAssetPlatform;
+}
+
 @entity.name('migration_default_users')
 class MigrationDefaultUser extends BaseEntity {
     id!: number & PrimaryKey & AutoIncrement;
@@ -233,6 +242,20 @@ describe('migration schema identifier helpers', () => {
 });
 
 describe('migration create entity schema', () => {
+    it('maps nested string literal unions to enum columns', () => {
+        const mysqlDb = new BaseDatabase(new FakeDriver('mysql'), [MigrationAsset]);
+        const postgresDb = new BaseDatabase(new FakeDriver('postgres'), [MigrationAsset]);
+
+        const mysqlPlatform = readEntitiesSchema(mysqlDb).get('migration_assets')!.columns[1];
+        const postgresPlatform = readEntitiesSchema(postgresDb).get('migration_assets')!.columns[1];
+
+        assert.equal(mysqlPlatform.type, 'enum');
+        assert.deepStrictEqual(mysqlPlatform.enumValues, ['ios', 'android', 'all']);
+        assert.equal(postgresPlatform.type, 'enum');
+        assert.deepStrictEqual(postgresPlatform.enumValues, ['ios', 'android', 'all']);
+        assert.equal(postgresPlatform.enumTypeName, 'migration_assets_platform_enum');
+    });
+
     it('reads entity metadata into dialect-aware table schemas', () => {
         const mysqlDb = new BaseDatabase(new FakeDriver('mysql'), [MigrationUser]);
         const postgresDb = new BaseDatabase(new FakeDriver('postgres'), [MigrationUser]);

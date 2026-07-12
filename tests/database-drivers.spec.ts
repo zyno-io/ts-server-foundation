@@ -103,6 +103,26 @@ describe('PostgresDriver', () => {
 });
 
 describe('MySQLDriver', () => {
+    it('uses UTC when an internal pool timezone is omitted or undefined', async () => {
+        for (const config of [{}, { timezone: undefined }]) {
+            const driver = new MySQLDriver(config);
+            try {
+                assert.equal(getMySQLDriverTimezone(driver), 'Z');
+            } finally {
+                await driver.close();
+            }
+        }
+    });
+
+    it('preserves explicit timezone overrides for internally created pools', async () => {
+        const driver = new MySQLDriver({ timezone: '+02:00' });
+        try {
+            assert.equal(getMySQLDriverTimezone(driver), '+02:00');
+        } finally {
+            await driver.close();
+        }
+    });
+
     it('maps query and execute calls', async () => {
         const pool = new FakeMySQLPool();
         const driver = new MySQLDriver(pool);
@@ -143,3 +163,10 @@ describe('MySQLDriver', () => {
         );
     });
 });
+
+function getMySQLDriverTimezone(driver: MySQLDriver): string | undefined {
+    const promisePool = Reflect.get(driver, 'pool') as {
+        pool?: { config?: { connectionConfig?: { timezone?: string } } };
+    };
+    return promisePool.pool?.config?.connectionConfig?.timezone;
+}

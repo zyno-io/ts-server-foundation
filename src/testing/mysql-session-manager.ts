@@ -446,7 +446,11 @@ export class MySQLSessionManager {
         sql: string,
         values: unknown[]
     ): Promise<unknown> {
-        const connection = await mysql.createConnection({ ...this.options.mysql, database: slot.databaseName });
+        const connection = await mysql.createConnection({
+            ...this.options.mysql,
+            database: slot.databaseName,
+            timezone: this.options.mysql.timezone ?? 'Z'
+        });
         try {
             const [rows] = operation === 'query' ? await connection.query(sql, values as never[]) : await connection.execute(sql, values as never[]);
             return normalizeMySQLResult(rows);
@@ -485,7 +489,8 @@ export class MySQLSessionManager {
                 slot.connection = await mysql.createConnection({
                     ...this.options.mysql,
                     database: slot.databaseName,
-                    decimalNumbers: true
+                    decimalNumbers: true,
+                    timezone: this.options.mysql.timezone ?? 'Z'
                 });
                 this.logSlot('Shared MySQL backend connection opened', slot);
             } catch (error) {
@@ -621,7 +626,11 @@ export class MySQLSessionManager {
     }
 
     private adminConnection(): Promise<Connection> {
-        return mysql.createConnection({ ...this.options.mysql, database: 'mysql' });
+        return mysql.createConnection({
+            ...this.options.mysql,
+            database: 'mysql',
+            timezone: this.options.mysql.timezone ?? 'Z'
+        });
     }
 
     private createDatabaseName(key: string, prefix: string, slotIndex: number): string {

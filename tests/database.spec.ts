@@ -240,6 +240,15 @@ class JsonSetting extends BaseEntity {
     config: { enabled: boolean; retries: number } = { enabled: false, retries: 0 };
 }
 
+type TargetPlatform = 'ios' | 'android';
+type AssetPlatform = TargetPlatform | 'all';
+
+@entity.name('platform_assets')
+class PlatformAsset extends BaseEntity {
+    id!: number & PrimaryKey;
+    platform!: AssetPlatform;
+}
+
 @entity.name('relation_sources')
 class RelationSource extends BaseEntity {
     id!: number & PrimaryKey;
@@ -330,6 +339,23 @@ describe('database metadata and entities', () => {
 });
 
 describe('database query builder and persistence', () => {
+    it('binds nested string literal union values without JSON encoding', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [PlatformAsset]);
+
+        await db.persist(createEntity(PlatformAsset, { id: 1, platform: 'ios' }));
+        await db.query(PlatformAsset).filter({ platform: 'android' }).find();
+
+        assert.deepStrictEqual(driver.executes[0], {
+            sql: 'INSERT INTO `platform_assets` (`id`, `platform`) VALUES (?, ?)',
+            bindings: [1, 'ios']
+        });
+        assert.deepStrictEqual(driver.queries[0], {
+            sql: 'SELECT `id`, `platform` FROM `platform_assets` WHERE `platform` = ?',
+            bindings: ['android']
+        });
+    });
+
     it('preserves numeric zero in batched, keyed, and grouped entity lookups', async () => {
         const driver = new FakeDriver();
         new BaseDatabase(driver, [RelationTarget, RelationPivot]);

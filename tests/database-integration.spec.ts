@@ -18,6 +18,7 @@ import {
 const MYSQL_USER_TABLE = 'tsf_crud_mysql_users';
 const MYSQL_LOCK_TABLE = 'tsf_crud_mysql_locks';
 const MYSQL_JSON_TABLE = 'tsf_crud_mysql_json';
+const MYSQL_DATE_TABLE = 'tsf_crud_mysql_dates';
 const PG_USER_TABLE = 'tsf_crud_pg_users';
 const PG_JSON_TABLE = 'tsf_crud_pg_json';
 
@@ -44,6 +45,12 @@ class MySQLJsonRow extends BaseEntity {
     config: { enabled: boolean; retries: number } = { enabled: false, retries: 0 };
 }
 
+@entity.name(MYSQL_DATE_TABLE)
+class MySQLDateRow extends BaseEntity {
+    id!: number & PrimaryKey & AutoIncrement;
+    recordedAt!: Date;
+}
+
 @entity.name(PG_JSON_TABLE)
 class PostgresJsonRow extends BaseEntity {
     id!: number & PrimaryKey & AutoIncrement;
@@ -62,7 +69,7 @@ describe('database real CRUD integration', () => {
         },
         async () => {
             if (!mysqlConfig) return;
-            const db = new BaseDatabase(new MySQLDriver(mysqlConfig), [MySQLCrudUser, MySQLJsonRow], {
+            const db = new BaseDatabase(new MySQLDriver(mysqlConfig), [MySQLCrudUser, MySQLJsonRow, MySQLDateRow], {
                 enableLocksTable: true,
                 lockTableName: MYSQL_LOCK_TABLE
             });
@@ -73,6 +80,7 @@ describe('database real CRUD integration', () => {
                 await runCrudFlow(db, MySQLCrudUser);
                 await runTransactionFlow(db, MySQLCrudUser, 'mysql');
                 await runJsonFlow(db, MySQLJsonRow);
+                await runMySQLDateFlow(db);
             } finally {
                 await resetMySQLSchema(db);
                 await db.driver.close();
@@ -225,6 +233,21 @@ async function runJsonFlow<
     assert.deepStrictEqual(patched.config, { enabled: false, retries: 3 });
 }
 
+async function runMySQLDateFlow(db: BaseDatabase): Promise<void> {
+    const originalTimezone = process.env.TZ;
+    process.env.TZ = 'America/New_York';
+    try {
+        const recordedAt = new Date('2026-07-12T21:31:43.123Z');
+        const created = await createPersistedEntity(MySQLDateRow, { recordedAt });
+        const loaded = await db.query(MySQLDateRow).filter({ id: created.id }).findOne();
+
+        assert.equal(loaded.recordedAt.toISOString(), recordedAt.toISOString());
+    } finally {
+        if (originalTimezone === undefined) delete process.env.TZ;
+        else process.env.TZ = originalTimezone;
+    }
+}
+
 async function runTransactionFlow<T extends BaseEntity & { id: number; name: string; email: string | null; score: number }>(
     db: BaseDatabase,
     Entity: new () => T,
@@ -289,6 +312,7 @@ async function runTransactionFlow<T extends BaseEntity & { id: number; name: str
 }
 
 async function resetMySQLSchema(db: BaseDatabase): Promise<void> {
+    await db.rawExecuteUnsafe(`DROP TABLE IF EXISTS \`${MYSQL_DATE_TABLE}\``);
     await db.rawExecuteUnsafe(`DROP TABLE IF EXISTS \`${MYSQL_JSON_TABLE}\``);
     await db.rawExecuteUnsafe(`DROP TABLE IF EXISTS \`${MYSQL_USER_TABLE}\``);
     await db.rawExecuteUnsafe(`DROP TABLE IF EXISTS \`${MYSQL_LOCK_TABLE}\``);
@@ -309,6 +333,13 @@ async function createMySQLSchema(db: BaseDatabase): Promise<void> {
             \`id\` int NOT NULL AUTO_INCREMENT,
             \`tags\` json NOT NULL,
             \`config\` json NOT NULL,
+            PRIMARY KEY (\`id\`)
+        ) ENGINE=InnoDB
+    `);
+    await db.rawExecuteUnsafe(`
+        CREATE TABLE \`${MYSQL_DATE_TABLE}\` (
+            \`id\` int NOT NULL AUTO_INCREMENT,
+            \`recordedAt\` datetime(3) NOT NULL,
             PRIMARY KEY (\`id\`)
         ) ENGINE=InnoDB
     `);
