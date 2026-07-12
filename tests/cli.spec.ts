@@ -57,7 +57,12 @@ function repoTempDir(): string {
 }
 
 function runCli(script: string, args: string[], cwd = process.cwd(), envPatch: NodeJS.ProcessEnv = {}) {
-    const { NODE_TEST_CONTEXT: _nodeTestContext, npm_package_json: _npmPackageJson, ...env } = process.env;
+    const {
+        NODE_TEST_CONTEXT: _nodeTestContext,
+        npm_package_json: _npmPackageJson,
+        TSF_INSTALL_PACKAGE_MANAGER_RERUN: _packageManagerRerun,
+        ...env
+    } = process.env;
     env.TTSC_CACHE_DIR = sharedTtscCacheDir;
     for (const [key, value] of Object.entries(envPatch)) {
         if (value === undefined) delete env[key];
@@ -242,6 +247,7 @@ describe('CLI', () => {
         const siblingWorkspace = join(root, 'packages', 'shared');
         const binDir = join(root, 'bin');
         const installCwdPath = join(root, 'install-cwd.txt');
+        const installGuardPath = join(root, 'install-guard.txt');
         mkdirSync(workspace, { recursive: true });
         mkdirSync(siblingWorkspace, { recursive: true });
         mkdirSync(binDir, { recursive: true });
@@ -292,7 +298,10 @@ describe('CLI', () => {
         );
         writeFileSync(join(workspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
         const yarnPath = join(binDir, 'yarn');
-        writeFileSync(yarnPath, `#!/bin/sh\nprintf "%s" "$PWD" > ${JSON.stringify(installCwdPath)}\nexit 0\n`);
+        writeFileSync(
+            yarnPath,
+            `#!/bin/sh\nprintf "%s" "$PWD" > ${JSON.stringify(installCwdPath)}\nprintf "%s" "$TSF_INSTALL_PACKAGE_MANAGER_RERUN" > ${JSON.stringify(installGuardPath)}\nexit 0\n`
+        );
         chmodSync(yarnPath, 0o755);
 
         const result = runCli('tsf-install.js', [], root, {
@@ -303,6 +312,7 @@ describe('CLI', () => {
         assert.equal(result.status, 0, result.stderr);
         assert.match(result.stdout, /tsf-install: running yarn install/);
         assert.equal(readFileSync(installCwdPath, 'utf8'), realpathSync(root));
+        assert.equal(readFileSync(installGuardPath, 'utf8'), '1');
         const pkg = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8')) as {
             scripts?: Record<string, string>;
             devDependencies?: Record<string, string>;
@@ -319,6 +329,73 @@ describe('CLI', () => {
         assert.equal(siblingPkg.devDependencies?.typescript, expectedTypescriptVersion);
         assert.equal(existsSync(join(root, '.yarn', 'patches')), false);
         assert.equal(existsSync(join(workspace, '.yarn', 'patches')), false);
+    });
+
+    it('reruns npm during postinstall and guards against a package-manager loop', () => {
+        const dir = tempDir();
+        const binDir = join(dir, 'bin');
+        const installCwdPath = join(dir, 'install-cwd.txt');
+        const installGuardPath = join(dir, 'install-guard.txt');
+        const packageJsonAtInstallPath = join(dir, 'package-at-install.json');
+        mkdirSync(binDir, { recursive: true });
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify(
+                {
+                    name: 'fixture',
+                    packageManager: 'yarn@4.17.1',
+                    devDependencies: {
+                        '@zyno-io/ts-server-foundation': '*',
+                        ttsc: '^0.1',
+                        typescript: '~5.9'
+                    }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(join(dir, 'package-lock.json'), '{}\n');
+        const npmPath = join(binDir, 'npm');
+        writeFileSync(
+            npmPath,
+            `#!/bin/sh\nprintf "%s" "$PWD" > ${JSON.stringify(installCwdPath)}\nprintf "%s" "$TSF_INSTALL_PACKAGE_MANAGER_RERUN" > ${JSON.stringify(installGuardPath)}\ncp "$PWD/package.json" ${JSON.stringify(packageJsonAtInstallPath)}\nexit 0\n`
+        );
+        chmodSync(npmPath, 0o755);
+
+        const result = runCli('tsf-install.js', [], dir, {
+            PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            npm_lifecycle_event: 'postinstall'
+        });
+
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /tsf-install: running npm install/);
+        assert.equal(readFileSync(installCwdPath, 'utf8'), realpathSync(dir));
+        assert.equal(readFileSync(installGuardPath, 'utf8'), '1');
+        const packageAtInstall = JSON.parse(readFileSync(packageJsonAtInstallPath, 'utf8')) as {
+            devDependencies: Record<string, string>;
+        };
+        assert.equal(packageAtInstall.devDependencies['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(packageAtInstall.devDependencies.ttsc, expectedTtscVersion);
+        assert.equal(packageAtInstall.devDependencies.typescript, expectedTypescriptVersion);
+
+        const packageJsonPath = join(dir, 'package.json');
+        const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { devDependencies: Record<string, string> };
+        pkg.devDependencies.typescript = '~5.9';
+        writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 4)}\n`);
+        rmSync(installCwdPath);
+        rmSync(installGuardPath);
+        rmSync(packageJsonAtInstallPath);
+
+        const guardedResult = runCli('tsf-install.js', [], dir, {
+            PATH: `${binDir}:${process.env.PATH ?? ''}`,
+            TSF_INSTALL_PACKAGE_MANAGER_RERUN: '1'
+        });
+
+        assert.equal(guardedResult.status, 0, guardedResult.stderr);
+        assert.doesNotMatch(guardedResult.stdout, /tsf-install: running npm install/);
+        assert.equal(existsSync(installCwdPath), false);
+        assert.equal(existsSync(installGuardPath), false);
+        assert.equal(existsSync(packageJsonAtInstallPath), false);
     });
 
     it('updates framework and compiler versions wherever they are declared in workspace packages', () => {

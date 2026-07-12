@@ -8,6 +8,7 @@ import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from '
 
 const PACKAGE_NAME = '@zyno-io/ts-server-foundation';
 const INSTALL_COMMAND = 'tsf-install';
+const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs';
 const TYPE_COMPILER_PLUGIN_RELATIVE_PATH = join('dist', 'src', 'type-compiler', 'index.cjs');
 
@@ -82,14 +83,8 @@ export function install(options: InstallOptions = {}): number {
     if (compilerSetupChanged) console.log('tsf-install: updated TypeScript compiler setup');
     if (tsconfigChanged) console.log('tsf-install: updated tsconfig compiler plugin');
 
-    if (compilerSetupChanged) {
-        if (options.runPackageManager !== false && !isPostinstallLifecycle()) {
-            return runPackageManagerInstall(packageManager.installDir, packageManager.manager);
-        }
-
-        if (isPostinstallLifecycle()) {
-            console.log(`tsf-install: run ${packageManager.manager} install to refresh the lockfile`);
-        }
+    if (compilerSetupChanged && options.runPackageManager !== false && process.env[PACKAGE_MANAGER_RERUN_ENV] !== '1') {
+        return runPackageManagerInstall(packageManager.installDir, packageManager.manager);
     }
 
     return 0;
@@ -427,14 +422,14 @@ function parseJsonC(contents: string): unknown {
 function detectPackageManager(projectDir: string, pkg: PackageJson): PackageManagerInfo {
     let dir = projectDir;
     while (true) {
+        const lockfile = detectLockfilePackageManager(dir);
+        if (lockfile) return { installDir: dir, manager: lockfile };
+
         const packageJson = dir === projectDir ? pkg : readPackageJsonIfExists(join(dir, 'package.json'));
         if (packageJson) {
             const declared = getDeclaredPackageManager(packageJson);
             if (declared) return { installDir: dir, manager: declared };
         }
-
-        const lockfile = detectLockfilePackageManager(dir);
-        if (lockfile) return { installDir: dir, manager: lockfile };
 
         const parent = dirname(dir);
         if (parent === dir) return { installDir: projectDir, manager: 'npm' };
@@ -453,13 +448,11 @@ function getDeclaredPackageManager(pkg: PackageJson): PackageManager | undefined
 }
 
 function detectLockfilePackageManager(dir: string): PackageManager | undefined {
-    if (existsSync(join(dir, 'yarn.lock')) || existsSync(join(dir, '.yarnrc.yml'))) return 'yarn';
+    if (existsSync(join(dir, 'yarn.lock'))) return 'yarn';
+    if (existsSync(join(dir, 'package-lock.json')) || existsSync(join(dir, 'npm-shrinkwrap.json'))) return 'npm';
     if (existsSync(join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
     if (existsSync(join(dir, 'bun.lockb')) || existsSync(join(dir, 'bun.lock'))) return 'bun';
-}
-
-function isPostinstallLifecycle(): boolean {
-    return process.env.npm_lifecycle_event === 'postinstall';
+    if (existsSync(join(dir, '.yarnrc.yml'))) return 'yarn';
 }
 
 function runPackageManagerInstall(projectDir: string, packageManager: PackageManager): number {
@@ -467,7 +460,10 @@ function runPackageManagerInstall(projectDir: string, packageManager: PackageMan
     const result = spawnSync(packageManager, ['install'], {
         cwd: projectDir,
         stdio: 'inherit',
-        env: process.env
+        env: {
+            ...process.env,
+            [PACKAGE_MANAGER_RERUN_ENV]: '1'
+        }
     });
     if (result.error) {
         console.error(result.error.message);
