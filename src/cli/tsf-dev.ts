@@ -9,7 +9,6 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { Env } from '../env';
 import { cleanDist, extractTsconfigArg, findProjectRoot, resolveFromProject, runNode } from './common';
-import { install } from './tsf-install';
 
 Env.APP_ENV ||= 'development';
 
@@ -107,8 +106,6 @@ Common options:
 async function cmdBuild(args: string[]): Promise<number> {
     const watch = takeFlag(args, '--watch');
     const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
-    const installStatus = ensureProjectInstalled();
-    if (installStatus !== 0) return installStatus;
     const status = getBuildStatus(tsconfig);
     if (watch) {
         if (!isDevRunning() && !status.fresh) cleanDist(projectDir);
@@ -128,8 +125,6 @@ async function cmdRun(args: string[]): Promise<number> {
     const debug = takeFlag(ownArgs, '--debug');
     const tsconfig = extractTsconfigArg(ownArgs) ?? 'tsconfig.json';
     const script = ownArgs.find(arg => !arg.startsWith('-')) ?? '.';
-    const installStatus = ensureProjectInstalled();
-    if (installStatus !== 0) return installStatus;
     const tscChild = await ensureDevBuild(tsconfig);
     registerDevPid();
     process.on('exit', unregisterDevPid);
@@ -172,8 +167,6 @@ function cmdTest(args: string[]): number {
 function cmdMigrate(command: 'run' | 'create' | 'reset' | 'charset', args: string[]): number {
     const debug = takeFlag(args, '--debug');
     const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
-    const installStatus = ensureProjectInstalled();
-    if (installStatus !== 0) return installStatus;
     const tscStatus = runTscIfNeeded(tsconfig);
     if (tscStatus !== 0) return tscStatus;
     if (command === 'run') {
@@ -188,17 +181,11 @@ function cmdMigrate(command: 'run' | 'create' | 'reset' | 'charset', args: strin
 
 function cmdOpenApiGenerate(args: string[]): number {
     const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
-    const installStatus = ensureProjectInstalled();
-    if (installStatus !== 0) return installStatus;
     const tscStatus = runTscIfNeeded(tsconfig);
     if (tscStatus !== 0) return tscStatus;
     return runNode(['--enable-source-maps', '.', 'openapi:generate', ...args], projectDir, {
         APP_ENV: Env.APP_ENV ?? 'development'
     }).status;
-}
-
-function ensureProjectInstalled(): number {
-    return install({ projectDir });
 }
 
 function runTsc(tsconfig: string): number {

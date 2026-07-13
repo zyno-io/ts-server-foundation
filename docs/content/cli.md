@@ -59,7 +59,7 @@ All commands resolve the project root from the working directory. `-p <file>` an
 | Command                                   | Behavior                                                                                                |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `clean`                                   | Removes `dist/`.                                                                                        |
-| `build [--watch]`                         | Ensures compiler setup, cleans when needed, and compiles with the supported `ttsc`.                     |
+| `build [--watch]`                         | Cleans when needed and compiles with the installed `ttsc`.                                              |
 | `run [--debug] [script] -- <app-command>` | Ensures a watch build, then starts Node with source maps, file watching, and the requested app command. |
 | `test [--debug]`                          | Builds the test config and delegates to `tsf-test`.                                                     |
 | `migrate [--debug]`                       | Builds, then invokes the package entrypoint with `migrate:run`.                                         |
@@ -79,7 +79,7 @@ tsf-dev build -p tsconfig.test.json
 
 `tsf-dev build` records a fingerprint of compiler inputs and outputs under `dist/`. A later command reuses a fresh build; changing TypeScript/JavaScript sources, JSON configuration, or the lockfile invalidates it. Watch mode uses the selected tsconfig's files/include/exclude/outDir rules and ignores generated and dependency directories.
 
-`tsf-install` runs before normal development builds so the project uses the package-supported compiler versions and transform. Test builds are the exception: `tsf-dev test` compiles directly and does not mutate package/compiler setup during a test run.
+`tsf-dev` never changes package or compiler setup. Dependency installation and compiler normalization happen only through the explicit `tsf-install` command or the generated app's `postinstall` script.
 
 ### Run
 

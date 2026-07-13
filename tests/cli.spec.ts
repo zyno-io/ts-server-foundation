@@ -732,10 +732,8 @@ describe('CLI', () => {
     it('runs tsf-dev build in a project fixture', () => {
         const dir = repoTempDir();
         mkdirSync(join(dir, 'src'), { recursive: true });
-        writeFileSync(
-            join(dir, 'package.json'),
-            '{"name":"fixture","type":"commonjs","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
-        );
+        const packageJson = '{"name":"fixture","type":"commonjs","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}';
+        writeFileSync(join(dir, 'package.json'), packageJson);
         installLocalFoundationPackage(dir, process.cwd());
         writeFileSync(
             join(dir, 'tsconfig.json'),
@@ -758,6 +756,8 @@ describe('CLI', () => {
 
         assert.equal(result.status, 0, result.stderr);
         assert.equal(existsSync(join(dir, 'dist', 'src', 'index.js')), true);
+        assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), packageJson);
+        assert.doesNotMatch(result.stdout, /tsf-install:/);
     });
 
     it('only rebuilds tsf-dev run for source files matched by tsconfig includes', async () => {
