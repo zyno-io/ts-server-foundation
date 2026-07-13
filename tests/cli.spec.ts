@@ -1086,9 +1086,11 @@ describe('CLI', () => {
                     strict: true,
                     skipLibCheck: true,
                     experimentalDecorators: true,
-                    types: ['node']
+                    types: ['node'],
+                    plugins: [{ transform: '@zyno-io/ts-server-foundation/type-compiler' }]
                 },
-                include: ['src/**/*.ts']
+                include: ['src/**/*.ts'],
+                reflection: true
             })
         );
         writeFileSync(

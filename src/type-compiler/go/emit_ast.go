@@ -281,7 +281,7 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 				if !ok || visited == nil || visited.Kind != shimast.KindCallExpression {
 					return visited
 				}
-				return updateMetadataCall(ec, visited.AsCallExpression(), callPlan, imports)
+				return updateMetadataCall(ec, visited.AsCallExpression(), callPlan, imports, runtimeReferences, plan.metadataTypeResolver)
 			}
 			if node.Kind == shimast.KindClassDeclaration {
 				visited := visitor.VisitEachChild(node)
@@ -319,7 +319,7 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 				plan.metadataTypeResolver,
 			))
 		}
-		declarations := runtimeReferences.declarations()
+		declarations := []*shimast.Node{}
 		if metadataTypes != nil {
 			declarations = append(declarations, metadataTypes)
 		}
@@ -421,7 +421,14 @@ func classMetadataDeclaration(ec *shimprinter.EmitContext, name *shimast.Node, o
 	return statement
 }
 
-func updateMetadataCall(ec *shimprinter.EmitContext, call *shimast.CallExpression, plan callEmissionPlan, imports *astImportRegistry) *shimast.Node {
+func updateMetadataCall(
+	ec *shimprinter.EmitContext,
+	call *shimast.CallExpression,
+	plan callEmissionPlan,
+	imports *astImportRegistry,
+	runtimeReferences *compactMetadataRuntimeInterner,
+	metadataTypeResolver string,
+) *shimast.Node {
 	arguments := []*shimast.Node{}
 	if call.Arguments != nil {
 		arguments = append(arguments, call.Arguments.Nodes...)
@@ -432,7 +439,13 @@ func updateMetadataCall(ec *shimprinter.EmitContext, call *shimast.CallExpressio
 	for len(arguments) < plan.metadataArgIndex {
 		arguments = append(arguments, ec.Factory.NewIdentifier("undefined"))
 	}
-	arguments = append(arguments, plan.metadata.materialize(ec, imports))
+	arguments = append(arguments, materializeCompactMetadataExpression(
+		ec,
+		imports,
+		runtimeReferences,
+		plan.metadata,
+		metadataTypeResolver,
+	))
 	return ec.Factory.UpdateCallExpression(
 		call,
 		call.Expression,

@@ -34,73 +34,19 @@ type compactMetadataEncoder struct {
 	runtimeRecipe    func(*compactMetadataEncoder, *shimast.Node) bool
 }
 
-type compactMetadataRuntimeReference struct {
-	name       string
-	expression *shimast.Node
-}
-
 type compactMetadataRuntimeInterner struct {
-	ec         *shimprinter.EmitContext
 	sourceFile *shimast.SourceFile
 	printer    *shimprinter.Printer
-	prefix     string
-	bySource   map[string]string
-	entries    []compactMetadataRuntimeReference
 }
 
 func newCompactMetadataRuntimeInterner(
 	ec *shimprinter.EmitContext,
 	sourceFile *shimast.SourceFile,
 ) *compactMetadataRuntimeInterner {
-	prefix := "__tsf_metadata_runtime_"
-	if sourceFile != nil {
-		for strings.Contains(sourceFile.Text(), prefix) {
-			prefix = "_" + prefix
-		}
-	}
 	return &compactMetadataRuntimeInterner{
-		ec:         ec,
 		sourceFile: sourceFile,
 		printer:    shimprinter.NewPrinter(shimprinter.PrinterOptions{}, shimprinter.PrintHandlers{}, ec),
-		prefix:     prefix,
-		bySource:   map[string]string{},
 	}
-}
-
-// reference returns a call to a shared expression factory. The factory is not
-// memoized: evaluating a slot still creates a fresh arrow/object and performs
-// any imported-alias lookup at the metadata expression's original first-use
-// point. Only the generated AST for that expression is deduplicated.
-func (interner *compactMetadataRuntimeInterner) reference(expression *shimast.Node) *shimast.Node {
-	if isMetadataTypeGetterCall(expression) {
-		return interner.ec.Factory.DeepCloneNode(expression)
-	}
-	key := interner.printer.Emit(expression, interner.sourceFile)
-	name := interner.bySource[key]
-	if name == "" {
-		name = interner.prefix + strconv.Itoa(len(interner.entries))
-		interner.bySource[key] = name
-		interner.entries = append(interner.entries, compactMetadataRuntimeReference{
-			name:       name,
-			expression: interner.ec.Factory.DeepCloneNode(expression),
-		})
-	}
-	return interner.ec.Factory.NewCallExpression(
-		interner.ec.Factory.NewIdentifier(name),
-		nil,
-		nil,
-		interner.ec.Factory.NewNodeList(nil),
-		shimast.NodeFlagsNone,
-	)
-}
-
-func isMetadataTypeGetterCall(expression *shimast.Node) bool {
-	if expression == nil || expression.Kind != shimast.KindCallExpression {
-		return false
-	}
-	call := expression.AsCallExpression()
-	return call != nil && call.Expression != nil && call.Expression.Kind == shimast.KindIdentifier &&
-		strings.HasPrefix(call.Expression.Text(), "__tsf_metadata_type_")
 }
 
 func isCompactMetadataAliasResolverCall(expression *shimast.Node) bool {
@@ -128,19 +74,16 @@ func (interner *compactMetadataRuntimeInterner) deduplicationKey(expression *shi
 	}
 	switch expression.Kind {
 	case shimast.KindArrowFunction, shimast.KindBigIntLiteral:
-		return interner.printer.Emit(expression, interner.sourceFile), true
+		return interner.emit(expression), true
 	case shimast.KindIdentifier:
 		if expression.Text() == "undefined" {
 			return "undefined", true
 		}
 	case shimast.KindCallExpression:
-		if isMetadataTypeGetterCall(expression) {
-			return interner.printer.Emit(expression, interner.sourceFile), true
-		}
 		if isCompactMetadataAliasResolverCall(expression) {
-			return interner.printer.Emit(expression, interner.sourceFile), true
+			return interner.emit(expression), true
 		}
-		source := interner.printer.Emit(expression, interner.sourceFile)
+		source := interner.emit(expression)
 		if strings.Contains(source, "__tsf_module") && strings.Contains(source, "__tsf_alias") {
 			return source, true
 		}
@@ -148,12 +91,12 @@ func (interner *compactMetadataRuntimeInterner) deduplicationKey(expression *shi
 	return "", false
 }
 
-func (interner *compactMetadataRuntimeInterner) declarations() []*shimast.Node {
-	declarations := make([]*shimast.Node, 0, len(interner.entries))
-	for _, entry := range interner.entries {
-		declarations = append(declarations, expressionFactoryDeclaration(interner.ec, entry.name, entry.expression))
+func (interner *compactMetadataRuntimeInterner) emit(expression *shimast.Node) string {
+	sourceFile := shimast.GetSourceFileOfNode(expression)
+	if sourceFile == nil {
+		sourceFile = interner.sourceFile
 	}
-	return declarations
+	return interner.printer.Emit(expression, sourceFile)
 }
 
 func encodeCompactMetadata(root *shimast.Node) compactMetadataEncoding {
@@ -367,6 +310,9 @@ func materializeCompactMetadataExpression(
 	metadataTypeResolver string,
 ) *shimast.Node {
 	metadata := template.materialize(ec, imports)
+	if _, ok := compactMetadataTypeRecipe(metadata, metadataTypeResolver); ok {
+		return metadata
+	}
 	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false)
 }
 
@@ -402,11 +348,11 @@ func materializeCompactMetadataNode(
 	)
 	references := make([]*shimast.Node, 0, len(encoding.references))
 	for _, reference := range encoding.references {
-		if imports.isOptionalModuleLoader(reference) || isCompactMetadataCommonJSRequire(reference, imports) {
-			references = append(references, ec.Factory.DeepCloneNode(reference))
-		} else {
-			references = append(references, runtimeReferences.reference(reference))
-		}
+		// Runtime values must stay beside the metadata expression that produced
+		// them. Hoisting a thunk can move it outside the lexical scope of local
+		// classes and validators, leaving the generated closure unable to resolve
+		// its original binding.
+		references = append(references, ec.Factory.DeepCloneNode(reference))
 	}
 	helperName := compactMetadataDecoderName
 	if registry {
@@ -471,6 +417,9 @@ func writeCompactMetadataRuntimeRecipe(
 }
 
 func compactMetadataTypeRecipe(expression *shimast.Node, resolverName string) (int, bool) {
+	for expression != nil && expression.Kind == shimast.KindParenthesizedExpression {
+		expression = expression.AsParenthesizedExpression().Expression
+	}
 	if resolverName == "" || expression == nil || expression.Kind != shimast.KindCallExpression {
 		return 0, false
 	}

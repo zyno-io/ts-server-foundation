@@ -47,10 +47,6 @@ func newMetadataTypeInterner(sourceText string) *metadataTypeInterner {
 }
 
 func (interner *metadataTypeInterner) reference(expr string) string {
-	if name := interner.names[expr]; name != "" {
-		return fmt.Sprintf("%s(%s)", interner.prefix, name)
-	}
-	name := fmt.Sprintf("%d", len(interner.expressions))
 	template, err := parseExpressionTemplate(expr)
 	if err != nil {
 		if interner.err == nil {
@@ -58,9 +54,38 @@ func (interner *metadataTypeInterner) reference(expr string) string {
 		}
 		return expr
 	}
+	if !isShareableMetadataType(template.parsed) {
+		return expr
+	}
+	if name := interner.names[expr]; name != "" {
+		return fmt.Sprintf("%s(%s)", interner.prefix, name)
+	}
+	name := fmt.Sprintf("%d", len(interner.expressions))
 	interner.names[expr] = name
 	interner.expressions = append(interner.expressions, template)
 	return fmt.Sprintf("%s(%s)", interner.prefix, name)
+}
+
+// Shared metadata is emitted at module scope. Only JSON data and primitive
+// values that cannot capture a lexical binding are safe to move there. Class
+// and validator thunks must remain at their original class or call site.
+func isShareableMetadataType(expression *shimast.Node) bool {
+	encoding := encodeCompactMetadata(expression)
+	for _, reference := range encoding.references {
+		if reference == nil {
+			return false
+		}
+		switch reference.Kind {
+		case shimast.KindBigIntLiteral:
+			continue
+		case shimast.KindIdentifier:
+			if reference.Text() == "undefined" {
+				continue
+			}
+		}
+		return false
+	}
+	return true
 }
 
 func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases bool) (emissionPlans, error) {

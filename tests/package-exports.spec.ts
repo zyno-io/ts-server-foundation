@@ -8,12 +8,17 @@ import { describe, it } from 'node:test';
 const requireFromTest = createRequire(__filename);
 
 describe('package exports', () => {
-    it('exports only the root API, type compiler, and OTel bootstrap', () => {
+    it('exports only the root API, metadata runtime, type compiler, and OTel bootstrap', () => {
         const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
             exports: Record<string, string | { types: string; import: string; require: string }>;
         };
 
-        assert.deepStrictEqual(Object.keys(pkg.exports), ['.', './type-compiler', './otel']);
+        assert.deepStrictEqual(Object.keys(pkg.exports), ['.', './type-metadata-runtime', './type-compiler', './otel']);
+        assert.deepStrictEqual(pkg.exports['./type-metadata-runtime'], {
+            types: './dist/src/reflection/compact-metadata.d.ts',
+            import: './dist/src/reflection/compact-metadata.js',
+            require: './dist/src/reflection/compact-metadata.js'
+        });
         assert.equal(pkg.exports['./type-compiler'], './dist/src/type-compiler/index.cjs');
         assert.deepStrictEqual(pkg.exports['./otel'], {
             types: './dist/src/telemetry/otel/index.d.ts',

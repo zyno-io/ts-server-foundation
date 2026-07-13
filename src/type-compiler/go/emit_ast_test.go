@@ -88,7 +88,14 @@ func TestUpdateMetadataCallUsesAbsoluteArgumentSlot(t *testing.T) {
 		ec.Factory.NewNodeList([]*shimast.Node{ec.Factory.NewIdentifier("input")}),
 		shimast.NodeFlagsNone,
 	).AsCallExpression()
-	updated := updateMetadataCall(ec, call, callEmissionPlan{metadataArgIndex: 4, metadata: template}, imports).AsCallExpression()
+	updated := updateMetadataCall(
+		ec,
+		call,
+		callEmissionPlan{metadataArgIndex: 4, metadata: template},
+		imports,
+		newCompactMetadataRuntimeInterner(ec, nil),
+		"",
+	).AsCallExpression()
 	if got := len(updated.Arguments.Nodes); got != 5 {
 		t.Fatalf("arguments = %d, want 5", got)
 	}
@@ -121,7 +128,13 @@ func TestMetadataTransformMatchesExactCallPosition(t *testing.T) {
 		commonJS: true,
 	}}
 	transformed := metadataTransform(plans)(shimprinter.NewEmitContext(), file)
-	transformedCalls := collectAstNodes(transformed.AsNode(), shimast.KindCallExpression)
+	transformedCalls := []*shimast.Node{}
+	for _, call := range collectAstNodes(transformed.AsNode(), shimast.KindCallExpression) {
+		expression := call.AsCallExpression().Expression
+		if expression != nil && expression.Kind == shimast.KindIdentifier && expression.Text() == "same" {
+			transformedCalls = append(transformedCalls, call)
+		}
+	}
 	if len(transformedCalls) != 2 {
 		t.Fatalf("transformed calls = %d, want 2", len(transformedCalls))
 	}
@@ -288,6 +301,35 @@ func TestCompactMetadataEncoderDeduplicatesGeneratedRuntimeThunks(t *testing.T) 
 	}
 	if strings.Count(encoding.serialized, `{"$tsf":0}`) != 2 {
 		t.Fatalf("repeated thunk did not reuse one reference index: %s", encoding.serialized)
+	}
+}
+
+func TestMetadataTypeInternerKeepsRuntimeExpressionsAtUseSite(t *testing.T) {
+	interner := newMetadataTypeInterner("")
+	runtime := `{kind: 16, classType: () => LocalModel}`
+	if got := interner.reference(runtime); got != runtime {
+		t.Fatalf("runtime metadata was moved to module scope: %s", got)
+	}
+	if len(interner.expressions) != 0 {
+		t.Fatalf("shared runtime metadata expressions = %d, want 0", len(interner.expressions))
+	}
+
+	if got := interner.reference(`{kind: 6}`); got != "__tsf_metadata_type(0)" {
+		t.Fatalf("JSON metadata reference = %s", got)
+	}
+	if len(interner.expressions) != 1 {
+		t.Fatalf("shared JSON metadata expressions = %d, want 1", len(interner.expressions))
+	}
+}
+
+func TestCompactMetadataTypeRecipeAcceptsParsedTemplate(t *testing.T) {
+	template, err := parseExpressionTemplate(`__tsf_metadata_type(3)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, ok := compactMetadataTypeRecipe(template.parsed, "__tsf_metadata_type")
+	if !ok || index != 3 {
+		t.Fatalf("metadata type recipe = (%d, %t), want (3, true)", index, ok)
 	}
 }
 

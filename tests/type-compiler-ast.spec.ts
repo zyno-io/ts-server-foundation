@@ -151,6 +151,11 @@ function createFixture(): string {
             export type RuntimeAlias = { active: boolean };
             export class EsmModel { dependency!: EsmDependency; }
             export const objectMetadata = typeOf<{ label: string }>();
+            export function createNestedMetadata() {
+                class NestedDependency {}
+                class NestedModel { constructor(public dependency: NestedDependency) {} }
+                return { NestedDependency, NestedModel, received: typeOf<NestedDependency>() };
+            }
         `
     );
     writeFileSync(
@@ -170,6 +175,11 @@ function createFixture(): string {
             export class CommonModel extends createBase() { dependency!: CommonDependency; alias!: OrderAlias; }
             export { decoratorMetadata, evaluationOrder };
             export const objectMetadata = typeOf<{ count: number }>();
+            export function createNestedMetadata() {
+                class NestedDependency {}
+                class NestedModel { constructor(public dependency: NestedDependency) {} }
+                return { NestedDependency, NestedModel, received: typeOf<NestedDependency>() };
+            }
         `
     );
     writeFileSync(
@@ -217,15 +227,17 @@ describe('AST metadata compiler integration', () => {
             const commonOutput = readFileSync(commonOutputPath, 'utf8');
 
             assert.doesNotMatch(esmOutput, /__tsf_runtime_|\brequire\s*\(/);
+            assert.doesNotMatch(esmOutput, /__tsf_metadata_runtime_/);
             assert.doesNotMatch(esmOutput, /\beval\s*\(/);
             assert.match(esmOutput, /type-metadata-runtime/);
             assert.match(esmOutput, /from "\.\/dependency\.mjs"/);
             assert.doesNotMatch(esmOutput, /ambient-dependency\.mjs/);
             assert.doesNotMatch(esmOutput, /AmbientOnly\.__tsfType/);
             assert.doesNotMatch(commonOutput, /__tsf_runtime_/);
+            assert.doesNotMatch(commonOutput, /__tsf_metadata_runtime_/);
             assert.doesNotMatch(commonOutput, /\beval\s*\(/);
             assert.match(commonOutput, /type-metadata-runtime/);
-            assert.match(commonOutput, /\\"\$tsfImport\\":\[0,\\"\.\/dependency\.cjs\\"/);
+            assert.match(commonOutput, /\\"\$tsfImport\\":\[\d+,\\"\.\/dependency\.cjs\\"/);
 
             for (const path of ['model.mjs.map', 'model.cjs.map', 'model.d.mts', 'model.d.mts.map', 'model.d.cts', 'model.d.cts.map']) {
                 assert.equal(existsSync(join(directory, 'dist', path)), true, `${path} was not emitted`);
@@ -244,6 +256,12 @@ describe('AST metadata compiler integration', () => {
             assert.equal(common.CommonModel.__tsfType.properties[0].name, 'dependency');
             assert.strictEqual(common.CommonModel.__tsfType, common.decoratorMetadata);
             assert.deepStrictEqual(common.evaluationOrder, ['base', 'metadata']);
+            for (const compiled of [esm, common]) {
+                const nested = compiled.createNestedMetadata();
+                const constructorType = nested.NestedModel.__tsfType.constructorParameters[0].type;
+                assert.strictEqual(constructorType.classType(), nested.NestedDependency);
+                assert.strictEqual(nested.received.classType(), nested.NestedDependency);
+            }
         } finally {
             delete (globalThis as typeof globalThis & { __tsfOrder?: string[] }).__tsfOrder;
             rmSync(directory, { recursive: true, force: true });
