@@ -352,10 +352,15 @@ const app = createApp({
 
 ## Middleware
 
-Middleware classes implement `HttpMiddleware` and can be attached at controller or route level.
+Middleware functions and classes can be attached at controller or route level. Use a function for stateless logic or a closure with fixed
+configuration. Use a class when the middleware needs dependency injection or an explicit DI scope.
 
 ```typescript
-import { HttpBadRequestError, HttpMiddleware, HttpRequest, HttpResponse, http } from '@zyno-io/ts-server-foundation';
+import { HttpBadRequestError, HttpMiddleware, HttpMiddlewareFunction, HttpRequest, HttpResponse, http } from '@zyno-io/ts-server-foundation';
+
+const requireHeader: HttpMiddlewareFunction = request => {
+    if (!request.headers['x-request-id']) throw new HttpBadRequestError('Missing request id');
+};
 
 class RequireHeaderMiddleware implements HttpMiddleware {
     async handle(request: HttpRequest, _response: HttpResponse) {
@@ -372,18 +377,20 @@ class AuditMiddleware implements HttpMiddleware {
 @(http.controller('/admin').middleware(RequireHeaderMiddleware))
 class AdminController {
     @http.middleware(AuditMiddleware)
-    @(http.GET().use(RequireHeaderMiddleware))
+    @(http.GET().use(requireHeader))
     async index() {
         return { ok: true };
     }
 }
 ```
 
-Use `http.middleware(...)` as a class or method decorator, or chain `.middleware(...)`/`.use(...)` from `http.controller()` and a route decorator. Controller middleware always runs before route middleware. Within each group, middleware runs in the stored decorator/list order; when mixing standalone and chained decorators, remember that TypeScript applies stacked decorators from bottom to top.
+Use `http.middleware(...)` as a class or method decorator, or chain `.middleware(...)`/`.use(...)` from `http.controller()` and a route decorator. A middleware function receives the same `HttpRequest` and `HttpResponse` arguments as `HttpMiddleware.handle()`. Middleware continues automatically when it returns; there is no `next` callback. Controller middleware always runs before route middleware. Within each group, middleware runs in the stored decorator/list order; when mixing standalone and chained decorators, remember that TypeScript applies stacked decorators from bottom to top.
 
 Returning a response result such as `jsonResponse(...)` writes and ends the response, short-circuiting the remaining middleware, controller workflow, parameter resolution, and handler. Middleware may also end the supplied `HttpResponse` directly.
 
-Registered middleware is resolved through DI. Register middleware with `scope: 'request'` when it injects request-scoped providers or `HttpRequest`; it then shares the controller's request context. A middleware class with no constructor arguments may be used without provider registration and is constructed directly. Once a middleware class is registered, DI failures are reported rather than falling back to direct construction.
+Middleware functions are invoked directly, so the registered function and its closure are shared by every request and every router using that decorated controller. An unregistered zero-argument middleware class is instantiated once per router. Registered middleware is resolved through DI and follows its provider scope: singleton by default, once per request for `scope: 'request'`, or once per resolution for `scope: 'transient'`. Register middleware with `scope: 'request'` when it injects request-scoped providers or `HttpRequest`; it then shares the controller's request context. Once a middleware class is registered, DI failures are reported rather than falling back to direct construction.
+
+Singleton middleware must not store request-specific state on the function closure or class instance. Store request-local state on `HttpRequest.store`, or register a class with `scope: 'request'` when instance state is required.
 
 ## Static Files
 

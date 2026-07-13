@@ -38,6 +38,7 @@ import {
     setLogSink,
     type EmailAddress,
     type EntityFields,
+    type HttpMiddlewareFunction,
     type LogEntry,
     type Overwrite,
     type TrimmedString,
@@ -2521,6 +2522,163 @@ describe('http router', () => {
         const response = await app.request(HttpRequest.GET('/middleware/alt'));
 
         assert.deepStrictEqual(response.json, { entries: ['controller', 'route', 'handler'] });
+    });
+
+    it('supports function middleware in standalone and chained decorators', async () => {
+        function record(request: HttpRequest, name: string): void {
+            const entries = (request.store.middlewareEntries ??= []) as string[];
+            entries.push(name);
+        }
+
+        function controllerChainMiddleware(request: HttpRequest, response: HttpResponse): void {
+            record(request, 'controller-chain');
+            response.setHeader('x-controller-middleware', 'yes');
+        }
+
+        const controllerDecoratorMiddleware: HttpMiddlewareFunction = async request => {
+            await Promise.resolve();
+            record(request, 'controller-decorator');
+        };
+
+        async function routeChainMiddleware(request: HttpRequest): Promise<void> {
+            await Promise.resolve();
+            record(request, 'route-chain');
+        }
+
+        const routeDecoratorMiddleware: HttpMiddlewareFunction = request => {
+            record(request, 'route-decorator');
+        };
+
+        @http.middleware(controllerDecoratorMiddleware)
+        @(http.controller('/middleware-functions').middleware(controllerChainMiddleware))
+        class FunctionMiddlewareController {
+            @http.middleware(routeDecoratorMiddleware)
+            @(http.GET().middleware(routeChainMiddleware))
+            get(request: HttpRequest) {
+                return { entries: request.store.middlewareEntries };
+            }
+
+            @(http.GET('/stop').use(() => jsonResponse({ stopped: true }, 202)))
+            stop() {
+                return { stopped: false };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [FunctionMiddlewareController] });
+
+        const response = await app.request(HttpRequest.GET('/middleware-functions'));
+        const stopped = await app.request(HttpRequest.GET('/middleware-functions/stop'));
+
+        assert.deepStrictEqual(response.json, {
+            entries: ['controller-chain', 'controller-decorator', 'route-chain', 'route-decorator']
+        });
+        assert.equal(response.getHeader('x-controller-middleware'), 'yes');
+        assert.equal(stopped.statusCode, 202);
+        assert.deepStrictEqual(stopped.json, { stopped: true });
+    });
+
+    it('reuses unregistered zero-argument middleware as a router singleton', async () => {
+        let constructions = 0;
+
+        class CachedMiddleware implements HttpMiddleware {
+            readonly id = ++constructions;
+
+            handle = (request: HttpRequest): void => {
+                const ids = (request.store.middlewareIds ??= []) as number[];
+                ids.push(this.id);
+            };
+        }
+
+        @(http.controller('/middleware-cached').middleware(CachedMiddleware))
+        class CachedMiddlewareController {
+            @(http.GET().use(CachedMiddleware))
+            get(request: HttpRequest) {
+                return { ids: request.store.middlewareIds };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [CachedMiddlewareController] });
+
+        const first = await app.request(HttpRequest.GET('/middleware-cached'));
+        const second = await app.request(HttpRequest.GET('/middleware-cached'));
+        const otherApp = createApp({ controllers: [CachedMiddlewareController] });
+        const otherRouter = await otherApp.request(HttpRequest.GET('/middleware-cached'));
+
+        assert.deepStrictEqual(first.json, { ids: [1, 1] });
+        assert.deepStrictEqual(second.json, { ids: [1, 1] });
+        assert.deepStrictEqual(otherRouter.json, { ids: [2, 2] });
+        assert.equal(constructions, 2);
+    });
+
+    it('preserves singleton, request, and transient scopes for registered middleware', async () => {
+        let singletonConstructions = 0;
+        let requestConstructions = 0;
+        let transientConstructions = 0;
+
+        function record(request: HttpRequest, scope: string, id: number): void {
+            const entries = (request.store.middlewareScopes ??= {}) as Record<string, number[]>;
+            (entries[scope] ??= []).push(id);
+        }
+
+        class SingletonMiddleware implements HttpMiddleware {
+            readonly id = ++singletonConstructions;
+
+            handle(request: HttpRequest): void {
+                record(request, 'singleton', this.id);
+            }
+        }
+
+        class RequestMiddleware implements HttpMiddleware {
+            readonly id = ++requestConstructions;
+
+            handle(request: HttpRequest): void {
+                record(request, 'request', this.id);
+            }
+        }
+
+        class TransientMiddleware implements HttpMiddleware {
+            readonly id = ++transientConstructions;
+
+            handle(request: HttpRequest): void {
+                record(request, 'transient', this.id);
+            }
+        }
+
+        @http.controller('/middleware-scopes')
+        class ScopedMiddlewareController {
+            @(http
+                .GET()
+                .use(SingletonMiddleware, SingletonMiddleware, RequestMiddleware, RequestMiddleware, TransientMiddleware, TransientMiddleware))
+            get(request: HttpRequest) {
+                return request.store.middlewareScopes;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            controllers: [ScopedMiddlewareController],
+            providers: [
+                SingletonMiddleware,
+                { provide: RequestMiddleware, useClass: RequestMiddleware, scope: 'request' },
+                { provide: TransientMiddleware, useClass: TransientMiddleware, scope: 'transient' }
+            ]
+        });
+
+        const first = await app.request(HttpRequest.GET('/middleware-scopes'));
+        const second = await app.request(HttpRequest.GET('/middleware-scopes'));
+
+        assert.deepStrictEqual(first.json, {
+            singleton: [1, 1],
+            request: [1, 1],
+            transient: [1, 2]
+        });
+        assert.deepStrictEqual(second.json, {
+            singleton: [1, 1],
+            request: [2, 2],
+            transient: [3, 4]
+        });
     });
 
     it('orders standalone and chained middleware decorators and shares request-scoped dependencies', async () => {

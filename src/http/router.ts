@@ -25,7 +25,7 @@ import {
     type RouteParameterResolverObject
 } from './decorators';
 import { HttpBadRequestError, HttpError, HttpNotFoundError, HttpUnauthorizedError } from './errors';
-import type { HttpMiddleware } from './middleware';
+import type { HttpMiddleware, HttpMiddlewareInput } from './middleware';
 import { HttpRequest, HttpRequestStream } from './request';
 import type { HttpMethod } from './request';
 import { HttpResponse, isHttpResponseResult, MemoryHttpResponse } from './response';
@@ -54,7 +54,7 @@ export interface HttpRoutePlan {
     description?: string;
     returnType: Type;
     parameters: HttpRouteParameterPlan[];
-    middlewares: ClassType<HttpMiddleware>[];
+    middlewares: HttpMiddlewareInput[];
     bodyMode: 'guarded' | 'stream';
     uploadPolicy: MultipartRequestPolicy;
 }
@@ -81,6 +81,12 @@ export type HttpRouteParameterPlan =
 
 const BodyParsePromiseKey = Symbol.for('@zyno-io/ts-server-foundation:http-body-parse-promise');
 
+function isHttpMiddlewareClass(input: HttpMiddlewareInput): input is ClassType<HttpMiddleware> {
+    const prototype = (input as unknown as { prototype?: { handle?: unknown } }).prototype;
+    if (typeof prototype?.handle === 'function') return true;
+    return /^class(?:\s|\{)/.test(Function.prototype.toString.call(input));
+}
+
 interface CompiledRouteParameterResolver {
     type: ClassType | string;
     resolver: RouteParameterResolverInput;
@@ -88,6 +94,7 @@ interface CompiledRouteParameterResolver {
 
 export class HttpRouter {
     private routes: HttpRoutePlan[] = [];
+    private readonly unregisteredMiddlewareInstances = new WeakMap<ClassType<HttpMiddleware>, HttpMiddleware>();
     private readonly httpResolvers: CompiledRouteParameterResolver[];
 
     constructor(
@@ -126,7 +133,7 @@ export class HttpRouter {
                 description: method.getDescription() || undefined,
                 returnType: method.getReturnType(),
                 parameters,
-                middlewares: [...controller.middlewares, ...route.middlewares] as ClassType<HttpMiddleware>[],
+                middlewares: [...controller.middlewares, ...route.middlewares],
                 bodyMode,
                 uploadPolicy: compileMultipartRequestPolicy(parameters)
             });
@@ -212,9 +219,10 @@ export class HttpRouter {
     }
 
     private async runMiddlewares(route: HttpRoutePlan, context: RequestContext, request: HttpRequest, response: HttpResponse): Promise<void> {
-        for (const Middleware of route.middlewares) {
-            const middleware = this.resolveMiddleware(Middleware, context, route.moduleId);
-            const result = await middleware.handle(request, response);
+        for (const input of route.middlewares) {
+            const result = isHttpMiddlewareClass(input)
+                ? await this.resolveMiddleware(input, context, route.moduleId).handle(request, response)
+                : await input(request, response);
             if (isHttpResponseResult(result)) result.writeTo(response);
             if (response.writableEnded) return;
         }
@@ -222,8 +230,14 @@ export class HttpRouter {
 
     private resolveMiddleware(Middleware: ClassType<HttpMiddleware>, context: RequestContext, moduleId?: number): HttpMiddleware {
         if (!this.container.has(Middleware, moduleId)) {
-            if (Middleware.length === 0) return new Middleware();
-            throw new ProviderNotFoundError(Middleware);
+            if (Middleware.length !== 0) throw new ProviderNotFoundError(Middleware);
+
+            let instance = this.unregisteredMiddlewareInstances.get(Middleware);
+            if (!instance) {
+                instance = new Middleware();
+                this.unregisteredMiddlewareInstances.set(Middleware, instance);
+            }
+            return instance;
         }
         return moduleId === undefined ? this.container.get(Middleware, context) : this.container.resolve(Middleware, moduleId, context);
     }

@@ -4,17 +4,18 @@ import type { ClassType } from '../types';
 import type { HttpResponse } from './response';
 import type { HttpRequest } from './request';
 import type { HttpMethod } from './request';
+import type { HttpMiddlewareInput } from './middleware';
 
 export interface ControllerMetadata {
     path: string;
-    middlewares: ClassType[];
+    middlewares: HttpMiddlewareInput[];
 }
 
 export interface RouteMetadata {
     method: HttpMethod;
     path: string;
     propertyKey: string | symbol;
-    middlewares: ClassType[];
+    middlewares: HttpMiddlewareInput[];
 }
 
 export interface RouteParameterResolverContext {
@@ -51,21 +52,21 @@ export type RouteParameterResolverRegistry = Record<string, RouteParameterResolv
 
 const controllerMetadata = new WeakMap<ClassType, ControllerMetadata>();
 const routeMetadata = new WeakMap<object, RouteMetadata[]>();
-const controllerMiddlewareMetadata = new WeakMap<ClassType, ClassType[]>();
-const routeMiddlewareMetadata = new WeakMap<object, Map<string | symbol, ClassType[]>>();
+const controllerMiddlewareMetadata = new WeakMap<ClassType, HttpMiddlewareInput[]>();
+const routeMiddlewareMetadata = new WeakMap<object, Map<string | symbol, HttpMiddlewareInput[]>>();
 const routeParameterResolverMetadata = new WeakMap<ClassType, RouteParameterResolverMetadata[]>();
 
 type ControllerDecorator = ClassDecorator & {
-    middleware: (..._middlewares: ClassType[]) => ClassDecorator;
+    middleware: (..._middlewares: HttpMiddlewareInput[]) => ClassDecorator;
 };
 
 type RouteDecorator = MethodDecorator & {
-    use: (..._middlewares: ClassType[]) => MethodDecorator;
-    middleware: (..._middlewares: ClassType[]) => MethodDecorator;
+    use: (..._middlewares: HttpMiddlewareInput[]) => MethodDecorator;
+    middleware: (..._middlewares: HttpMiddlewareInput[]) => MethodDecorator;
 };
 
 function controller(path = ''): ControllerDecorator {
-    const middlewares: ClassType[] = [];
+    const middlewares: HttpMiddlewareInput[] = [];
     const decorator = ((target: Function) => {
         const Controller = target as ClassType;
         controllerMetadata.set(Controller, {
@@ -74,7 +75,7 @@ function controller(path = ''): ControllerDecorator {
         });
     }) as ControllerDecorator;
 
-    decorator.middleware = (...items: ClassType[]) => {
+    decorator.middleware = (...items: HttpMiddlewareInput[]) => {
         middlewares.push(...items);
         return decorator;
     };
@@ -82,7 +83,7 @@ function controller(path = ''): ControllerDecorator {
 }
 
 function route(method: HttpMethod, path = ''): RouteDecorator {
-    const middlewares: ClassType[] = [];
+    const middlewares: HttpMiddlewareInput[] = [];
     const decorator = ((_target: object, propertyKey: string | symbol) => {
         const routes = routeMetadata.get(_target) ?? [];
         routes.push({
@@ -94,7 +95,7 @@ function route(method: HttpMethod, path = ''): RouteDecorator {
         routeMetadata.set(_target, routes);
     }) as unknown as RouteDecorator;
 
-    decorator.use = (...items: ClassType[]) => {
+    decorator.use = (...items: HttpMiddlewareInput[]) => {
         middlewares.push(...items);
         return decorator;
     };
@@ -102,7 +103,7 @@ function route(method: HttpMethod, path = ''): RouteDecorator {
     return decorator;
 }
 
-function middleware(...items: ClassType[]): ClassDecorator & MethodDecorator {
+function middleware(...items: HttpMiddlewareInput[]): ClassDecorator & MethodDecorator {
     return ((target: Function | object, propertyKey?: string | symbol) => {
         if (propertyKey === undefined) {
             const Controller = target as ClassType;
@@ -154,12 +155,12 @@ export function getRouteParameterResolverMetadata(controllerClass: ClassType): R
     return routeParameterResolverMetadata.get(controllerClass) ?? [];
 }
 
-function getRouteMiddlewares(target: object, propertyKey: string | symbol): ClassType[] {
+function getRouteMiddlewares(target: object, propertyKey: string | symbol): HttpMiddlewareInput[] {
     return routeMiddlewareMetadata.get(target)?.get(propertyKey) ?? [];
 }
 
-function setRouteMiddlewares(target: object, propertyKey: string | symbol, middlewares: ClassType[]): void {
-    const map = routeMiddlewareMetadata.get(target) ?? new Map<string | symbol, ClassType[]>();
+function setRouteMiddlewares(target: object, propertyKey: string | symbol, middlewares: HttpMiddlewareInput[]): void {
+    const map = routeMiddlewareMetadata.get(target) ?? new Map<string | symbol, HttpMiddlewareInput[]>();
     map.set(propertyKey, middlewares);
     routeMiddlewareMetadata.set(target, map);
 }
