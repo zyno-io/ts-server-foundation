@@ -1,3 +1,5 @@
+import '../../timezone';
+
 import { hostname } from 'node:os';
 import type { IncomingMessage, RequestOptions } from 'node:http';
 

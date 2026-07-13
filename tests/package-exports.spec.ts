@@ -51,6 +51,31 @@ describe('package exports', () => {
         assert.equal(root.init, undefined);
     });
 
+    it('forces the process timezone to UTC when loading a runtime entrypoint', () => {
+        for (const entrypoint of ['@zyno-io/ts-server-foundation', '@zyno-io/ts-server-foundation/otel']) {
+            const output = execFileSync(
+                process.execPath,
+                [
+                    '-e',
+                    `
+                        require(${JSON.stringify(entrypoint)});
+                        process.stdout.write(JSON.stringify({
+                            timezone: process.env.TZ,
+                            offset: new Date().getTimezoneOffset()
+                        }));
+                    `
+                ],
+                {
+                    cwd: process.cwd(),
+                    encoding: 'utf8',
+                    env: { ...process.env, TZ: 'America/New_York' }
+                }
+            );
+
+            assert.deepStrictEqual(JSON.parse(output), { timezone: 'UTC', offset: 0 }, entrypoint);
+        }
+    });
+
     it('loads the type compiler subpath as a plugin descriptor', () => {
         const typeCompiler = requireFromTest('@zyno-io/ts-server-foundation/type-compiler');
         assert.equal(typeof typeCompiler, 'function');

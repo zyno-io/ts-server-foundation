@@ -1,3 +1,5 @@
+import './timezone';
+
 export * from './types';
 export {
     ReflectionKind,
