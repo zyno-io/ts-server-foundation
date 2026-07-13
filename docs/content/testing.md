@@ -148,7 +148,7 @@ export const createTestingFacade = TestingHelpers.createTestingFacadeBuilder(
 
 ## Database Tests
 
-The facade creates a database named from `databasePrefix`, timestamp, process id, and a counter. It updates the app config and `Env` for the chosen adapter, then restores the previous database env when stopped.
+The facade creates a database named from `databasePrefix`, a four-character hash of the current project directory, timestamp, process id, and a counter. The directory hash keeps concurrent test runs in separate worktrees from sharing database names. It updates the app config and `Env` for the chosen adapter, then restores the previous database env when stopped.
 
 Database facades use savepoints by default. In savepoint mode, compatible facades reuse migrated test databases, so migrations run once per compatible database slot instead of once per suite. Each facade still gets seed-data isolation and rolls seed/runtime changes back on stop. When `tsf-dev test` has MySQL env available, it starts a shared MySQL session manager with a slot pool sized to the Node test worker concurrency so compatible MySQL facades can run in parallel across worker processes. Each manager slot owns one database and one long-lived backend connection; after schema preparation, the manager keeps a backend transaction open, allows only one frontend connection at a time for that slot, maps frontend transaction commands to savepoints, and rolls back to the slot baseline when the frontend disconnects. Leave `TSF_TEST_MYSQL_SESSION_MANAGER` unset to start the manager when MySQL test config is present and savepoints are allowed, set it to `0` to disable the manager, or set it to `1` to force it on. Set `TSF_TEST_ALLOW_SAVEPOINTS=0` to force all facades out of savepoint mode even when `useSavepoints: true`, or set `useSavepoints: false` for a fully isolated create/migrate/drop database lifecycle. Database readiness waits run only when a facade has `enableDatabase` and are cached once per process.
 
@@ -278,7 +278,7 @@ The in-memory query builder covers common field filters (including comparison an
 
 ## Database Defaults And Cleanup
 
-`setDefaultDatabaseConfig()` writes values to `Env` only when a key is not already configured. `cleanupTestDatabases(prefix, adapter?)` drops MySQL/PostgreSQL test databases matched by SQL `LIKE '<prefix>%'`, including compatible shared-database state in the current process.
+`setDefaultDatabaseConfig()` writes values to `Env` only when a key is not already configured. `cleanupTestDatabases(prefix, adapter?)` drops MySQL/PostgreSQL test databases matching the prefix and current project-directory hash, including compatible shared-database state in the current process. This prevents cleanup in one worktree from dropping another worktree's test databases.
 
 ```typescript
 TestingHelpers.setDefaultDatabaseConfig({

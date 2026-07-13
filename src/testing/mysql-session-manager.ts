@@ -5,6 +5,7 @@ import mysql, { type Connection, type PoolOptions } from 'mysql2/promise';
 import { Env } from '../env';
 import { listenRpc, type RpcPeer } from '../database/drivers/mysql-session-rpc';
 import { createLogger, type LogData, type ScopedLogger } from '../services/logger';
+import { formatTestDatabaseName } from './database-name';
 
 export interface MySQLSessionManagerOptions {
     mysql: PoolOptions;
@@ -634,10 +635,9 @@ export class MySQLSessionManager {
     }
 
     private createDatabaseName(key: string, prefix: string, slotIndex: number): string {
-        const safePrefix = prefix.replace(/[^a-zA-Z0-9_]/g, '_') || 'test';
         const hash = hashKey(key);
         const ts = this.options.testRunTs ?? Env.TEST_RUN_TS ?? String(Math.floor(Date.now() / 1000));
-        return `${safePrefix}_${ts}_${process.pid}_${hash}_${slotIndex + 1}`;
+        return formatTestDatabaseName(prefix, [ts, process.pid, hash, slotIndex + 1]);
     }
 
     private failSchemaPreparation(slot: DatabaseSlotState, error: Error): void {

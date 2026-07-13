@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it, mock } from 'node:test';
 
 import { entity, type OnUpdate, PrimaryKey } from '../src';
+import { createTestDatabasePrefix, formatTestDatabaseName } from '../src/testing/database-name';
 
 import {
     anyOf,
@@ -42,6 +43,24 @@ describe('TestingHelpers', () => {
         process.env = { ...originalEnv };
         resetLogSink();
         mock.restoreAll();
+    });
+
+    it('scopes generated test database prefixes to the worktree directory', () => {
+        const first = createTestDatabasePrefix('app-test', '/tmp/worktrees/app-first');
+        const repeated = createTestDatabasePrefix('app-test', '/tmp/worktrees/app-first');
+        const second = createTestDatabasePrefix('app-test', '/tmp/worktrees/app-second');
+
+        assert.match(first, /^app_test_[a-f0-9]{4}$/);
+        assert.equal(repeated, first);
+        assert.notEqual(second, first);
+    });
+
+    it('keeps generated test database names within identifier limits', () => {
+        const prefix = createTestDatabasePrefix('tsf_session_reentrant');
+        const name = formatTestDatabaseName('tsf_session_reentrant', [`${process.pid}_${Date.now()}`, process.pid, '013e23d56c', 1]);
+
+        assert.equal(name.startsWith(`${prefix}_`), true);
+        assert.equal(name.length <= 63, true);
     });
 
     it('creates a testing facade and sends mock requests', async () => {

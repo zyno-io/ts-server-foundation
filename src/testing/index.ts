@@ -28,6 +28,7 @@ import { sql } from '../database/sql';
 import { createLogger } from '../services/logger';
 import { JobEntity } from '../services/worker/entity';
 import { waitForTestDatabaseReady } from './database-readiness';
+import { createTestDatabasePrefix, formatTestDatabaseName } from './database-name';
 import { defineEntityFixtures, loadEntityFixtures, prepareEntityFixtures } from './fixtures';
 import { SqlTestingHelper } from './sql';
 
@@ -911,14 +912,15 @@ export function setDefaultDatabaseConfig(config: Record<string, string | number 
 }
 
 export async function cleanupTestDatabases(prefix = 'test', adapter?: TestDbAdapter): Promise<void> {
-    clearSharedTestDatabases(prefix, adapter);
+    const databasePrefix = createTestDatabasePrefix(prefix);
+    clearSharedTestDatabases(databasePrefix, adapter);
     const adapters = adapter ? [adapter] : (['mysql', 'postgres'] as const).filter(item => hasDatabaseConfig(item));
     for (const dbAdapter of adapters) {
         const adminDb = createCleanupAdminDatabase(dbAdapter);
         try {
             if (dbAdapter === 'postgres') {
                 const rows = await adminDb.rawFindUnsafe<{ name: string }>('SELECT datname AS name FROM pg_database WHERE datname LIKE ?', [
-                    `${prefix}%`
+                    `${databasePrefix}_%`
                 ]);
                 for (const row of rows) {
                     await adminDb.rawExecute(
@@ -929,7 +931,7 @@ export async function cleanupTestDatabases(prefix = 'test', adapter?: TestDbAdap
             } else {
                 const rows = await adminDb.rawFindUnsafe<{ name: string }>(
                     'SELECT SCHEMA_NAME AS name FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE ?',
-                    [`${prefix}%`]
+                    [`${databasePrefix}_%`]
                 );
                 for (const row of rows) {
                     await adminDb.rawExecute(sql`DROP DATABASE IF EXISTS ${sql.identifier(row.name)}`);
@@ -1051,8 +1053,7 @@ function resolveTestDbAdapter(config: BaseAppConfig, explicit?: TestDbAdapter): 
 
 function createTestDatabaseName(prefix = 'test'): string {
     const ts = Env.TEST_RUN_TS ?? String(Math.floor(Date.now() / 1000));
-    const safePrefix = prefix.replace(/[^a-zA-Z0-9_]/g, '_') || 'test';
-    return `${safePrefix}_${ts}_${process.pid}_${nextDatabaseId++}`;
+    return formatTestDatabaseName(prefix, [ts, process.pid, nextDatabaseId++]);
 }
 
 function getInlineMigrationIdentity(migration: Migration): number {
