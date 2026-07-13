@@ -15,6 +15,7 @@ import (
 const (
 	runtimeImportPlaceholderName    = "__tsf_runtime_import__"
 	runtimeNamespacePlaceholderName = "__tsf_runtime_namespace__"
+	runtimeAliasPlaceholderName     = "__tsf_runtime_alias__"
 )
 
 type expressionTemplate struct {
@@ -69,6 +70,8 @@ func validateRuntimePlaceholders(node *shimast.Node) error {
 					expected = 3
 				case runtimeNamespacePlaceholderName:
 					expected = 2
+				case runtimeAliasPlaceholderName:
+					expected = 3
 				}
 				if expected >= 0 {
 					if call.Arguments == nil || len(call.Arguments.Nodes) != expected {
@@ -133,6 +136,29 @@ func materializeRuntimePlaceholder(node *shimast.Node, imports *astImportRegistr
 		if len(args) == 3 && shimast.IsStringLiteral(args[0]) && shimast.IsStringLiteral(args[1]) && shimast.IsStringLiteral(args[2]) {
 			return imports.member(args[0].Text(), args[1].Text(), args[2].Text())
 		}
+	case runtimeAliasPlaceholderName:
+		if len(args) == 3 && shimast.IsStringLiteral(args[0]) && shimast.IsStringLiteral(args[1]) && shimast.IsStringLiteral(args[2]) {
+			arguments := []*shimast.Node{}
+			if imports.commonJS {
+				arguments = append(arguments,
+					imports.ec.Factory.NewIdentifier("require"),
+					imports.ec.Factory.NewStringLiteral(imports.resolvedSpecifier(args[0].Text(), ""), shimast.TokenFlagsNone),
+				)
+			} else {
+				arguments = append(arguments, imports.optionalModuleLoader(args[0].Text(), ""))
+			}
+			arguments = append(arguments,
+				imports.ec.Factory.NewStringLiteral(args[1].Text(), shimast.TokenFlagsNone),
+				imports.ec.Factory.NewStringLiteral(args[2].Text(), shimast.TokenFlagsNone),
+			)
+			return imports.ec.Factory.NewCallExpression(
+				imports.staticMember(compactMetadataRuntimeSpec, compactMetadataAliasResolverName),
+				nil,
+				nil,
+				imports.ec.Factory.NewNodeList(arguments),
+				shimast.NodeFlagsNone,
+			)
+		}
 	}
 	return nil
 }
@@ -146,7 +172,7 @@ func containsRuntimePlaceholder(node *shimast.Node) bool {
 		}
 		if current.Kind == shimast.KindIdentifier {
 			name := current.Text()
-			if name == runtimeImportPlaceholderName || name == runtimeNamespacePlaceholderName {
+			if name == runtimeImportPlaceholderName || name == runtimeNamespacePlaceholderName || name == runtimeAliasPlaceholderName {
 				found = true
 				return
 			}

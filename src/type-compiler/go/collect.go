@@ -13,7 +13,7 @@ import (
 	"github.com/samchon/ttsc/packages/ttsc/driver"
 )
 
-func collectRegistry(prog *driver.Program, cwd string) *registry {
+func collectRegistry(prog *driver.Program, cwd string, emitTypeAliases bool, emitUndecoratedMethods bool) *registry {
 	reg := &registry{
 		files:         map[string]*fileInfo{},
 		byPath:        map[string]*fileInfo{},
@@ -28,16 +28,17 @@ func collectRegistry(prog *driver.Program, cwd string) *registry {
 			continue
 		}
 		info := &fileInfo{
-			file:       file,
-			moduleKey:  moduleKey(file.FileName()),
-			precompute: shouldPrecomputeFile(file.FileName()),
-			aliases:    map[string]aliasInfo{},
-			interfaces: map[string][]interfaceInfo{},
-			enums:      map[string]enumInfo{},
-			classes:    []*classInfo{},
-			functions:  map[string][]functionInfo{},
-			imports:    map[string]importRef{},
-			reexports:  map[string]importRef{},
+			file:                 file,
+			moduleKey:            moduleKey(file.FileName()),
+			precompute:           shouldPrecomputeFile(file.FileName()),
+			decoratedMethodsOnly: !emitUndecoratedMethods,
+			aliases:              map[string]aliasInfo{},
+			interfaces:           map[string][]interfaceInfo{},
+			enums:                map[string]enumInfo{},
+			classes:              []*classInfo{},
+			functions:            map[string][]functionInfo{},
+			imports:              map[string]importRef{},
+			reexports:            map[string]importRef{},
 		}
 		reg.files[file.FileName()] = info
 		reg.byPath[info.moduleKey] = info
@@ -53,7 +54,7 @@ func collectRegistry(prog *driver.Program, cwd string) *registry {
 	for _, info := range reg.files {
 		collectGenericCalls(info, reg)
 	}
-	precomputeMetadataExpressions(reg)
+	precomputeMetadataExpressions(reg, emitTypeAliases)
 	return reg
 }
 
@@ -137,7 +138,7 @@ func outputImportExtension(sourceFile string, esm bool) string {
 
 func collectTextDeclarations(info *fileInfo) {
 	text := info.file.Text()
-	re := regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:declare\s+)?interface\s+([A-Za-z_$][\w$]*)\b`)
+	re := regexp.MustCompile(`(?m)^\s*(export\s+)?(?:declare\s+)?interface\s+([A-Za-z_$][\w$]*)\b`)
 	search := 0
 	for {
 		loc := re.FindStringSubmatchIndex(text[search:])
@@ -145,7 +146,8 @@ func collectTextDeclarations(info *fileInfo) {
 			break
 		}
 		start := search + loc[0]
-		name := text[search+loc[2] : search+loc[3]]
+		name := text[search+loc[4] : search+loc[5]]
+		exported := loc[2] >= 0
 		afterName := search + loc[1]
 		openRel := strings.IndexByte(text[afterName:], '{')
 		if openRel < 0 {
@@ -158,7 +160,7 @@ func collectTextDeclarations(info *fileInfo) {
 			continue
 		}
 		body := strings.TrimSpace(text[open+1 : close])
-		info.interfaces[name] = append(info.interfaces[name], interfaceInfo{body: body, extends: interfaceExtendsFromHeader(text[afterName:open]), pos: start, source: "text"})
+		info.interfaces[name] = append(info.interfaces[name], interfaceInfo{body: body, extends: interfaceExtendsFromHeader(text[afterName:open]), exported: exported, pos: start, source: "text"})
 		search = close + 1
 	}
 
@@ -264,6 +266,7 @@ func aliasFromNode(file *shimast.SourceFile, node *shimast.Node) aliasInfo {
 		params:   params,
 		defaults: defaults,
 		typeNode: node.Type(),
+		exported: node.ModifierFlags()&shimast.ModifierFlagsExport != 0,
 		pos:      node.Pos(),
 	}
 }
@@ -273,6 +276,7 @@ func interfaceFromNode(file *shimast.SourceFile, node *shimast.Node) interfaceIn
 		body:       interfaceBodyFromNode(file, node),
 		extends:    interfaceExtendsFromNode(file, node),
 		properties: interfacePropertiesFromNode(file, node),
+		exported:   node.ModifierFlags()&shimast.ModifierFlagsExport != 0,
 		pos:        node.Pos(),
 		source:     "ast",
 	}

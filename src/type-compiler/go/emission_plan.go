@@ -12,10 +12,12 @@ import (
 type emissionPlans map[string]*fileEmissionPlan
 
 type fileEmissionPlan struct {
-	calls    map[int]callEmissionPlan
-	classes  map[int]classEmissionPlan
-	aliases  *expressionTemplate
-	commonJS bool
+	calls                map[int]callEmissionPlan
+	classes              map[int]classEmissionPlan
+	aliases              *expressionTemplate
+	metadataTypes        []expressionTemplate
+	metadataTypeResolver string
+	commonJS             bool
 }
 
 type callEmissionPlan struct {
@@ -29,7 +31,39 @@ type classEmissionPlan struct {
 	metadata expressionTemplate
 }
 
-func buildEmissionPlans(reg *registry, program *driver.Program) (emissionPlans, error) {
+type metadataTypeInterner struct {
+	names       map[string]string
+	expressions []expressionTemplate
+	prefix      string
+	err         error
+}
+
+func newMetadataTypeInterner(sourceText string) *metadataTypeInterner {
+	prefix := "__tsf_metadata_type"
+	for strings.Contains(sourceText, prefix) {
+		prefix = "_" + prefix
+	}
+	return &metadataTypeInterner{names: map[string]string{}, prefix: prefix}
+}
+
+func (interner *metadataTypeInterner) reference(expr string) string {
+	if name := interner.names[expr]; name != "" {
+		return fmt.Sprintf("%s(%s)", interner.prefix, name)
+	}
+	name := fmt.Sprintf("%d", len(interner.expressions))
+	template, err := parseExpressionTemplate(expr)
+	if err != nil {
+		if interner.err == nil {
+			interner.err = err
+		}
+		return expr
+	}
+	interner.names[expr] = name
+	interner.expressions = append(interner.expressions, template)
+	return fmt.Sprintf("%s(%s)", interner.prefix, name)
+}
+
+func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases bool) (emissionPlans, error) {
 	plans := emissionPlans{}
 	for _, info := range reg.files {
 		if info == nil || info.file == nil || info.file.IsDeclarationFile {
@@ -39,6 +73,7 @@ func buildEmissionPlans(reg *registry, program *driver.Program) (emissionPlans, 
 			calls:   map[int]callEmissionPlan{},
 			classes: map[int]classEmissionPlan{},
 		}
+		metadataTypes := newMetadataTypeInterner(info.file.Text())
 		if program != nil && program.TSProgram != nil {
 			plan.commonJS = program.TSProgram.GetEmitModuleFormatOfFile(info.file).String() == "CommonJS"
 		}
@@ -46,7 +81,7 @@ func buildEmissionPlans(reg *registry, program *driver.Program) (emissionPlans, 
 			if call.nodePos < 0 {
 				return nil, fmt.Errorf("%s:%d: metadata call %s could not be correlated to a CallExpression", info.file.FileName(), call.pos, call.name)
 			}
-			expr := cachedTypeExpr(info, reg, call.typeText, call.typeNode, call.pos, call.metadataText)
+			expr := metadataTypes.reference(cachedTypeExpr(info, reg, call.typeText, call.typeNode, call.pos, call.metadataText))
 			template, err := parseExpressionTemplate(expr)
 			if err != nil {
 				return nil, fmt.Errorf("%s:%d: metadata call %s: %w", info.file.FileName(), call.pos, call.name, err)
@@ -63,13 +98,20 @@ func buildEmissionPlans(reg *registry, program *driver.Program) (emissionPlans, 
 			if class.ambient {
 				continue
 			}
-			template, err := parseExpressionTemplate(classMetadata(info, reg, class))
+			template, err := parseExpressionTemplate(classMetadata(info, reg, class, metadataTypes.reference))
 			if err != nil {
 				return nil, fmt.Errorf("%s:%d: class metadata for %s: %w", info.file.FileName(), class.pos, class.name, err)
 			}
 			plan.classes[class.pos] = classEmissionPlan{name: class.name, metadata: template}
 		}
-		if !hasAliasMetadataSourceDeclaration(info.file) {
+		if metadataTypes.err != nil {
+			return nil, fmt.Errorf("%s: shared metadata type: %w", info.file.FileName(), metadataTypes.err)
+		}
+		plan.metadataTypes = metadataTypes.expressions
+		if len(plan.metadataTypes) != 0 {
+			plan.metadataTypeResolver = metadataTypes.prefix
+		}
+		if emitTypeAliases && !hasAliasMetadataSourceDeclaration(info.file) {
 			if expr := aliasMetadataExpression(info, reg); expr != "" {
 				template, err := parseExpressionTemplate(expr)
 				if err != nil {
@@ -171,12 +213,17 @@ func exportedTypeAliasNames(info *fileInfo, reg *registry, seen map[string]bool)
 	seen[info.moduleKey] = true
 	names := map[string]bool{}
 	for name, alias := range info.aliases {
-		if len(alias.params) == 0 {
+		if alias.exported && len(alias.params) == 0 {
 			names[name] = true
 		}
 	}
-	for name := range info.interfaces {
-		names[name] = true
+	for name, declarations := range info.interfaces {
+		for _, declaration := range declarations {
+			if declaration.exported {
+				names[name] = true
+				break
+			}
+		}
 	}
 	for name := range info.reexports {
 		if alias, _, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok && len(alias.params) == 0 {

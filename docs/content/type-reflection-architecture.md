@@ -112,6 +112,10 @@ Generic application aliases use the exported base name for OpenAPI components. F
 
 Shared packages should expose emitted alias metadata through `__tsfTypeAliases`. When an app imports a type from a package that exposes TSF metadata, the compiler should reference that package metadata by import/export identity. It must not resolve behavior by repository path, workspace layout, or application-specific package name.
 
+Executable applications may set `emitTypeAliases: false` when no downstream package consumes their alias registry. Applications whose runtime method reflection covers decorated methods such as controller routes may set `emitUndecoratedMethods: false`. Both options default to `true`. Constructor and class-property metadata is emitted independently of the method option.
+
+TSF emits metadata through a versioned compact runtime format. Structural metadata is serialized as opaque JSON so TypeScript's built-in emit transforms do not traverse the generated graph. Indexed runtime slots represent values with JavaScript semantics, module recipes represent imported classes and aliases, and one lazy per-file registry decodes and caches repeated types. CommonJS and ESM output share this wire format.
+
 TSF's own package spec may be recognized as a single compiler constant because the compiler must distinguish foundation metadata helpers from arbitrary user imports. Other package specs must not be special-cased.
 
 ## Component Naming

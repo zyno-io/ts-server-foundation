@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	shimast "github.com/microsoft/typescript-go/shim/ast"
@@ -14,20 +15,36 @@ type astImportAsset struct {
 	moduleSpecifier *shimast.Node
 }
 
+type astOptionalModuleLoader struct {
+	name       string
+	expression *shimast.Node
+}
+
 type astImportRegistry struct {
-	ec         *shimprinter.EmitContext
-	sourceFile *shimast.SourceFile
-	commonJS   bool
-	assets     map[string]*astImportAsset
-	order      []string
+	ec           *shimprinter.EmitContext
+	sourceFile   *shimast.SourceFile
+	commonJS     bool
+	assets       map[string]*astImportAsset
+	order        []string
+	loaders      map[string]*astOptionalModuleLoader
+	loaderOrder  []string
+	loaderPrefix string
 }
 
 func newAstImportRegistry(ec *shimprinter.EmitContext, sourceFile *shimast.SourceFile, commonJS bool) *astImportRegistry {
+	loaderPrefix := "__tsf_metadata_module_"
+	if sourceFile != nil {
+		for strings.Contains(sourceFile.Text(), loaderPrefix) {
+			loaderPrefix = "_" + loaderPrefix
+		}
+	}
 	return &astImportRegistry{
-		ec:         ec,
-		sourceFile: sourceFile,
-		commonJS:   commonJS,
-		assets:     map[string]*astImportAsset{},
+		ec:           ec,
+		sourceFile:   sourceFile,
+		commonJS:     commonJS,
+		assets:       map[string]*astImportAsset{},
+		loaders:      map[string]*astOptionalModuleLoader{},
+		loaderPrefix: loaderPrefix,
 	}
 }
 
@@ -80,6 +97,50 @@ func (registry *astImportRegistry) member(spec string, exportName string, target
 		registry.ec.Factory.NewIdentifier(exportName),
 		shimast.NodeFlagsNone,
 	)
+}
+
+// staticMember returns a normal namespace-import reference for a required
+// runtime dependency. Unlike reflected application imports, the compact
+// metadata decoder is always present and should be loaded once per file in both
+// CommonJS and ESM output instead of expanded as a defensive lazy require at
+// every metadata expression.
+func (registry *astImportRegistry) staticMember(spec string, exportName string) *shimast.Node {
+	asset := registry.asset(spec, "")
+	return registry.ec.Factory.NewPropertyAccessExpression(
+		registry.ec.Factory.NewGeneratedNameForNode(asset.moduleSpecifier),
+		nil,
+		registry.ec.Factory.NewIdentifier(exportName),
+		shimast.NodeFlagsNone,
+	)
+}
+
+func (registry *astImportRegistry) optionalModuleLoader(spec string, targetFile string) *shimast.Node {
+	resolved := registry.resolvedSpecifier(spec, targetFile)
+	if loader := registry.loaders[resolved]; loader != nil {
+		return registry.ec.Factory.NewIdentifier(loader.name)
+	}
+	name := registry.loaderPrefix + strconv.Itoa(len(registry.loaderOrder))
+	var expression *shimast.Node
+	if registry.commonJS {
+		expression = registry.safeRequire(resolved)
+	} else {
+		expression = registry.namespace(spec, targetFile)
+	}
+	registry.loaders[resolved] = &astOptionalModuleLoader{name: name, expression: expression}
+	registry.loaderOrder = append(registry.loaderOrder, resolved)
+	return registry.ec.Factory.NewIdentifier(name)
+}
+
+func (registry *astImportRegistry) isOptionalModuleLoader(node *shimast.Node) bool {
+	if node == nil || node.Kind != shimast.KindIdentifier {
+		return false
+	}
+	for _, loader := range registry.loaders {
+		if loader.name == node.Text() {
+			return true
+		}
+	}
+	return false
 }
 
 func (registry *astImportRegistry) requireCall(spec string) *shimast.Node {
@@ -161,7 +222,7 @@ func (registry *astImportRegistry) safeRequire(spec string) *shimast.Node {
 }
 
 func (registry *astImportRegistry) statements() []*shimast.Node {
-	statements := make([]*shimast.Node, 0, len(registry.order))
+	statements := make([]*shimast.Node, 0, len(registry.order)+len(registry.loaderOrder))
 	for _, spec := range registry.order {
 		asset := registry.assets[spec]
 		statements = append(statements, registry.ec.Factory.NewImportDeclaration(
@@ -174,6 +235,10 @@ func (registry *astImportRegistry) statements() []*shimast.Node {
 			asset.moduleSpecifier,
 			nil,
 		))
+	}
+	for _, spec := range registry.loaderOrder {
+		loader := registry.loaders[spec]
+		statements = append(statements, expressionFactoryDeclaration(registry.ec, loader.name, loader.expression))
 	}
 	return statements
 }
@@ -188,6 +253,18 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 			return sourceFile
 		}
 		imports := newAstImportRegistry(ec, sourceFile, plan.commonJS)
+		runtimeReferences := newCompactMetadataRuntimeInterner(ec, sourceFile)
+		var metadataTypes *shimast.Node
+		if len(plan.metadataTypes) != 0 {
+			expression := materializeCompactMetadataRegistry(
+				ec,
+				imports,
+				runtimeReferences,
+				plan.metadataTypes,
+				plan.metadataTypeResolver,
+			)
+			metadataTypes = metadataTypeDeclaration(ec, plan.metadataTypeResolver, expression)
+		}
 		var visitor *shimast.NodeVisitor
 		visitor = ec.NewNodeVisitor(func(node *shimast.Node) *shimast.Node {
 			if node == nil {
@@ -212,7 +289,13 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 				if !ok || visited == nil || visited.Kind != shimast.KindClassDeclaration {
 					return visited
 				}
-				metadata := classPlan.metadata.materialize(ec, imports)
+				metadata := materializeCompactMetadataExpression(
+					ec,
+					imports,
+					runtimeReferences,
+					classPlan.metadata,
+					plan.metadataTypeResolver,
+				)
 				metadataReference := ec.Factory.NewUniqueName("_" + classPlan.name + "Metadata")
 				declaration := classMetadataDeclaration(ec, metadataReference, original)
 				withMetadata := classWithStaticMetadata(ec, visited.AsClassDeclaration(), metadataReference, metadata)
@@ -228,13 +311,68 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 		}
 		result := output.AsSourceFile()
 		if plan.aliases != nil {
-			result = appendAliasMetadata(ec, result, plan.aliases.materialize(ec, imports))
+			result = appendAliasMetadata(ec, result, materializeCompactMetadataExpression(
+				ec,
+				imports,
+				runtimeReferences,
+				*plan.aliases,
+				plan.metadataTypeResolver,
+			))
+		}
+		declarations := runtimeReferences.declarations()
+		if metadataTypes != nil {
+			declarations = append(declarations, metadataTypes)
+		}
+		if len(declarations) != 0 {
+			result = injectMetadataTypeDeclarations(ec, result, declarations)
 		}
 		if statements := imports.statements(); len(statements) != 0 {
 			result = injectAstImports(ec, result, statements)
 		}
 		return result
 	}
+}
+
+func metadataTypeDeclaration(ec *shimprinter.EmitContext, name string, metadata *shimast.Node) *shimast.Node {
+	return ec.Factory.NewVariableStatement(
+		nil,
+		ec.Factory.NewVariableDeclarationList(
+			ec.Factory.NewNodeList([]*shimast.Node{ec.Factory.NewVariableDeclaration(
+				ec.Factory.NewIdentifier(name),
+				nil,
+				nil,
+				metadata,
+			)}),
+			shimast.NodeFlagsConst,
+		),
+	)
+}
+
+func injectMetadataTypeDeclarations(ec *shimprinter.EmitContext, sourceFile *shimast.SourceFile, declarations []*shimast.Node) *shimast.SourceFile {
+	index := 0
+	for index < len(sourceFile.Statements.Nodes) {
+		statement := sourceFile.Statements.Nodes[index]
+		if statement == nil {
+			break
+		}
+		if statement.Kind == shimast.KindImportDeclaration || statement.Kind == shimast.KindImportEqualsDeclaration {
+			index++
+			continue
+		}
+		if statement.Kind == shimast.KindExpressionStatement {
+			expression := statement.AsExpressionStatement().Expression
+			if expression != nil && expression.Kind == shimast.KindStringLiteral {
+				index++
+				continue
+			}
+		}
+		break
+	}
+	statements := make([]*shimast.Node, 0, len(sourceFile.Statements.Nodes)+len(declarations))
+	statements = append(statements, sourceFile.Statements.Nodes[:index]...)
+	statements = append(statements, declarations...)
+	statements = append(statements, sourceFile.Statements.Nodes[index:]...)
+	return ec.Factory.UpdateSourceFile(sourceFile, ec.Factory.NewNodeList(statements), sourceFile.EndOfFileToken).AsSourceFile()
 }
 
 // classWithStaticMetadata initializes reflection metadata as part of the class

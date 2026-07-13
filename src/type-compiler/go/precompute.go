@@ -1,6 +1,6 @@
 package main
 
-func precomputeMetadataExpressions(reg *registry) {
+func precomputeMetadataExpressions(reg *registry, emitTypeAliases bool) {
 	if reg == nil {
 		return
 	}
@@ -9,11 +9,6 @@ func precomputeMetadataExpressions(reg *registry) {
 	for _, info := range reg.files {
 		if !info.precompute {
 			continue
-		}
-		for name, alias := range info.aliases {
-			if len(alias.params) == 0 {
-				precomputeAliasMetadata(info, reg, name, alias)
-			}
 		}
 		for _, class := range info.classes {
 			if class.ambient {
@@ -24,7 +19,9 @@ func precomputeMetadataExpressions(reg *registry) {
 		for i := range info.calls {
 			info.calls[i].metadataText = typeExprForNodePreferred(info, reg, info.calls[i].typeText, info.calls[i].typeNode, info.calls[i].pos, info.calls[i].preferTypia)
 		}
-		precomputeExportedAliasMetadata(info, reg)
+		if emitTypeAliases {
+			precomputeExportedAliasMetadata(info, reg)
+		}
 	}
 }
 
@@ -64,6 +61,9 @@ func precomputeClassMetadataExpressions(info *fileInfo, reg *registry, class *cl
 	}
 	for i := range class.methods {
 		method := &class.methods[i]
+		if class.decoratedMethodsOnly && !method.decorated {
+			continue
+		}
 		method.returnMetadataText = typeExprForNodePreferred(info, reg, method.returnType, method.returnTypeNode, class.pos, method.preferTypia)
 		precomputeParamMetadataExpressions(info, reg, method.params, class.pos, method.preferTypia)
 	}

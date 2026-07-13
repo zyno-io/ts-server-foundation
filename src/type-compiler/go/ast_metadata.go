@@ -50,10 +50,11 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 		return nil
 	}
 	class := &classInfo{
-		name:    nameNode.Text(),
-		pos:     node.Pos(),
-		end:     node.End(),
-		ambient: node.ModifierFlags()&shimast.ModifierFlagsAmbient != 0 || node.Flags&shimast.NodeFlagsAmbient != 0,
+		name:                 nameNode.Text(),
+		pos:                  node.Pos(),
+		end:                  node.End(),
+		ambient:              node.ModifierFlags()&shimast.ModifierFlagsAmbient != 0 || node.Flags&shimast.NodeFlagsAmbient != 0,
+		decoratedMethodsOnly: info.decoratedMethodsOnly,
 	}
 	for _, member := range node.Members() {
 		if member.ModifierFlags()&shimast.ModifierFlagsPrivate != 0 {
@@ -87,6 +88,7 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 				returnType:     nodeText(file, member.Type()),
 				returnTypeNode: member.Type(),
 				preferTypia:    preferTypia,
+				decorated:      len(member.Decorators()) != 0,
 				params:         paramsFromNode(file, member),
 			}
 			if isStaticMember(file, member) {
@@ -303,12 +305,12 @@ func cleanJsDocDescription(raw string) string {
 	return strings.Join(parts, " ")
 }
 
-func classMetadata(info *fileInfo, reg *registry, class *classInfo) string {
+func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func(string) string) string {
 	props := []string{}
 	for _, prop := range class.properties {
 		items := []string{
 			"name: " + quote(prop.name),
-			"type: " + cachedTypeExpr(info, reg, prop.typeText, prop.typeNode, class.pos, prop.metadataText),
+			"type: " + referMetadataType(typeRef, cachedTypeExpr(info, reg, prop.typeText, prop.typeNode, class.pos, prop.metadataText)),
 			"optional: " + boolLit(prop.optional),
 		}
 		flags := collectFlags(info, reg, prop.typeText)
@@ -327,10 +329,13 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo) string {
 	}
 	methods := []string{}
 	for _, method := range class.methods {
+		if class.decoratedMethodsOnly && !method.decorated {
+			continue
+		}
 		items := []string{
 			"name: " + quote(method.name),
-			"parameters: " + paramsExpr(info, reg, method.params, class.pos),
-			"returnType: " + cachedTypeExpr(info, reg, method.returnType, method.returnTypeNode, class.pos, method.returnMetadataText),
+			"parameters: " + paramsExpr(info, reg, method.params, class.pos, typeRef),
+			"returnType: " + referMetadataType(typeRef, cachedTypeExpr(info, reg, method.returnType, method.returnTypeNode, class.pos, method.returnMetadataText)),
 		}
 		if method.description != "" {
 			items = append(items, "description: "+quote(method.description))
@@ -343,13 +348,21 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo) string {
 		", properties: [" + strings.Join(props, ", ") + "]" +
 		", methods: [" + strings.Join(methods, ", ") + "]" +
 		", hasConstructor: " + boolLit(class.hasCtor) +
-		", constructorParameters: " + paramsExpr(info, reg, class.ctor, class.pos) + "}"
+		", constructorParameters: " + paramsExpr(info, reg, class.ctor, class.pos, typeRef) + "}"
 }
 
-func paramsExpr(info *fileInfo, reg *registry, params []paramInfo, pos int) string {
+func paramsExpr(info *fileInfo, reg *registry, params []paramInfo, pos int, typeRef func(string) string) string {
 	out := []string{}
 	for _, param := range params {
-		out = append(out, "{name: "+quote(param.name)+", type: "+cachedTypeExpr(info, reg, param.typeText, param.typeNode, pos, param.metadataText)+", optional: "+boolLit(param.optional)+", default: "+boolLit(param.hasDefault)+"}")
+		typeExpr := referMetadataType(typeRef, cachedTypeExpr(info, reg, param.typeText, param.typeNode, pos, param.metadataText))
+		out = append(out, "{name: "+quote(param.name)+", type: "+typeExpr+", optional: "+boolLit(param.optional)+", default: "+boolLit(param.hasDefault)+"}")
 	}
 	return "[" + strings.Join(out, ", ") + "]"
+}
+
+func referMetadataType(typeRef func(string) string, expr string) string {
+	if typeRef == nil {
+		return expr
+	}
+	return typeRef(expr)
 }

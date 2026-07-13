@@ -27,6 +27,11 @@ function createFixture(): string {
                     types: './index.d.ts',
                     import: './index.js',
                     require: './index.cjs'
+                },
+                './type-metadata-runtime': {
+                    types: './compact-metadata.d.ts',
+                    import: './compact-metadata.js',
+                    require: './compact-metadata.cjs'
                 }
             }
         })
@@ -40,6 +45,80 @@ function createFixture(): string {
     writeFileSync(
         join(packageDirectory, 'index.cjs'),
         `exports.typeOf = function typeOf(type) { if (!type) throw new Error('not transformed'); return type; };\n`
+    );
+    writeFileSync(
+        join(packageDirectory, 'compact-metadata.d.ts'),
+        `export declare function decodeCompactMetadataV1<T>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
+         export declare function createCompactMetadataRegistryV1(serialized: string, references: readonly unknown[]): (index: number) => unknown;
+         export declare function resolveCompactMetadataAliasV1(loadModule: () => unknown, exportName: string, typeName: string): unknown;\n`
+    );
+    const compactRuntime = `
+        function moduleLoader(references, index, specifier) {
+            const reference = references[index];
+            if (specifier === undefined) return reference;
+            return () => { try { return reference(specifier); } catch { return undefined; } };
+        }
+        function revive(value, references, resolveType) {
+            if (!value || typeof value !== 'object') return value;
+            const keys = Array.isArray(value) ? [] : Object.keys(value);
+            if (keys.length === 1 && keys[0] === '$tsf') return references[value.$tsf];
+            if (keys.length === 1 && keys[0] === '$tsfImport') {
+                const recipe = value.$tsfImport;
+                const loader = moduleLoader(references, recipe[0], recipe.length === 3 ? recipe[1] : undefined);
+                const exportName = recipe.length === 3 ? recipe[2] : recipe[1];
+                return () => { const imported = loader(); return imported && imported[exportName]; };
+            }
+            if (keys.length === 1 && keys[0] === '$tsfAlias') {
+                const recipe = value.$tsfAlias;
+                const loader = moduleLoader(references, recipe[0], recipe.length === 4 ? recipe[1] : undefined);
+                return resolveAlias(loader, recipe.length === 4 ? recipe[2] : recipe[1], recipe.length === 4 ? recipe[3] : recipe[2]);
+            }
+            if (keys.length === 1 && keys[0] === '$tsfType') return resolveType(value.$tsfType);
+            if (Array.isArray(value)) {
+                for (let index = 0; index < value.length; index++) value[index] = revive(value[index], references, resolveType);
+            } else {
+                for (const key of keys) value[key] = revive(value[key], references, resolveType);
+            }
+            return value;
+        }
+        function parse(serialized) {
+            const envelope = JSON.parse(serialized);
+            if (!Array.isArray(envelope) || envelope[0] !== 1) throw new Error('invalid compact metadata');
+            return envelope[1];
+        }
+        function decode(serialized, references, resolveType) {
+            return revive(parse(serialized), references, resolveType);
+        }
+        function createRegistry(serialized, references) {
+            const encoded = parse(serialized);
+            const resolved = new Array(encoded.length);
+            const initialized = new Uint8Array(encoded.length);
+            const resolveType = index => {
+                if (!initialized[index]) {
+                    initialized[index] = 1;
+                    resolved[index] = encoded[index];
+                    resolved[index] = revive(encoded[index], references, resolveType);
+                }
+                return resolved[index];
+            };
+            return resolveType;
+        }
+        function resolveAlias(loadModule, exportName, typeName) {
+            let imported;
+            try { imported = loadModule(); } catch {}
+            const alias = imported && imported.__tsfTypeAliases && imported.__tsfTypeAliases[exportName];
+            return alias
+                ? Object.assign({}, alias, { typeName })
+                : { kind: 16, typeName, classType: () => imported && imported[exportName] };
+        }
+    `;
+    writeFileSync(
+        join(packageDirectory, 'compact-metadata.js'),
+        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, decode as decodeCompactMetadataV1, resolveAlias as resolveCompactMetadataAliasV1 };\n`
+    );
+    writeFileSync(
+        join(packageDirectory, 'compact-metadata.cjs'),
+        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.decodeCompactMetadataV1 = decode; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
     );
     writeFileSync(
         join(orderAliasDirectory, 'package.json'),
@@ -138,11 +217,15 @@ describe('AST metadata compiler integration', () => {
             const commonOutput = readFileSync(commonOutputPath, 'utf8');
 
             assert.doesNotMatch(esmOutput, /__tsf_runtime_|\brequire\s*\(/);
+            assert.doesNotMatch(esmOutput, /\beval\s*\(/);
+            assert.match(esmOutput, /type-metadata-runtime/);
             assert.match(esmOutput, /from "\.\/dependency\.mjs"/);
             assert.doesNotMatch(esmOutput, /ambient-dependency\.mjs/);
             assert.doesNotMatch(esmOutput, /AmbientOnly\.__tsfType/);
             assert.doesNotMatch(commonOutput, /__tsf_runtime_/);
-            assert.match(commonOutput, /typeof require !== "undefined" \? require\("\.\/dependency\.cjs"\)/);
+            assert.doesNotMatch(commonOutput, /\beval\s*\(/);
+            assert.match(commonOutput, /type-metadata-runtime/);
+            assert.match(commonOutput, /\\"\$tsfImport\\":\[0,\\"\.\/dependency\.cjs\\"/);
 
             for (const path of ['model.mjs.map', 'model.cjs.map', 'model.d.mts', 'model.d.mts.map', 'model.d.cts', 'model.d.cts.map']) {
                 assert.equal(existsSync(join(directory, 'dist', path)), true, `${path} was not emitted`);

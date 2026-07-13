@@ -8,6 +8,7 @@
         "declaration": false,
         "sourceMap": true,
         "strict": true,
+        "isolatedModules": true,
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,
         "skipLibCheck": true,
@@ -17,7 +18,9 @@
         "types": ["node"],
         "plugins": [
             {
-                "transform": "@zyno-io/ts-server-foundation/type-compiler"
+                "transform": "@zyno-io/ts-server-foundation/type-compiler",
+                "emitTypeAliases": false,
+                "emitUndecoratedMethods": false
             }
         ]
     },

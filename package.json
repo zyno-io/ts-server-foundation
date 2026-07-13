@@ -35,6 +35,11 @@
             "import": "./dist/src/index.js",
             "require": "./dist/src/index.js"
         },
+        "./type-metadata-runtime": {
+            "types": "./dist/src/reflection/compact-metadata.d.ts",
+            "import": "./dist/src/reflection/compact-metadata.js",
+            "require": "./dist/src/reflection/compact-metadata.js"
+        },
         "./type-compiler": "./dist/src/type-compiler/index.cjs",
         "./otel": {
             "types": "./dist/src/telemetry/otel/index.d.ts",
@@ -114,7 +119,7 @@
         "dotenv-cli": "^11.0.0",
         "lefthook": "^2.1.10",
         "oxlint": "^1.73.0",
-        "ttsc": "0.18.3",
+        "ttsc": "0.18.4",
         "typescript": "7.0.2",
         "vite": "^8.1.4",
         "vite-plugin-oxlint": "^2.1.2",

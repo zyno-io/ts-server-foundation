@@ -1159,7 +1159,7 @@ func externalImportedTypeExpr(ref importRef, typeName string) string {
 	if ref.spec == "" || ref.exportName == "" {
 		return "{kind: 2, typeName: " + quote(typeName) + "}"
 	}
-	return "(() => { const __tsf_module = " + runtimeNamespacePlaceholder(ref.spec, nil) + "; const __tsf_alias = __tsf_module && __tsf_module.__tsfTypeAliases && __tsf_module.__tsfTypeAliases[" + quote(ref.exportName) + "]; return __tsf_alias ? Object.assign({}, __tsf_alias, {typeName: " + quote(typeName) + "}) : {kind: 16, typeName: " + quote(typeName) + ", classType: () => (__tsf_module ? __tsf_module[" + quote(ref.exportName) + "] : undefined)}; })()"
+	return runtimeAliasPlaceholderName + "(" + quote(ref.spec) + ", " + quote(ref.exportName) + ", " + quote(typeName) + ")"
 }
 
 func runtimeNamespacePlaceholder(spec string, target *fileInfo) string {

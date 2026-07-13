@@ -34,18 +34,19 @@ type typiaCacheKey struct {
 }
 
 type fileInfo struct {
-	file       *shimast.SourceFile
-	moduleKey  string
-	precompute bool
-	aliases    map[string]aliasInfo
-	interfaces map[string][]interfaceInfo
-	enums      map[string]enumInfo
-	classes    []*classInfo
-	functions  map[string][]functionInfo
-	imports    map[string]importRef
-	reexports  map[string]importRef
-	exportStar []importRef
-	calls      []callInfo
+	file                 *shimast.SourceFile
+	moduleKey            string
+	precompute           bool
+	decoratedMethodsOnly bool
+	aliases              map[string]aliasInfo
+	interfaces           map[string][]interfaceInfo
+	enums                map[string]enumInfo
+	classes              []*classInfo
+	functions            map[string][]functionInfo
+	imports              map[string]importRef
+	reexports            map[string]importRef
+	exportStar           []importRef
+	calls                []callInfo
 }
 
 type aliasInfo struct {
@@ -55,6 +56,7 @@ type aliasInfo struct {
 	typeNode         *shimast.Node
 	metadataText     string
 	metadataTooLarge bool
+	exported         bool
 	pos              int
 }
 
@@ -62,6 +64,7 @@ type interfaceInfo struct {
 	body       string
 	extends    []string
 	properties []utilityProperty
+	exported   bool
 	pos        int
 	source     string
 }
@@ -79,15 +82,16 @@ type importRef struct {
 }
 
 type classInfo struct {
-	name          string
-	pos           int
-	end           int
-	ambient       bool
-	properties    []propertyInfo
-	methods       []methodInfo
-	staticMethods []methodInfo
-	ctor          []paramInfo
-	hasCtor       bool
+	name                 string
+	pos                  int
+	end                  int
+	ambient              bool
+	properties           []propertyInfo
+	methods              []methodInfo
+	staticMethods        []methodInfo
+	ctor                 []paramInfo
+	hasCtor              bool
+	decoratedMethodsOnly bool
 }
 
 type propertyInfo struct {
@@ -114,6 +118,7 @@ type methodInfo struct {
 	returnTypeNode     *shimast.Node
 	returnMetadataText string
 	preferTypia        bool
+	decorated          bool
 	params             []paramInfo
 }
 
@@ -163,6 +168,16 @@ type hostOptions struct {
 	tsconfig       string
 	tsgoArgs       []string
 	verbose        bool
+}
+
+type pluginManifestEntry struct {
+	Name   string          `json:"name"`
+	Config json.RawMessage `json:"config"`
+}
+
+type typeCompilerPluginConfig struct {
+	EmitTypeAliases        *bool `json:"emitTypeAliases"`
+	EmitUndecoratedMethods *bool `json:"emitUndecoratedMethods"`
 }
 
 func main() {
@@ -228,8 +243,11 @@ func runBuild(command string, args []string) int {
 		fmt.Fprintf(os.Stderr, "tssf metadata host: apply linked plugins: %v\n", err)
 		return 2
 	}
-	reg := collectRegistry(prog, opts.cwd)
-	plans, err := buildEmissionPlans(reg, prog)
+	pluginConfig := readTypeCompilerPluginConfig(opts.pluginsJSON)
+	emitTypeAliases := pluginConfig.EmitTypeAliases == nil || *pluginConfig.EmitTypeAliases
+	emitUndecoratedMethods := pluginConfig.EmitUndecoratedMethods == nil || *pluginConfig.EmitUndecoratedMethods
+	reg := collectRegistry(prog, opts.cwd, emitTypeAliases, emitUndecoratedMethods)
+	plans, err := buildEmissionPlans(reg, prog, emitTypeAliases)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tssf metadata host: build emission plans: %v\n", err)
 		return 2
@@ -249,6 +267,31 @@ func runBuild(command string, args []string) int {
 		return 2
 	}
 	return 0
+}
+
+func shouldEmitTypeAliases(pluginsJSON string) bool {
+	config := readTypeCompilerPluginConfig(pluginsJSON)
+	return config.EmitTypeAliases == nil || *config.EmitTypeAliases
+}
+
+func readTypeCompilerPluginConfig(pluginsJSON string) typeCompilerPluginConfig {
+	if strings.TrimSpace(pluginsJSON) == "" {
+		return typeCompilerPluginConfig{}
+	}
+	var entries []pluginManifestEntry
+	if err := json.Unmarshal([]byte(pluginsJSON), &entries); err != nil {
+		return typeCompilerPluginConfig{}
+	}
+	for _, entry := range entries {
+		if entry.Name != "tsf-type-metadata" || len(entry.Config) == 0 {
+			continue
+		}
+		var config typeCompilerPluginConfig
+		if err := json.Unmarshal(entry.Config, &config); err == nil {
+			return config
+		}
+	}
+	return typeCompilerPluginConfig{}
 }
 
 func parseHostOptions(command string, args []string) (hostOptions, bool) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	shimast "github.com/microsoft/typescript-go/shim/ast"
@@ -150,8 +151,162 @@ func TestClassMetadataTransformMaterializesOneSharedObject(t *testing.T) {
 		commonJS: true,
 	}}
 	transformed := metadataTransform(plans)(shimprinter.NewEmitContext(), file)
-	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindObjectLiteralExpression)); got != 1 {
-		t.Fatalf("metadata object literals = %d, want 1", got)
+	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindObjectLiteralExpression)); got != 0 {
+		t.Fatalf("class metadata left %d object literals in the emitted AST", got)
+	}
+	if !astContainsIdentifier(transformed.AsNode(), compactMetadataDecoderName) {
+		t.Fatal("class metadata was not decoded from compact data")
+	}
+}
+
+func TestCompactMetadataHidesGeneratedObjectFromBuiltinTransforms(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
+	template, err := parseExpressionTemplate(`{kind: 16, classType: () => Model}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := emissionPlans{file.FileName(): {
+		calls:                map[int]callEmissionPlan{},
+		classes:              map[int]classEmissionPlan{},
+		metadataTypes:        []expressionTemplate{template},
+		metadataTypeResolver: "__tsf_metadata_type",
+		commonJS:             true,
+	}}
+
+	transformed := metadataTransform(plans)(shimprinter.NewEmitContext(), file)
+	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindObjectLiteralExpression)); got != 0 {
+		t.Fatalf("compact metadata left %d object literals in the emitted AST", got)
+	}
+	if astContainsIdentifier(transformed.AsNode(), "eval") {
+		t.Fatal("compact metadata emitted direct eval")
+	}
+	if !astContainsIdentifier(transformed.AsNode(), compactMetadataRegistryName) {
+		t.Fatal("compact metadata did not create a lazy runtime registry")
+	}
+	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindImportDeclaration)); got != 1 {
+		t.Fatalf("generated imports = %d, want one decoder import", got)
+	}
+}
+
+func TestCompactMetadataEncoderExtractsRuntimeExpressions(t *testing.T) {
+	template, err := parseExpressionTemplate(`{
+		kind: 16,
+		classType: () => Model,
+		missing: undefined,
+		big: 12n,
+		nested: [true, -2, "two"]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoding := encodeCompactMetadata(template.parsed)
+	if got := len(encoding.references); got != 3 {
+		t.Fatalf("runtime references = %d, want 3", got)
+	}
+	for _, want := range []string{
+		`[1,{"kind":16`,
+		`"classType":{"$tsf":0}`,
+		`"missing":{"$tsf":1}`,
+		`"big":{"$tsf":2}`,
+		`"nested":[true,-2,"two"]`,
+	} {
+		if !strings.Contains(encoding.serialized, want) {
+			t.Fatalf("compact payload is missing %q: %s", want, encoding.serialized)
+		}
+	}
+}
+
+func TestCompactMetadataEncoderEscapesReferenceMarkerCollision(t *testing.T) {
+	for _, source := range []string{
+		`{"$tsf": 7}`,
+		`{"$tsfImport": [0, "Model"]}`,
+		`{"$tsfAlias": [0, "Alias", "Alias"]}`,
+		`{"$tsfType": 0}`,
+	} {
+		template, err := parseExpressionTemplate(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoding := encodeCompactMetadata(template.parsed)
+		if encoding.serialized != `[1,{"$tsf":0}]` {
+			t.Fatalf("compact payload for %s = %s", source, encoding.serialized)
+		}
+		if len(encoding.references) != 1 || encoding.references[0].Kind != shimast.KindObjectLiteralExpression {
+			t.Fatalf("marker-shaped application data %s was not escaped through a runtime slot", source)
+		}
+	}
+}
+
+func TestCompactMetadataEncodesCommonJSImportsAndAliasesAsRecipes(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/consumer.ts", `export const value = 1`)
+	template, err := parseExpressionTemplate(`{
+		classType: () => __tsf_runtime_import__("./model", "Model", "/project/model.ts"),
+		alias: __tsf_runtime_alias__("@scope/types", "Alias", "RenamedAlias")
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := shimprinter.NewEmitContext()
+	imports := newAstImportRegistry(ec, file, true)
+	interner := newCompactMetadataRuntimeInterner(ec, file)
+	materialized := template.materialize(ec, imports)
+	encoding := encodeCompactMetadataWithRuntimeRecipes(
+		materialized,
+		interner.deduplicationKey,
+		func(encoder *compactMetadataEncoder, expression *shimast.Node) bool {
+			return writeCompactMetadataRuntimeRecipe(encoder, expression, imports, "")
+		},
+	)
+	if !strings.Contains(encoding.serialized, `"classType":{"$tsfImport":[0,"./model","Model"]}`) {
+		t.Fatalf("class import was not encoded as a recipe: %s", encoding.serialized)
+	}
+	if !strings.Contains(encoding.serialized, `"alias":{"$tsfAlias":[0,"@scope/types","Alias","RenamedAlias"]}`) {
+		t.Fatalf("alias was not encoded as a recipe: %s", encoding.serialized)
+	}
+	if len(encoding.references) != 1 {
+		t.Fatalf("module loader references = %d, want 1", len(encoding.references))
+	}
+	for _, reference := range encoding.references {
+		if !isCompactMetadataCommonJSRequire(reference, imports) {
+			t.Fatal("recipe emitted a per-type runtime expression instead of the file's require function")
+		}
+	}
+}
+
+func TestCompactMetadataEncoderDeduplicatesGeneratedRuntimeThunks(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
+	template, err := parseExpressionTemplate(`{first: () => Model, second: () => Model}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := shimprinter.NewEmitContext()
+	interner := newCompactMetadataRuntimeInterner(ec, file)
+	metadata := template.materialize(ec, newAstImportRegistry(ec, file, true))
+	encoding := encodeCompactMetadataWithReferenceKeys(metadata, interner.deduplicationKey)
+	if len(encoding.references) != 1 {
+		t.Fatalf("runtime references = %d, want 1", len(encoding.references))
+	}
+	if strings.Count(encoding.serialized, `{"$tsf":0}`) != 2 {
+		t.Fatalf("repeated thunk did not reuse one reference index: %s", encoding.serialized)
+	}
+}
+
+func TestCompactMetadataEncoderRollsBackUnsupportedNestedValues(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
+	template, err := parseExpressionTemplate(`{
+		escaped: {value: () => Model, ...extra},
+		again: () => Model
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interner := newCompactMetadataRuntimeInterner(shimprinter.NewEmitContext(), file)
+	encoding := encodeCompactMetadataWithReferenceKeys(template.parsed, interner.deduplicationKey)
+	if encoding.serialized != `[1,{"escaped":{"$tsf":0},"again":{"$tsf":1}}]` {
+		t.Fatalf("compact payload retained a stale nested reference: %s", encoding.serialized)
+	}
+	if len(encoding.references) != 2 {
+		t.Fatalf("runtime references = %d, want 2", len(encoding.references))
 	}
 }
 
@@ -196,7 +351,7 @@ func TestPrecomputeSkipsAmbientClasses(t *testing.T) {
 		external:      map[string]map[string][]functionInfo{},
 	}
 
-	precomputeMetadataExpressions(reg)
+	precomputeMetadataExpressions(reg, true)
 
 	if ambient.properties[0].metadataText != "" {
 		t.Fatal("ambient class metadata was precomputed")

@@ -587,16 +587,16 @@ func TestPreferredExternalImportedAliasesUseRuntimeMetadata(t *testing.T) {
 	}
 
 	statusExpr := typeExprForNodePreferred(info, reg, "ExternalStatus", nil, 0, true)
-	assertContainsAll(t, statusExpr, "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"ExternalStatus\"")
+	assertContainsAll(t, statusExpr, "__tsf_runtime_alias__(\"@scope/shared\"", "\"ExternalStatus\"")
 
 	nullableStatusExpr := typeExprForNodePreferred(info, reg, "ExternalStatus | null", nil, 0, true)
-	assertContainsAll(t, nullableStatusExpr, "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"ExternalStatus\"", "{kind: 5}")
+	assertContainsAll(t, nullableStatusExpr, "__tsf_runtime_alias__(\"@scope/shared\"", "\"ExternalStatus\"", "{kind: 5}")
 
 	statusArrayExpr := typeExprForNodePreferred(info, reg, "ExternalStatus[]", nil, 0, true)
-	assertContainsAll(t, statusArrayExpr, "kind: 14", "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"ExternalStatus\"")
+	assertContainsAll(t, statusArrayExpr, "kind: 14", "__tsf_runtime_alias__(\"@scope/shared\"", "\"ExternalStatus\"")
 
 	workspaceStatusExpr := typeExpr(info, reg, "WorkspaceStatus[]")
-	assertContainsAll(t, workspaceStatusExpr, "kind: 14", "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"WorkspaceStatus\"")
+	assertContainsAll(t, workspaceStatusExpr, "kind: 14", "__tsf_runtime_alias__(\"@scope/shared\"", "\"WorkspaceStatus\"")
 	assertNotContains(t, workspaceStatusExpr, "literal: \"ready\"")
 	if canPreferTypiaType(info, reg, "WorkspaceStatus[] & HasDefault") {
 		t.Fatal("non-preferred metadata should not route package aliases through Typia just because a TSF marker is present")
@@ -604,15 +604,15 @@ func TestPreferredExternalImportedAliasesUseRuntimeMetadata(t *testing.T) {
 
 	info.interfaces["CreateRequest"] = []interfaceInfo{{body: "status?: ExternalStatus | null"}}
 	createExpr := typeExprForNodePreferred(info, reg, "CreateRequest", nil, 0, true)
-	assertContainsAll(t, createExpr, "typeName: \"CreateRequest\"", "name: \"status\"", "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"ExternalStatus\"")
+	assertContainsAll(t, createExpr, "typeName: \"CreateRequest\"", "name: \"status\"", "__tsf_runtime_alias__(\"@scope/shared\"", "\"ExternalStatus\"")
 
 	responseExpr := typeExprForNodePreferred(info, reg, "Response", nil, 0, true)
-	assertContainsAll(t, responseExpr, "name: \"status\"", "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases")
+	assertContainsAll(t, responseExpr, "name: \"status\"", "__tsf_runtime_alias__(\"@scope/shared\"")
 
 	if got, ok := typiaSourcePropertyOverrideExpr(info, reg, "{ status: ExternalStatus }", "status", 0); !ok {
 		t.Fatal("Typia property overrides should preserve external imported aliases")
 	} else {
-		assertContainsAll(t, got, "__tsf_runtime_namespace__(\"@scope/shared\"", "__tsfTypeAliases", "\"ExternalStatus\"")
+		assertContainsAll(t, got, "__tsf_runtime_alias__(\"@scope/shared\"", "\"ExternalStatus\"")
 	}
 	if typeContainsExternalImportReference(info, reg, "FoundationAlias", map[string]bool{}) {
 		t.Fatal("foundation aliases should not trigger external shared-package preservation")
@@ -620,14 +620,14 @@ func TestPreferredExternalImportedAliasesUseRuntimeMetadata(t *testing.T) {
 	if !sourceTypeNeedsInternalPropertyMetadata(info, reg, "NullableMySQLCoordinate", &typeContext{seen: map[string]bool{}}, map[string]bool{}) {
 		t.Fatal("foundation aliases should preserve runtime alias metadata when Typia expands the source type")
 	}
-	if got := typeExprForNodePreferred(info, reg, "NullableMySQLCoordinate", nil, 0, true); !strings.Contains(got, "__tsfTypeAliases") {
+	if got := typeExprForNodePreferred(info, reg, "NullableMySQLCoordinate", nil, 0, true); !strings.Contains(got, runtimeAliasPlaceholderName) {
 		t.Fatalf("preferred foundation aliases should use runtime alias metadata: %s", got)
 	}
 	info.interfaces["LocationResponse"] = []interfaceInfo{{body: "zipGeo: NullableMySQLCoordinate"}}
 	if got, ok := typiaSourcePropertyOverrideExpr(info, reg, "LocationResponse", "zipGeo", 0); !ok {
 		t.Fatal("Typia property overrides should preserve foundation alias metadata")
 	} else {
-		assertContainsAll(t, got, "__tsf_runtime_namespace__(\"@zyno-io/ts-server-foundation\"", "__tsfTypeAliases", "\"NullableMySQLCoordinate\"")
+		assertContainsAll(t, got, "__tsf_runtime_alias__(\"@zyno-io/ts-server-foundation\"", "\"NullableMySQLCoordinate\"")
 	}
 }
 
@@ -641,12 +641,69 @@ func TestTypeExprUnescapesStringLiteralTypeValues(t *testing.T) {
 
 func TestPatchAliasMetadataSkipsOversizedAliases(t *testing.T) {
 	info, reg := testTypeInfo()
-	info.aliases["HugeAlias"] = aliasInfo{metadataText: strings.Repeat("x", 1000001)}
+	info.aliases["HugeAlias"] = aliasInfo{metadataText: strings.Repeat("x", 1000001), exported: true}
 
 	got := aliasMetadataExpression(info, reg)
 
 	assertNotContains(t, got, "HugeAlias")
 	assertNotContains(t, got, "__tsfTypeAliases")
+}
+
+func TestAliasMetadataOnlyIncludesExportedDeclarations(t *testing.T) {
+	info, reg := testTypeInfo()
+	info.aliases["PrivateAlias"] = aliasInfo{body: "string"}
+	info.aliases["PublicAlias"] = aliasInfo{body: "number", exported: true}
+	info.interfaces["PrivateInterface"] = []interfaceInfo{{body: "value: string"}}
+	info.interfaces["PublicInterface"] = []interfaceInfo{{body: "value: number", exported: true}}
+
+	got := aliasMetadataExpression(info, reg)
+
+	assertContainsAll(t, got, "PublicAlias", "PublicInterface")
+	assertNotContains(t, got, "PrivateAlias")
+	assertNotContains(t, got, "PrivateInterface")
+}
+
+func TestTypeAliasEmissionDefaultsOnAndCanBeDisabled(t *testing.T) {
+	if !shouldEmitTypeAliases("") {
+		t.Fatal("alias metadata should remain enabled when no plugin config is supplied")
+	}
+	if shouldEmitTypeAliases(`[{"name":"tsf-type-metadata","config":{"emitTypeAliases":false}}]`) {
+		t.Fatal("emitTypeAliases=false should disable alias metadata")
+	}
+	if !shouldEmitTypeAliases(`[{"name":"tsf-type-metadata","config":{"emitTypeAliases":true}}]`) {
+		t.Fatal("emitTypeAliases=true should enable alias metadata")
+	}
+}
+
+func TestUndecoratedMethodEmissionDefaultsOnAndCanBeDisabled(t *testing.T) {
+	defaultConfig := readTypeCompilerPluginConfig("")
+	if defaultConfig.EmitUndecoratedMethods != nil {
+		t.Fatal("undecorated method metadata should default to enabled")
+	}
+	disabled := readTypeCompilerPluginConfig(`[{"name":"tsf-type-metadata","config":{"emitUndecoratedMethods":false}}]`)
+	if disabled.EmitUndecoratedMethods == nil || *disabled.EmitUndecoratedMethods {
+		t.Fatal("emitUndecoratedMethods=false should disable undecorated method metadata")
+	}
+}
+
+func TestMetadataTypeInternerDeduplicatesExpressionsAndAvoidsSourceNames(t *testing.T) {
+	interner := newMetadataTypeInterner("const __tsf_metadata_type_0 = 'application value'")
+	first := interner.reference("{kind: 6}")
+	repeated := interner.reference("{kind: 6}")
+	second := interner.reference("{kind: 7}")
+
+	if first != repeated {
+		t.Fatalf("repeated metadata expression names differ: %q != %q", first, repeated)
+	}
+	if first == second {
+		t.Fatalf("different metadata expressions share name %q", first)
+	}
+	if first != "___tsf_metadata_type(0)" {
+		t.Fatalf("collision-safe metadata name = %q", first)
+	}
+	if len(interner.expressions) != 2 {
+		t.Fatalf("interned expression count = %d, want 2", len(interner.expressions))
+	}
 }
 
 func TestTypeExprResolvesReexportedGenericAliases(t *testing.T) {
@@ -722,7 +779,7 @@ func TestClassMetadataRendersPropertiesMethodsAndConstructor(t *testing.T) {
 		hasCtor: true,
 	}
 
-	got := classMetadata(info, reg, class)
+	got := classMetadata(info, reg, class, nil)
 	for _, want := range []string{
 		"name: \"User\"",
 		"primaryKey: true",
@@ -736,6 +793,22 @@ func TestClassMetadataRendersPropertiesMethodsAndConstructor(t *testing.T) {
 			t.Fatalf("class metadata %q does not contain %q", got, want)
 		}
 	}
+}
+
+func TestClassMetadataCanOmitUndecoratedMethods(t *testing.T) {
+	info, reg := testTypeInfo()
+	class := &classInfo{
+		name:                 "Controller",
+		decoratedMethodsOnly: true,
+		methods: []methodInfo{
+			{name: "index", returnType: "string", decorated: true},
+			{name: "helper", returnType: "number"},
+		},
+	}
+
+	got := classMetadata(info, reg, class, nil)
+	assertContainsAll(t, got, "name: \"index\"")
+	assertNotContains(t, got, "name: \"helper\"")
 }
 
 func TestCleanJsDocDescriptionUsesTheFirstParagraph(t *testing.T) {

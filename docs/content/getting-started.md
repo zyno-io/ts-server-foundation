@@ -31,7 +31,7 @@ The generated project is intentionally small:
 | `src/config.ts`                                      | Application config class extending `BaseAppConfig`.                                                                                               |
 | `src/database.ts`                                    | MySQL database class and entity registry used by the example.                                                                                     |
 | `src/controllers/`, `src/services/`, `src/entities/` | Example HTTP, service, and database layers.                                                                                                       |
-| `src/migrations/`                                    | Source migration files; compiled output is resolved from TypeScript `rootDir` and `outDir` (`dist/src/migrations/` in this scaffold).              |
+| `src/migrations/`                                    | Source migration files; compiled output is resolved from TypeScript `rootDir` and `outDir` (`dist/src/migrations/` in this scaffold).             |
 | `tests/`                                             | Node test-runner tests compiled with `tsconfig.test.json`.                                                                                        |
 | `.env.development`                                   | Local port, MySQL connection, database adapter, and Redis key prefix. Do not commit real secrets.                                                 |
 | `package.json`                                       | Sets `main` to `./dist/src/index.js`, allowing `node . <command>` to dispatch through the compiled entrypoint.                                    |
@@ -64,6 +64,7 @@ Reflected type metadata is required for constructor injection, route parameter m
         "outDir": "dist",
         "sourceMap": true,
         "strict": true,
+        "isolatedModules": true,
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,
         "skipLibCheck": true,
@@ -73,7 +74,9 @@ Reflected type metadata is required for constructor injection, route parameter m
         "types": ["node"],
         "plugins": [
             {
-                "transform": "@zyno-io/ts-server-foundation/type-compiler"
+                "transform": "@zyno-io/ts-server-foundation/type-compiler",
+                "emitTypeAliases": false,
+                "emitUndecoratedMethods": false
             }
         ]
     },
@@ -82,7 +85,7 @@ Reflected type metadata is required for constructor injection, route parameter m
 }
 ```
 
-Build with `ttsc`, as the scaffold and `tsf-dev` commands do. `tsf-install` installs the supported compiler and adds the transform plus top-level `reflection` setting; the full scaffold configuration above is the recommended baseline for a new application. The TSF compiler emits the reflected metadata used by these runtime systems. See [Type Reflection Architecture](./type-reflection-architecture.md) for the compiler and runtime metadata policy.
+Build with `ttsc`, as the scaffold and `tsf-dev` commands do. `tsf-install` installs the supported compiler and adds the transform plus top-level `reflection` setting; the full scaffold configuration above is the recommended baseline. `isolatedModules: true` keeps application code compatible with file-at-a-time transforms. `emitTypeAliases: false` limits alias metadata to local use, while `emitUndecoratedMethods: false` limits method metadata to decorated methods such as HTTP routes. The compiler emits reflected metadata through a compact, versioned runtime format for CommonJS and ESM output. See [Type Reflection Architecture](./type-reflection-architecture.md) for the compiler and runtime metadata policy.
 
 For tests, extend the main config and include both source and tests:
 
