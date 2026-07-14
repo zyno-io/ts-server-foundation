@@ -50,7 +50,6 @@ test-and-build:
   stage: build
   extends: .test_services
   variables:
-    GOMAXPROCS: '2'
     TTSC_CACHE_DIR: .cache/ttsc
   cache:
     key: ttsc-go-v1
