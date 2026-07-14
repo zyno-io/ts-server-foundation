@@ -288,6 +288,9 @@ func isTypeContinuationNewline(body string, start int, newline int) bool {
 }
 
 func stripTypeComments(body string) string {
+	if !strings.Contains(body, "/") {
+		return body
+	}
 	var out strings.Builder
 	out.Grow(len(body))
 	for i := 0; i < len(body); i++ {

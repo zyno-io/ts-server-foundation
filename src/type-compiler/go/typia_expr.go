@@ -26,16 +26,16 @@ func typeExprForNodePreferred(info *fileInfo, reg *registry, raw string, node *s
 		if expr, ok := preferredCachedAliasTypeExpr(info, reg, raw, pos); ok {
 			return expr
 		}
-		if expr, ok := preferredNullishAliasTypeExpr(info, reg, raw, pos); ok {
+		if expr, ok := preferredNullishAliasTypeExpr(info, reg, raw, node, pos); ok {
 			return expr
 		}
-		if expr, ok := preferredDateRootTypeExpr(info, reg, raw, pos); ok {
+		if expr, ok := preferredDateRootTypeExpr(info, reg, raw, node, pos); ok {
 			return expr
 		}
 		if expr, ok := preferredExternalImportedTypeExpr(info, raw); ok {
 			return expr
 		}
-		if expr, ok := preferredExternalImportedCompositeTypeExpr(info, reg, raw, pos); ok {
+		if expr, ok := preferredExternalImportedCompositeTypeExpr(info, reg, raw, node, pos); ok {
 			return expr
 		}
 		if expr, ok := preferredNamedInterfaceTypeExpr(info, reg, raw, pos); ok {
@@ -48,14 +48,78 @@ func typeExprForNodePreferred(info *fileInfo, reg *registry, raw string, node *s
 		}
 	}
 	if shouldUseTextTypeExpr(raw) {
-		return internalTypeExprAt(info, reg, raw, pos)
+		return internalTypeExprForNode(info, reg, raw, node, pos)
 	}
 	if shouldUseTypiaType(info, reg, raw) && canPreferTypiaType(info, reg, raw) {
 		if expr, ok := typiaTypeExprForNode(info, reg, raw, node, pos); ok {
 			return typiaSourceNamedExpr(info, reg, expr, raw)
 		}
 	}
-	return internalTypeExprAt(info, reg, raw, pos)
+	return internalTypeExprForNode(info, reg, raw, node, pos)
+}
+
+func internalTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) string {
+	return internalTypeExprForNodeCtx(info, reg, raw, node, &typeContext{seen: map[string]bool{}, pos: pos})
+}
+
+func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) string {
+	if ctx == nil {
+		ctx = &typeContext{seen: map[string]bool{}}
+	}
+	if node == nil {
+		return typeExprCtx(info, reg, raw, ctx)
+	}
+	if node.Kind == shimast.KindParenthesizedType {
+		inner := node.AsParenthesizedTypeNode().Type
+		if innerRaw, ok := sourceTypeNodeText(info, inner); ok {
+			return internalTypeExprForNodeCtx(info, reg, innerRaw, inner, ctx)
+		}
+		return typeExprCtx(info, reg, raw, ctx)
+	}
+
+	var kind int
+	var nodes []*shimast.Node
+	switch node.Kind {
+	case shimast.KindUnionType:
+		kind = 12
+		if types := node.AsUnionTypeNode().Types; types != nil {
+			nodes = types.Nodes
+		}
+	case shimast.KindIntersectionType:
+		kind = 13
+		if types := node.AsIntersectionTypeNode().Types; types != nil {
+			nodes = types.Nodes
+		}
+	default:
+		return typeExprCtx(info, reg, raw, ctx)
+	}
+	if len(nodes) < 2 {
+		return typeExprCtx(info, reg, raw, ctx)
+	}
+
+	types := make([]string, 0, len(nodes))
+	for _, child := range nodes {
+		childRaw, ok := sourceTypeNodeText(info, child)
+		if !ok {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		types = append(types, internalTypeExprForNodeCtx(info, reg, childRaw, child, ctx))
+	}
+	return "{kind: " + strconv.Itoa(kind) + ", types: [" + strings.Join(types, ", ") + "]}"
+}
+
+func sourceTypeNodeText(info *fileInfo, node *shimast.Node) (string, bool) {
+	if node == nil {
+		return "", false
+	}
+	file := shimast.GetSourceFileOfNode(node)
+	if file == nil && info != nil {
+		file = info.file
+	}
+	if file == nil {
+		return "", false
+	}
+	return nodeText(file, node), true
 }
 
 func preferredCachedAliasTypeExpr(info *fileInfo, reg *registry, raw string, pos int) (string, bool) {
@@ -78,22 +142,46 @@ func preferredCachedAliasTypeExpr(info *fileInfo, reg *registry, raw string, pos
 	return aliasTypeExprCtx(owner, reg, alias, raw, &typeContext{seen: map[string]bool{}, pos: pos}), true
 }
 
-func preferredNullishAliasTypeExpr(info *fileInfo, reg *registry, raw string, pos int) (string, bool) {
+func preferredNullishAliasTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {
 	types := []string{}
-	aliasCount, ok := collectNullishAliasTypeExprs(info, reg, raw, pos, &types)
+	aliasCount, ok := collectNullishAliasTypeExprs(info, reg, raw, node, pos, &types)
 	if !ok || aliasCount != 1 || len(types) <= 1 {
 		return "", false
 	}
 	return "{kind: 12, types: [" + strings.Join(types, ", ") + "]}", true
 }
 
-func collectNullishAliasTypeExprs(info *fileInfo, reg *registry, raw string, pos int, types *[]string) (int, bool) {
+func collectNullishAliasTypeExprs(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int, types *[]string) (int, bool) {
 	raw = strings.TrimSpace(trimParens(raw))
+	if node != nil && node.Kind == shimast.KindParenthesizedType {
+		inner := node.AsParenthesizedTypeNode().Type
+		if innerRaw, ok := sourceTypeNodeText(info, inner); ok {
+			return collectNullishAliasTypeExprs(info, reg, innerRaw, inner, pos, types)
+		}
+	}
+	if node != nil && node.Kind == shimast.KindUnionType {
+		union := node.AsUnionTypeNode()
+		if union.Types != nil && len(union.Types.Nodes) > 1 {
+			aliasCount := 0
+			for _, child := range union.Types.Nodes {
+				childRaw, ok := sourceTypeNodeText(info, child)
+				if !ok {
+					return 0, false
+				}
+				count, ok := collectNullishAliasTypeExprs(info, reg, childRaw, child, pos, types)
+				if !ok {
+					return 0, false
+				}
+				aliasCount += count
+			}
+			return aliasCount, true
+		}
+	}
 	parts := nonEmptyParts(splitTop(raw, "|"))
 	if len(parts) > 1 {
 		aliasCount := 0
 		for _, part := range parts {
-			count, ok := collectNullishAliasTypeExprs(info, reg, part, pos, types)
+			count, ok := collectNullishAliasTypeExprs(info, reg, part, nil, pos, types)
 			if !ok {
 				return 0, false
 			}
@@ -118,11 +206,11 @@ func collectNullishAliasTypeExprs(info *fileInfo, reg *registry, raw string, pos
 	}
 }
 
-func preferredDateRootTypeExpr(info *fileInfo, reg *registry, raw string, pos int) (string, bool) {
+func preferredDateRootTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {
 	if !sourceTypeIsDateRootType(info, reg, raw, &typeContext{seen: map[string]bool{}, pos: pos}, map[string]bool{}) {
 		return "", false
 	}
-	return internalTypeExprAt(info, reg, raw, pos), true
+	return internalTypeExprForNode(info, reg, raw, node, pos), true
 }
 
 func preferredExternalImportedTypeExpr(info *fileInfo, raw string) (string, bool) {
@@ -137,25 +225,25 @@ func preferredExternalImportedTypeExpr(info *fileInfo, raw string) (string, bool
 	return externalImportedTypeExpr(ref, raw), true
 }
 
-func preferredExternalImportedCompositeTypeExpr(info *fileInfo, reg *registry, raw string, pos int) (string, bool) {
+func preferredExternalImportedCompositeTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {
 	raw = strings.TrimSpace(trimParens(raw))
 	if raw == "" || isIdentifierName(raw) {
 		return "", false
 	}
 	if parts := nonEmptyParts(splitTop(raw, "|")); len(parts) > 1 {
 		if typeContainsExternalImportReferenceInParts(info, reg, parts, map[string]bool{}) {
-			return internalTypeExprAt(info, reg, raw, pos), true
+			return internalTypeExprForNode(info, reg, raw, node, pos), true
 		}
 	}
 	if parts := nonEmptyParts(splitTop(raw, "&")); len(parts) > 1 {
 		if typeContainsExternalImportReferenceInParts(info, reg, parts, map[string]bool{}) {
-			return internalTypeExprAt(info, reg, raw, pos), true
+			return internalTypeExprForNode(info, reg, raw, node, pos), true
 		}
 	}
 	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
 		parts := nonEmptyParts(splitTop(strings.TrimSpace(raw[1:len(raw)-1]), ","))
 		if typeContainsExternalImportReferenceInParts(info, reg, parts, map[string]bool{}) {
-			return internalTypeExprAt(info, reg, raw, pos), true
+			return internalTypeExprForNode(info, reg, raw, node, pos), true
 		}
 	}
 	return "", false

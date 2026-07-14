@@ -200,7 +200,7 @@ func cachedAliasTypeExpr(info *fileInfo, reg *registry, alias aliasInfo) string 
 	if strings.TrimSpace(alias.metadataText) != "" {
 		return alias.metadataText
 	}
-	return internalTypeExprAt(info, reg, alias.body, alias.pos)
+	return internalTypeExprForNode(info, reg, alias.body, alias.typeNode, alias.pos)
 }
 
 func metadataExprTooLarge(expr string) bool {

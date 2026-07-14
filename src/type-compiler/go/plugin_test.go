@@ -104,6 +104,107 @@ func TestTypeExprIgnoresCommentsInsideUnions(t *testing.T) {
 	)
 }
 
+func TestTypeExprForNodeUsesAstUnionMemberOrder(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/ordered-union.ts", `
+		type Status =
+			| 'draft'
+			/* punctuation that would poison text splitting: client's { ( */
+			| 'published'
+			| 'archived';
+	`)
+	alias := aliasFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+	info.file = file
+
+	got := typeExprForNode(info, reg, "'not-from-the-node'", alias.typeNode, alias.pos)
+	assertContainsAll(t, got,
+		`literal: "draft"`,
+		`literal: "published"`,
+		`literal: "archived"`,
+	)
+	assertNotContains(t, got, `literal: "not-from-the-node"`)
+	draft := strings.Index(got, `literal: "draft"`)
+	published := strings.Index(got, `literal: "published"`)
+	archived := strings.Index(got, `literal: "archived"`)
+	if draft > published || published > archived {
+		t.Fatalf("AST union order was not preserved: %s", got)
+	}
+}
+
+func TestTypeExprForNodeUsesAstIntersectionMemberOrder(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/ordered-intersection.ts", `
+		type Name =
+			string
+			& MinLength<2>
+			/* punctuation that would poison text splitting: { */
+			& MaxLength<20>;
+	`)
+	alias := aliasFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+	info.file = file
+
+	got := typeExprForNode(info, reg, "string", alias.typeNode, alias.pos)
+	assertContainsAll(t, got,
+		`typeName: "MinLength"`,
+		`typeName: "MaxLength"`,
+	)
+	minimum := strings.Index(got, `typeName: "MinLength"`)
+	maximum := strings.Index(got, `typeName: "MaxLength"`)
+	if minimum > maximum {
+		t.Fatalf("AST intersection order was not preserved: %s", got)
+	}
+}
+
+func TestRenderUtilityPropertyUsesAstUnionMembers(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/utility-union.ts", `
+		type Status =
+			| 'draft'
+			/* punctuation that would poison text splitting: { */
+			| 'published';
+	`)
+	alias := aliasFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+	info.file = file
+
+	got := renderUtilityProperty(info, reg, utilityProperty{
+		name:     "status",
+		typeText: "'not-from-the-node'",
+		typeNode: alias.typeNode,
+	}, &typeContext{seen: map[string]bool{}})
+	assertContainsAll(t, got,
+		`literal: "draft"`,
+		`literal: "published"`,
+	)
+	assertNotContains(t, got, `literal: "not-from-the-node"`)
+}
+
+func TestUtilityClassPropertyRetainsAstUnionMembers(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/class-utility-union.ts", `
+		type Status =
+			| 'draft'
+			/* punctuation that would poison text splitting: { */
+			| 'published';
+	`)
+	alias := aliasFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+	info.file = file
+	info.classes = []*classInfo{{
+		name: "User",
+		properties: []propertyInfo{{
+			name:     "status",
+			typeText: "'not-from-the-node'",
+			typeNode: alias.typeNode,
+		}},
+	}}
+
+	got := typeExpr(info, reg, "Pick<User, 'status'>")
+	assertContainsAll(t, got,
+		`literal: "draft"`,
+		`literal: "published"`,
+	)
+	assertNotContains(t, got, `literal: "not-from-the-node"`)
+}
+
 func TestMetadataCallNamesIncludeValidatedDeserialize(t *testing.T) {
 	for _, name := range []string{"deserialize", "validate", "validatedDeserialize", "typeOf"} {
 		if !isMetadataCallName(name) {
@@ -549,7 +650,7 @@ func TestTypiaSourcePropertyOverridePreservesDateProperties(t *testing.T) {
 	if sourceTypeIsDateRootType(info, reg, "Response", &typeContext{seen: map[string]bool{}}, map[string]bool{}) {
 		t.Fatal("DTOs containing Date should not force whole-object internal encoding")
 	}
-	if got, ok := preferredDateRootTypeExpr(info, reg, "Date | null", 0); !ok {
+	if got, ok := preferredDateRootTypeExpr(info, reg, "Date | null", nil, 0); !ok {
 		t.Fatal("preferred Date roots should render through the internal encoder")
 	} else {
 		assertContainsAll(t, got, "typeName: \"Date\"", "{kind: 5}")

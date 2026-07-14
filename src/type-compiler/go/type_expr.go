@@ -10,10 +10,6 @@ func typeExpr(info *fileInfo, reg *registry, raw string) string {
 	return typeExprCtx(info, reg, raw, &typeContext{seen: map[string]bool{}})
 }
 
-func internalTypeExprAt(info *fileInfo, reg *registry, raw string, pos int) string {
-	return typeExprCtx(info, reg, raw, &typeContext{seen: map[string]bool{}, pos: pos})
-}
-
 func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) string {
 	raw = strings.TrimSpace(stripTypeComments(raw))
 	raw = trimParens(raw)
@@ -415,7 +411,7 @@ func renderUtilityProperty(info *fileInfo, reg *registry, prop utilityProperty, 
 	if prop.owner != nil {
 		owner = prop.owner
 	}
-	t := typeExprCtx(owner, reg, prop.typeText, ctx)
+	t := internalTypeExprForNodeCtx(owner, reg, prop.typeText, prop.typeNode, ctx)
 	if prop.optional {
 		t = "{kind: 12, types: [" + t + ", {kind: 4}]}"
 	}
@@ -436,7 +432,7 @@ func renderPreferredUtilityProperty(info *fileInfo, reg *registry, prop utilityP
 	}
 	var t string
 	if sourceTypeNeedsInternalPropertyMetadata(owner, reg, prop.typeText, &typeContext{seen: map[string]bool{}, pos: pos}, map[string]bool{}) {
-		t = typeExprCtx(owner, reg, prop.typeText, &typeContext{seen: map[string]bool{}, pos: pos})
+		t = internalTypeExprForNode(owner, reg, prop.typeText, prop.typeNode, pos)
 	} else {
 		t = typeExprForNodePreferred(owner, reg, prop.typeText, prop.typeNode, pos, true)
 	}
@@ -634,7 +630,7 @@ func utilitySourceProperties(info *fileInfo, reg *registry, source string, ctx *
 	if class, owner, ok := resolveClassRefAt(info, reg, source, ctx.pos); ok {
 		props := make([]utilityProperty, 0, len(class.properties))
 		for _, prop := range class.properties {
-			props = append(props, utilityProperty{name: prop.name, typeText: prop.typeText, optional: prop.optional, owner: owner})
+			props = append(props, utilityProperty{name: prop.name, typeText: prop.typeText, typeNode: prop.typeNode, optional: prop.optional, owner: owner})
 		}
 		return props, owner, true
 	}
@@ -1097,7 +1093,7 @@ func aliasTypeExprCtx(owner *fileInfo, reg *registry, alias aliasInfo, name stri
 	if strings.TrimSpace(alias.metadataText) != "" {
 		return withTypeName(alias.metadataText, name)
 	}
-	return withTypeName(typeExprCtx(owner, reg, alias.body, ctx), name)
+	return withTypeName(internalTypeExprForNodeCtx(owner, reg, alias.body, alias.typeNode, ctx), name)
 }
 
 func ensureAliasMetadata(owner *fileInfo, reg *registry, name string, alias aliasInfo) aliasInfo {
