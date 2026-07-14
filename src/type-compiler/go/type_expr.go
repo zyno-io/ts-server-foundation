@@ -295,6 +295,9 @@ func genericTypeExpr(info *fileInfo, reg *registry, name string, args []string, 
 			}
 			return withTypeName(typeExprCtx(owner, reg, out, ctx), name)
 		}
+		if decl, owner, _, ok := resolveInterfaceDeclRefAt(info, reg, name, ctx.pos); ok {
+			return interfaceObjectLiteralExpr(owner, reg, name, instantiateInterfaceDecl(decl, args), ctx)
+		}
 		if ref, ok := info.imports[name]; ok && isExternalImportRef(ref) {
 			return withTypeArguments(externalImportedTypeExpr(ref, name), info, reg, args, ctx)
 		}

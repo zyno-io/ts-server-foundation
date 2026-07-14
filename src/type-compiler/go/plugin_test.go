@@ -57,6 +57,31 @@ func TestTypiaObjectTypeNameKeepsGenericDisplayName(t *testing.T) {
 	}
 }
 
+func TestTypeExprInstantiatesGenericInterfaceProperties(t *testing.T) {
+	info, reg := testTypeInfo()
+	info.interfaces["GenericContainer"] = []interfaceInfo{{
+		params: []string{"T"},
+		properties: []utilityProperty{
+			{name: "items", typeText: "T[]", optional: true},
+			{name: "alternatives", typeText: "T[]", optional: true},
+		},
+		pos: 1,
+	}}
+	info.aliases["GenericVariant"] = aliasInfo{body: "{ kind: 'alpha' } | { kind: 'beta'; mode: 'first' | 'second' }"}
+
+	got := typeExpr(info, reg, "GenericContainer<GenericVariant>")
+
+	assertContainsAll(t, got,
+		`kind: 18, typeName: "GenericContainer"`,
+		`name: "items", type: {kind: 12, types: [{kind: 14, type: {kind: 12`,
+		`literal: "alpha"`,
+		`literal: "beta"`,
+		`literal: "first"`,
+		`literal: "second"`,
+	)
+	assertNotContains(t, got, `kind: 16, typeName: "GenericContainer"`)
+}
+
 func TestSplitTopIgnoresNestedSyntax(t *testing.T) {
 	input := "Pick<User, 'id' | 'email'> | { value: string | number } | `x${a | b}` | Array<boolean>"
 	got := splitTop(input, "|")

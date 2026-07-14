@@ -131,6 +131,17 @@ interface OpenApiInterfaceResponse {
     nested: OpenApiInterfaceNested;
 }
 
+interface OpenApiGenericContainer<T> {
+    items?: T[];
+    alternatives?: T[];
+}
+
+type OpenApiGenericVariant = { kind: 'alpha' } | { kind: 'beta'; mode: 'first' | 'second' };
+
+interface OpenApiGenericInterfaceBody {
+    selection?: OpenApiGenericContainer<OpenApiGenericVariant>;
+}
+
 class OpenApiNamedDto {
     value!: string;
 }
@@ -559,6 +570,11 @@ class OpenApiUsersController {
     @http.POST('/interfaces')
     async createInterface(_body: HttpBody<OpenApiInterfaceBody>): Promise<OpenApiInterfaceResponse> {
         return { id: '' as UuidString, nested: { enabled: true } };
+    }
+
+    @http.POST('/generic-interface')
+    async genericInterface(_body: HttpBody<OpenApiGenericInterfaceBody>): Promise<OkResponse> {
+        return { ok: true };
     }
 
     @http.GET('/recursive')
@@ -1104,6 +1120,18 @@ describe('openapi', () => {
         ]);
         assert.ok(doc.components?.schemas?.OpenApiInterfaceBody?.properties?.payload);
         assert.equal(doc.components?.schemas?.OpenApiInterfaceBody?.properties?.['* Comment with braces should not be parsed as a field'], undefined);
+        const genericInterfaceBody = schemaObject(doc.components?.schemas?.OpenApiGenericInterfaceBody);
+        const genericContainer = resolveSchemaObject(doc, genericInterfaceBody.properties?.selection);
+        assert.deepStrictEqual(Object.keys(genericContainer.properties ?? {}), ['items', 'alternatives']);
+        const genericVariant = resolveSchemaObject(doc, schemaObject(genericContainer.properties?.items).items);
+        assert.equal(genericVariant.oneOf?.length, 2);
+        assert.deepStrictEqual(
+            genericVariant.oneOf?.map(item => schemaObject(item).properties?.kind),
+            [
+                { type: 'string', enum: ['alpha'] },
+                { type: 'string', enum: ['beta'] }
+            ]
+        );
         assert.equal(
             referenceObject(doc.paths['/users/interface-extends-alias'].get?.responses['200'].content?.['application/json'].schema).$ref,
             '#/components/schemas/OpenApiInterfaceExtendsAlias'

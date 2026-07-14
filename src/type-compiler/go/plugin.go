@@ -62,6 +62,8 @@ type aliasInfo struct {
 
 type interfaceInfo struct {
 	body       string
+	params     []string
+	defaults   []string
 	extends    []string
 	properties []utilityProperty
 	exported   bool

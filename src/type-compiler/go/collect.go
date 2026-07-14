@@ -160,7 +160,11 @@ func collectTextDeclarations(info *fileInfo) {
 			continue
 		}
 		body := strings.TrimSpace(text[open+1 : close])
-		info.interfaces[name] = append(info.interfaces[name], interfaceInfo{body: body, extends: interfaceExtendsFromHeader(text[afterName:open]), exported: exported, pos: start, source: "text"})
+		header := text[afterName:open]
+		params, defaults := interfaceTypeParametersFromHeader(header)
+		info.interfaces[name] = append(info.interfaces[name], interfaceInfo{
+			body: body, params: params, defaults: defaults, extends: interfaceExtendsFromHeader(header), exported: exported, pos: start, source: "text",
+		})
 		search = close + 1
 	}
 
@@ -272,8 +276,23 @@ func aliasFromNode(file *shimast.SourceFile, node *shimast.Node) aliasInfo {
 }
 
 func interfaceFromNode(file *shimast.SourceFile, node *shimast.Node) interfaceInfo {
+	params := []string{}
+	defaults := []string{}
+	for _, param := range node.TypeParameters() {
+		if param.Name() == nil {
+			continue
+		}
+		params = append(params, param.Name().Text())
+		defaultText := ""
+		if defaultType := param.AsTypeParameterDeclaration().DefaultType; defaultType != nil {
+			defaultText = nodeText(file, defaultType)
+		}
+		defaults = append(defaults, defaultText)
+	}
 	return interfaceInfo{
 		body:       interfaceBodyFromNode(file, node),
+		params:     params,
+		defaults:   defaults,
 		extends:    interfaceExtendsFromNode(file, node),
 		properties: interfacePropertiesFromNode(file, node),
 		exported:   node.ModifierFlags()&shimast.ModifierFlagsExport != 0,
@@ -363,6 +382,39 @@ func interfaceExtendsFromHeader(header string) []string {
 		}
 	}
 	return refs
+}
+
+func interfaceTypeParametersFromHeader(header string) ([]string, []string) {
+	header = strings.TrimSpace(stripTypeComments(header))
+	if !strings.HasPrefix(header, "<") {
+		return nil, nil
+	}
+	end := findBalanced(header, 0, '<', '>')
+	if end < 0 {
+		return nil, nil
+	}
+	params := []string{}
+	defaults := []string{}
+	for _, part := range splitTop(header[1:end], ",") {
+		part = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(part), "const "))
+		if part == "" {
+			continue
+		}
+		defaultText := ""
+		if index := topLevelEquals(part); index >= 0 {
+			defaultText = strings.TrimSpace(part[index+1:])
+			part = strings.TrimSpace(part[:index])
+		}
+		if index := topLevelKeywordIndex(part, "extends"); index >= 0 {
+			part = strings.TrimSpace(part[:index])
+		}
+		if !isIdentifierName(part) {
+			continue
+		}
+		params = append(params, part)
+		defaults = append(defaults, defaultText)
+	}
+	return params, defaults
 }
 
 func topLevelKeywordIndex(input string, keyword string) int {
@@ -481,6 +533,7 @@ func interfaceFullBody(info *fileInfo, reg *registry, decl interfaceInfo, seen m
 		if !ok {
 			continue
 		}
+		baseDecl = instantiateInterfaceReference(baseDecl, base)
 		if body := strings.TrimSpace(interfaceFullBody(owner, reg, baseDecl, seen)); body != "" {
 			parts = append(parts, body)
 		}
@@ -504,6 +557,7 @@ func interfaceFullProperties(info *fileInfo, reg *registry, decl interfaceInfo, 
 	for _, base := range decl.extends {
 		baseDecl, owner, _, ok := resolveInterfaceDeclRefAt(info, reg, base, decl.pos)
 		if ok {
+			baseDecl = instantiateInterfaceReference(baseDecl, base)
 			props = append(props, interfaceFullProperties(owner, reg, baseDecl, seen)...)
 			continue
 		}
@@ -520,6 +574,47 @@ func interfaceOwnProperties(info *fileInfo, decl interfaceInfo) []utilityPropert
 		return withUtilityPropertyOwner(decl.properties, info)
 	}
 	return withUtilityPropertyOwner(propertiesFromBody(decl.body), info)
+}
+
+func instantiateInterfaceReference(decl interfaceInfo, reference string) interfaceInfo {
+	_, args, _ := generic(strings.TrimSpace(reference))
+	return instantiateInterfaceDecl(decl, args)
+}
+
+func instantiateInterfaceDecl(decl interfaceInfo, args []string) interfaceInfo {
+	if len(decl.params) == 0 {
+		return decl
+	}
+	replacements := map[string]string{}
+	parameterPatterns := []string{}
+	for index, param := range decl.params {
+		value := "unknown"
+		if index < len(args) && strings.TrimSpace(args[index]) != "" {
+			value = strings.TrimSpace(args[index])
+		} else if index < len(decl.defaults) && strings.TrimSpace(decl.defaults[index]) != "" {
+			value = strings.TrimSpace(decl.defaults[index])
+		}
+		replacements[param] = value
+		parameterPatterns = append(parameterPatterns, regexp.QuoteMeta(param))
+	}
+	parameterPattern := regexp.MustCompile(`\b(` + strings.Join(parameterPatterns, "|") + `)\b`)
+	replace := func(value string) string {
+		return parameterPattern.ReplaceAllStringFunc(value, func(param string) string { return replacements[param] })
+	}
+	decl.body = replace(decl.body)
+	decl.extends = append([]string(nil), decl.extends...)
+	for index := range decl.extends {
+		decl.extends[index] = replace(decl.extends[index])
+	}
+	decl.properties = append([]utilityProperty(nil), decl.properties...)
+	for index := range decl.properties {
+		decl.properties[index].typeText = replace(decl.properties[index].typeText)
+		// The AST node still contains the uninstantiated type parameter.
+		decl.properties[index].typeNode = nil
+	}
+	decl.params = nil
+	decl.defaults = nil
+	return decl
 }
 
 func interfaceImplementsExpr(info *fileInfo, reg *registry, decl interfaceInfo, ctx *typeContext) string {
