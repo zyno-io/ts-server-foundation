@@ -11,6 +11,8 @@ import {
     MigrationRunner,
     resetMigrations,
     standardizeDbCollation,
+    WorkerQueueRegistry,
+    WorkerRunnerService,
     writeMigrationFile
 } from '..';
 import { resolveTypeScriptOutputPath } from '../typescript-output';
@@ -96,9 +98,11 @@ async function run(options: MigrateCliOptions): Promise<number> {
     try {
         const migrations = await loadMigrationsFromDirectory(options.migrationsDir);
         const executions = await new MigrationRunner(db).run(migrations);
+        if (app.options.enableWorker) await app.get(WorkerRunnerService).removeStaleBullMqCronJobs();
         console.log(`Ran ${executions.length} migration(s).`);
         return 0;
     } finally {
+        if (app.options.enableWorker) await app.get(WorkerQueueRegistry).shutdown();
         await closeDatabase(db);
     }
 }

@@ -120,6 +120,8 @@ class DailyCleanupJob extends BaseJob<void, void> {
 
 When the runner starts, it registers BullMQ job schedulers for registered cron jobs. In test-mode in-process queues, the runner schedules one pending repeat job per registered job class and repeat key.
 
+After a successful `migrate` or `migrate:run`, the migration command removes framework-managed BullMQ schedulers whose job was deleted, no longer has a cron schedule, moved queues, or changed schedules. Matching schedulers remain registered and the worker runner creates the replacement for changed schedules when the application starts. Legacy repeatable cron jobs on the default queue are also removed so migrations from `dk-server-foundation` replace them with Job Schedulers instead of running both registrations.
+
 ## Queue Registry
 
 `WorkerQueueRegistry` is primarily an internal queue abstraction. In test mode it stores queued jobs in memory and exposes:
