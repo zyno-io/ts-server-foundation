@@ -15,7 +15,7 @@ func internalTypeExprAt(info *fileInfo, reg *registry, raw string, pos int) stri
 }
 
 func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) string {
-	raw = strings.TrimSpace(raw)
+	raw = strings.TrimSpace(stripTypeComments(raw))
 	raw = trimParens(raw)
 	raw = strings.TrimSpace(strings.TrimPrefix(raw, "readonly "))
 	if raw == "" || raw == "unknown" {

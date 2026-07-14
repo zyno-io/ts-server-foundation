@@ -18,6 +18,7 @@ func typeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.No
 }
 
 func typeExprForNodePreferred(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int, preferTypia bool) string {
+	raw = strings.TrimSpace(stripTypeComments(raw))
 	if preferTypia {
 		if expr, ok := preferredWrapperTypeExprForNode(info, reg, raw, node, pos); ok {
 			return expr

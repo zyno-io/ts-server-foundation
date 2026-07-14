@@ -54,6 +54,7 @@ func literalArg(raw string) string {
 }
 
 func splitTop(input string, sep string) []string {
+	input = stripTypeComments(input)
 	parts := []string{}
 	start, depthAngle, depthBrace, depthParen, depthBracket, quote := 0, 0, 0, 0, 0, byte(0)
 	for i := 0; i < len(input); i++ {
@@ -287,8 +288,67 @@ func isTypeContinuationNewline(body string, start int, newline int) bool {
 }
 
 func stripTypeComments(body string) string {
-	replacer := regexp.MustCompile(`(?s)/\*.*?\*/|//[^\r\n]*`)
-	return replacer.ReplaceAllString(body, "")
+	var out strings.Builder
+	out.Grow(len(body))
+	for i := 0; i < len(body); i++ {
+		current := body[i]
+		next := byte(0)
+		if i+1 < len(body) {
+			next = body[i+1]
+		}
+		if current == '\'' || current == '"' {
+			quote := current
+			out.WriteByte(current)
+			for i++; i < len(body); i++ {
+				out.WriteByte(body[i])
+				if body[i] == '\\' && i+1 < len(body) {
+					i++
+					out.WriteByte(body[i])
+					continue
+				}
+				if body[i] == quote {
+					break
+				}
+			}
+			continue
+		}
+		if current == '`' {
+			end := skipTemplateLiteral(body, i)
+			out.WriteString(body[i : end+1])
+			i = end
+			continue
+		}
+		if current == '/' && next == '/' {
+			out.WriteString("  ")
+			i += 2
+			for ; i < len(body) && body[i] != '\n' && body[i] != '\r'; i++ {
+				out.WriteByte(' ')
+			}
+			if i < len(body) {
+				out.WriteByte(body[i])
+			}
+			continue
+		}
+		if current == '/' && next == '*' {
+			out.WriteString("  ")
+			i += 2
+			for ; i < len(body); i++ {
+				if body[i] == '*' && i+1 < len(body) && body[i+1] == '/' {
+					out.WriteString("  ")
+					i++
+					break
+				}
+				if body[i] == '\n' || body[i] == '\r' {
+					out.WriteByte(body[i])
+				} else {
+					out.WriteByte(' ')
+				}
+			}
+			continue
+		}
+		out.WriteByte(current)
+	}
+	return out.String()
 }
 
 func parseField(field string) (string, string, bool, bool) {

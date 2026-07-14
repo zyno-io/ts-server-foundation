@@ -271,7 +271,7 @@ func nodeText(file *shimast.SourceFile, node *shimast.Node) string {
 	if node == nil {
 		return "unknown"
 	}
-	return strings.TrimSpace(file.Text()[node.Pos():node.End()])
+	return strings.TrimSpace(stripTypeComments(file.Text()[node.Pos():node.End()]))
 }
 
 func jsDocDescription(file *shimast.SourceFile, node *shimast.Node) string {

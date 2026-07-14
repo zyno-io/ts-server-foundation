@@ -71,6 +71,39 @@ func TestSplitTopIgnoresNestedSyntax(t *testing.T) {
 	}
 }
 
+func TestSplitTopPreservesCommentMarkersInsideLiterals(t *testing.T) {
+	input := `'https://example.com/a/*b*/' | /* actual comment */ ` + "`route//segment/${string}`" + ` | 'done'`
+	got := splitTop(input, "|")
+	want := []string{
+		`'https://example.com/a/*b*/'`,
+		"`route//segment/${string}`",
+		`'done'`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitTop() = %#v, want %#v", got, want)
+	}
+}
+
+func TestTypeExprIgnoresCommentsInsideUnions(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/commented-union.ts", `
+		type Status =
+			| 'draft'
+			/* client's legacy { branch */
+			| 'published'
+			// closing ( branch
+			| 'archived';
+	`)
+	alias := aliasFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+
+	got := typeExpr(info, reg, alias.body)
+	assertContainsAll(t, got,
+		`literal: "draft"`,
+		`literal: "published"`,
+		`literal: "archived"`,
+	)
+}
+
 func TestMetadataCallNamesIncludeValidatedDeserialize(t *testing.T) {
 	for _, name := range []string{"deserialize", "validate", "validatedDeserialize", "typeOf"} {
 		if !isMetadataCallName(name) {
