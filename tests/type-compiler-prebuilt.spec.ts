@@ -13,6 +13,10 @@ const prebuilt = require('../src/type-compiler/prebuilt.cjs') as {
     isPublishedReleaseVersion(version: unknown): boolean;
     prebuiltAssetNames(target: string): { binary: string; manifest: string };
 };
+// oxlint-disable-next-line typescript/no-require-imports
+const buildPrebuilt = require(join(process.cwd(), 'scripts', 'build-type-compiler-prebuilt.cjs')) as {
+    goArchForNodeArch(arch: string): string;
+};
 const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
     devDependencies: { ttsc: string; typescript: string };
 };
@@ -121,6 +125,12 @@ function fixture(directory: string) {
 }
 
 describe('type compiler prebuilds', () => {
+    it('maps Node architecture names to Go architecture names', () => {
+        assert.equal(buildPrebuilt.goArchForNodeArch('x64'), 'amd64');
+        assert.equal(buildPrebuilt.goArchForNodeArch('ia32'), '386');
+        assert.equal(buildPrebuilt.goArchForNodeArch('arm64'), 'arm64');
+    });
+
     it('recognizes release versions and platform asset names', () => {
         assert.equal(prebuilt.isPublishedReleaseVersion('26.714.1200'), true);
         assert.equal(prebuilt.isPublishedReleaseVersion('0.0.0-dev'), false);

@@ -86,10 +86,16 @@ function verifyPortableBinary(binary) {
     for (const [key, expected] of [
         ['CGO_ENABLED', '0'],
         ['GOOS', goPlatform],
-        ['GOARCH', process.arch]
+        ['GOARCH', goArchForNodeArch(process.arch)]
     ]) {
         if (settings.get(key) !== expected) throw new Error(`prepared binary has ${key}=${settings.get(key) ?? 'unknown'}; expected ${expected}`);
     }
+}
+
+function goArchForNodeArch(arch) {
+    if (arch === 'x64') return 'amd64';
+    if (arch === 'ia32') return '386';
+    return arch;
 }
 
 function resolveGoInspector() {
@@ -107,4 +113,6 @@ function readJson(file) {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-main(process.argv.slice(2));
+if (require.main === module) main(process.argv.slice(2));
+
+module.exports = { goArchForNodeArch };
