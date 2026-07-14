@@ -699,6 +699,23 @@ describe('CLI', () => {
         assert.match(`${result.stdout}\n${result.stderr}`, /pass 1/);
     });
 
+    it('does not force-exit the node:test process', () => {
+        const dir = tempDir();
+        const testsDir = join(dir, 'dist', 'tests');
+        writeFileSync(join(dir, 'package.json'), '{"name":"fixture"}');
+        rmSync(testsDir, { recursive: true, force: true });
+        mkdirSync(testsDir, { recursive: true });
+        writeFileSync(
+            join(testsDir, 'probe.spec.js'),
+            "const test = require('node:test'); const assert = require('node:assert/strict'); test('normal lifecycle', () => assert.equal(process.execArgv.includes('--test-force-exit'), false));\n"
+        );
+
+        const result = runCli('tsf-test.js', [], dir);
+
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        assert.match(`${result.stdout}\n${result.stderr}`, /pass 1/);
+    });
+
     it('does not wait for database readiness from ambient development config', () => {
         const dir = tempDir();
         const testsDir = join(dir, 'dist', 'tests');

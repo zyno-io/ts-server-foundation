@@ -43,17 +43,13 @@ export async function runTestCli(args = process.argv.slice(2)): Promise<number> 
         Env.TEST_RUN_TS = testRunTs;
         const mysqlSessionPoolSize = resolveTestWorkerConcurrency(nodeArgs);
         manager = await startMySQLSessionManagerIfNeeded(testRunTs, resolvedDatabaseEnv, mysqlSessionPoolSize);
-        const result = runNode(
-            ['--enable-source-maps', ...nodeArgs, '--test', '--test-force-exit', '--test-timeout=180000', ...testFiles],
-            process.cwd(),
-            {
-                ...resolvedDatabaseEnv,
-                APP_ENV: 'test',
-                TZ: 'UTC',
-                TEST_RUN_TS: testRunTs,
-                ...manager?.env
-            }
-        );
+        const result = runNode(['--enable-source-maps', ...nodeArgs, '--test', '--test-timeout=180000', ...testFiles], process.cwd(), {
+            ...resolvedDatabaseEnv,
+            APP_ENV: 'test',
+            TZ: 'UTC',
+            TEST_RUN_TS: testRunTs,
+            ...manager?.env
+        });
         return result.status;
     } finally {
         await manager?.stop();
