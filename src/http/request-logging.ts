@@ -7,6 +7,10 @@ import type { HttpRequest } from './request';
 
 type RequestLoggingMode = BaseAppConfig['HTTP_REQUEST_LOGGING_MODE'];
 
+export interface HttpRequestLoggingOptions {
+    excludePaths?: (string | RegExp)[];
+}
+
 interface RequestLoggingState {
     request: HttpRequest;
     mode: RequestLoggingMode;
@@ -25,7 +29,8 @@ interface ResponseLoggingTarget {
 export class HttpRequestLogger {
     constructor(
         private readonly config: BaseAppConfig,
-        private readonly logger: ScopedLogger
+        private readonly logger: ScopedLogger,
+        private readonly options: HttpRequestLoggingOptions = {}
     ) {}
 
     createState(request: HttpRequest, outgoing: ServerResponse): RequestLoggingState {
@@ -107,11 +112,11 @@ export class HttpRequestLogger {
 
     shouldSkip(request: HttpRequest): boolean {
         if (request.path === '/metrics') return true;
-        if (request.path === '/healthz') return this.config.HEALTHZ_ENABLE_REQUEST_LOGGING !== true;
-        return false;
+        if (request.path === '/healthz' && this.config.HEALTHZ_ENABLE_REQUEST_LOGGING !== true) return true;
+        return this.options.excludePaths?.some(path => matchesPath(request.path, path)) ?? false;
     }
 
-    shouldLogFinish(state: Pick<RequestLoggingState, 'mode' | 'skipped'>, statusCode: number): boolean {
+    shouldLogFinish(state: Pick<RequestLoggingState, 'mode' | 'skipped'>, _statusCode: number): boolean {
         if (state.skipped) return false;
         if (state.mode === 'none') return false;
         if (state.mode === 'errors') return false;
@@ -122,6 +127,12 @@ export class HttpRequestLogger {
         if (state.skipped) return false;
         return state.mode === 'e2e' || state.mode === 'errors';
     }
+}
+
+function matchesPath(requestPath: string, excludedPath: string | RegExp): boolean {
+    if (typeof excludedPath === 'string') return requestPath === excludedPath;
+    const pattern = excludedPath.global || excludedPath.sticky ? new RegExp(excludedPath.source, excludedPath.flags) : excludedPath;
+    return pattern.test(requestPath);
 }
 
 function getDefaultRequestLoggingMode(): RequestLoggingMode {

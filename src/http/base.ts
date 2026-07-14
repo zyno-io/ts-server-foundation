@@ -15,7 +15,7 @@ import { applyHttpContext } from './context';
 import { HttpRequest, type HttpMethod } from './request';
 import { MemoryHttpResponse, NodeHttpResponse, type HttpResponse } from './response';
 import { HttpRouter } from './router';
-import { HttpRequestLogger } from './request-logging';
+import { HttpRequestLogger, type HttpRequestLoggingOptions } from './request-logging';
 import { logDevConsoleAvailable, logServerListening, logStartupDetails } from './startup-logging';
 import { resolveStaticFilesOptions, serveStaticFile, type ResolvedStaticFilesOptions, type StaticFilesOptions } from './static-files';
 import { installUpgradeClaimHandling, type HttpUpgradeHandler } from './upgrade';
@@ -28,6 +28,7 @@ export interface HttpServerRuntimeOptions<C extends BaseAppConfig = BaseAppConfi
     serverConfig?: Record<string, unknown>;
     cors?: HttpCorsConfig<C>;
     staticFiles?: boolean | StaticFilesOptions;
+    requestLogging?: HttpRequestLoggingOptions;
     packageName?: string;
     devConsoleEnabled?: boolean;
     listenHooks?: HttpServerListenHooks | (() => HttpServerListenHooks);
@@ -62,7 +63,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
         this.corsOptions = resolveCorsOptions(options.config, options.cors);
         this.staticFiles = resolveStaticFilesOptions(options.staticFiles);
         this.appLogger = options.logger.scoped('app');
-        this.requestLogger = new HttpRequestLogger(options.config, options.logger.scoped('http'));
+        this.requestLogger = new HttpRequestLogger(options.config, options.logger.scoped('http'), options.requestLogging);
     }
 
     async request(request: HttpRequest, response: HttpResponse = new MemoryHttpResponse()): Promise<HttpResponse> {

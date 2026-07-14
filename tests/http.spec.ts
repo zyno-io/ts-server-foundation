@@ -2092,7 +2092,7 @@ describe('http router', () => {
         }
     });
 
-    it('logs Node HTTP request start and finish with health checks suppressed by default', async () => {
+    it('logs Node HTTP request start and finish with configured paths and health checks suppressed', async () => {
         const entries: LogEntry[] = [];
 
         @http.controller('/request-logging')
@@ -2107,13 +2107,37 @@ describe('http router', () => {
                 request.context.controllerValue = 'seen-by-finish-log';
                 return { ok: true };
             }
+
+            @http.GET('/excluded')
+            excluded() {
+                return { ok: true };
+            }
+
+            @http.GET('/excluded-error')
+            excludedError() {
+                throw new Error('excluded request error');
+            }
+
+            @http.GET('/excluded-neighbor')
+            excludedNeighbor() {
+                return { ok: true };
+            }
+
+            @http.GET('/pattern/:id')
+            pattern() {
+                return { ok: true };
+            }
         }
 
         process.env.APP_ENV = 'test';
         setLogSink(entry => entries.push(entry));
+        const excludedPattern = /^\/request-logging\/pattern\//g;
         const app = createApp({
             controllers: [RequestLoggingController],
-            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' }
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' },
+            requestLogging: {
+                excludePaths: ['/request-logging/excluded', '/request-logging/excluded-error', excludedPattern]
+            }
         });
         const server = await app.http.listen(0, '127.0.0.1');
         const address = server.address() as AddressInfo;
@@ -2138,6 +2162,37 @@ describe('http router', () => {
 
             assert.equal(mutated.statusCode, 200);
             assert.equal((entries[1]?.data?.http as Record<string, unknown> | undefined)?.controllerValue, 'seen-by-finish-log');
+
+            entries.length = 0;
+            const excluded = await requestNodeHttp(address.port, 'GET', '/request-logging/excluded?source=poll');
+
+            assert.equal(excluded.statusCode, 200);
+            assert.equal(entries.length, 0);
+
+            const pattern = await requestNodeHttp(address.port, 'GET', '/request-logging/pattern/123');
+
+            assert.equal(pattern.statusCode, 200);
+            assert.equal(entries.length, 0);
+            assert.equal(excludedPattern.lastIndex, 0);
+
+            const repeatedPattern = await requestNodeHttp(address.port, 'GET', '/request-logging/pattern/456');
+
+            assert.equal(repeatedPattern.statusCode, 200);
+            assert.equal(entries.length, 0);
+            assert.equal(excludedPattern.lastIndex, 0);
+
+            const excludedError = await requestNodeHttp(address.port, 'GET', '/request-logging/excluded-error');
+
+            assert.equal(excludedError.statusCode, 500);
+            assert.equal(entries.length, 0);
+
+            const excludedNeighbor = await requestNodeHttp(address.port, 'GET', '/request-logging/excluded-neighbor');
+
+            assert.equal(excludedNeighbor.statusCode, 200);
+            assert.deepStrictEqual(
+                entries.map(entry => entry.message),
+                ['Request', 'Response']
+            );
 
             entries.length = 0;
             const health = await requestNodeHttp(address.port, 'GET', '/healthz');
@@ -2240,6 +2295,16 @@ describe('http router', () => {
             assert.equal(entries[0].scope, 'http');
             assert.equal(entries[0].data?.statusCode, 500);
             assert.equal(entries[0].data?.url, '/memory-request-error-logging');
+
+            entries.length = 0;
+            const excludedApp = createApp({
+                controllers: [MemoryRequestErrorLoggingController],
+                requestLogging: { excludePaths: ['/memory-request-error-logging'] }
+            });
+            const excludedResponse = await excludedApp.request(HttpRequest.GET('/memory-request-error-logging'));
+
+            assert.equal(excludedResponse.statusCode, 500);
+            assert.deepStrictEqual(entries, []);
         } finally {
             resetLogSink();
         }

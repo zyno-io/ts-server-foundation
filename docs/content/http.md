@@ -101,6 +101,16 @@ Node HTTP requests are logged at the server boundary and configured with `HTTP_R
 
 Test mode defaults to `errors` so service/application logs remain visible without routine HTTP `Request` and `Response` records. Request logs include method, URL, status code, duration, remote address on start, and the active request context. `/healthz` request logging is disabled by default; set `HEALTHZ_ENABLE_REQUEST_LOGGING=true` to include it. `/metrics` is always skipped.
 
+Exclude additional request paths through app options. Strings match exact pathnames (regardless of query strings), while regular expressions support path patterns:
+
+```ts
+createApp({
+    requestLogging: {
+        excludePaths: ['/poll', /^\/internal\//]
+    }
+});
+```
+
 `HttpLogPayloadMiddleware` is an opt-in diagnostic middleware that reads and logs the request body as text along with the method, URL, and content type. Because it can record credentials, tokens, personal data, and large payloads, use it only on deliberately selected routes and with a logger whose destination and retention are appropriate for that data.
 
 ### Client Address And Trusted Proxies

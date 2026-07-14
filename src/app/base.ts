@@ -13,6 +13,7 @@ import {
     MemoryHttpResponse,
     getControllerMetadata,
     type HttpCorsConfig,
+    type HttpRequestLoggingOptions,
     type RouteParameterResolverRegistry,
     type StaticFilesOptions
 } from '../http';
@@ -50,6 +51,7 @@ export interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> exten
     serverConfig?: Record<string, unknown>;
     cors?: HttpCorsConfig<C>;
     staticFiles?: boolean | StaticFilesOptions;
+    requestLogging?: HttpRequestLoggingOptions;
     httpResolvers?: RouteParameterResolverRegistry;
     enableHealthcheck?: boolean;
     enableWorker?: boolean;
@@ -139,6 +141,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
             serverConfig: options.serverConfig,
             cors: options.cors,
             staticFiles: options.staticFiles,
+            requestLogging: options.requestLogging,
             packageName: getPackageName() ?? 'app',
             devConsoleEnabled: shouldEnableDevConsole(this.config),
             listenHooks: () => {
