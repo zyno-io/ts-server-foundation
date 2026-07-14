@@ -153,9 +153,10 @@ type callInfo struct {
 }
 
 type typeContext struct {
-	seen  map[string]bool
-	depth int
-	pos   int
+	seen       map[string]bool
+	interfaces map[string]bool
+	depth      int
+	pos        int
 }
 
 type hostOptions struct {

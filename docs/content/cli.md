@@ -204,6 +204,7 @@ Generation always enables `esModuleInterop` and disables generated service clien
 - adds the TSF transform to `compilerOptions.plugins`
 - sets top-level `reflection: true`
 - avoids duplicating the plugin in configs that extend an already configured local base config
+- runs `ttsc prepare` after compiler dependencies are installed so the native type compiler is ready before the first build
 
 Workspace packages without a direct TSF dependency keep their own compiler version and TypeScript configuration. Set `"tsf": { "compiler": true }` in a package to opt in; the installer adds TSF as a dev dependency so the compiler export remains resolvable. Set it to `false` to opt out despite a direct TSF dependency.
 
@@ -212,6 +213,8 @@ When `tsf-install` runs from a workspace-root `postinstall`, declare TSF as a ro
 When compiler dependencies change outside a package-manager lifecycle, it detects Yarn, npm, pnpm, or Bun and refreshes the install/lockfile. During `postinstall`, it reports that another install is needed instead of recursively starting the package manager.
 
 The generated app registers `tsf-install` as `postinstall`, so normal dependency installation keeps compiler setup aligned. See [Getting Started: TypeScript Configuration](./getting-started.md#typescript-configuration) for the resulting config.
+
+Published versions try to populate `ttsc`'s cache from a verified GitHub release prebuilt. If the download or validation fails, `ttsc prepare` builds the same plugin locally from the packaged Go source; a prebuilt outage therefore makes installation slower but does not remove the source-build path. Use `TSF_TYPE_COMPILER_PREBUILT=0` to skip the download attempt.
 
 ## Update Command
 

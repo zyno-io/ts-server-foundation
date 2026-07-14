@@ -87,6 +87,10 @@ Reflected type metadata is required for constructor injection, route parameter m
 
 Build with `ttsc`, as the scaffold and `tsf-dev` commands do. `tsf-install` installs the supported compiler and adds the transform plus top-level `reflection` setting; the full scaffold configuration above is the recommended baseline. `isolatedModules: true` keeps application code compatible with file-at-a-time transforms. `emitTypeAliases: false` limits alias metadata to local use, while `emitUndecoratedMethods: false` limits method metadata to decorated methods such as HTTP routes. The compiler emits reflected metadata through a compact, versioned runtime format for CommonJS and ESM output. See [Type Reflection Architecture](./type-reflection-architecture.md) for the compiler and runtime metadata policy.
 
+For published releases, `tsf-install` prepares the native type compiler during installation. TSF first tries a verified prebuilt from the matching GitHub release on Linux, macOS, and Windows for x64 and arm64. A missing asset, network failure, timeout, checksum mismatch, unsupported platform, or incompatible compiler version automatically falls back to `ttsc`'s normal local Go source build. Both paths populate the same project-local `ttsc` cache, so later builds reuse the result.
+
+Set `TSF_TYPE_COMPILER_PREBUILT=0` to force local source builds. Set `TSF_TYPE_COMPILER_PREBUILT_DEBUG=1` to report why a prebuilt was not used. `TTSC_CACHE_DIR` continues to control the shared build cache location.
+
 For tests, extend the main config and include both source and tests:
 
 ```json

@@ -2,6 +2,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, globSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from './common';
@@ -75,9 +76,10 @@ export function install(options: InstallOptions = {}): number {
     const changedPackages = new Map<string, PackageJson>();
     let compilerSetupChanged = false;
     let tsconfigChanged = false;
+    const compilerWorkspaces = findCompilerWorkspaces(workspaceRoot, workspacePkg, packageJsonPath, pkg);
 
     if (postinstallChanged) changedPackages.set(resolve(packageJsonPath), pkg);
-    for (const workspace of findCompilerWorkspaces(workspaceRoot, workspacePkg, packageJsonPath, pkg)) {
+    for (const workspace of compilerWorkspaces) {
         const packageChanged = ensureCompilerSetup(workspace.pkg, baselineVersions);
         if (packageChanged) {
             changedPackages.set(workspace.packageJsonPath, workspace.pkg);
@@ -92,10 +94,11 @@ export function install(options: InstallOptions = {}): number {
     if (tsconfigChanged) console.log('tsf-install: updated tsconfig compiler plugin');
 
     if (compilerSetupChanged && options.runPackageManager !== false && process.env[PACKAGE_MANAGER_RERUN_ENV] !== '1') {
-        return runPackageManagerInstall(packageManager.installDir, packageManager.manager);
+        const status = runPackageManagerInstall(packageManager.installDir, packageManager.manager);
+        if (status !== 0) return status;
     }
 
-    return 0;
+    return options.runPackageManager === false ? 0 : prepareCompilerWorkspaces(compilerWorkspaces);
 }
 
 function ensureCompilerSetup(pkg: PackageJson, versions: BaselineVersions): boolean {
@@ -487,6 +490,44 @@ function runPackageManagerInstall(projectDir: string, packageManager: PackageMan
         return 1;
     }
     return result.status ?? 1;
+}
+
+function prepareCompilerWorkspaces(workspaces: WorkspacePackage[]): number {
+    for (const workspace of workspaces) {
+        const tsconfig = findTsconfigPaths(workspace.dir).find(path => hasTsconfigCompilerSetup(readTsconfigJson(path)));
+        if (!tsconfig) continue;
+
+        const projectRequire = createRequire(join(workspace.dir, 'package.json'));
+        let ttscEntry: string;
+        try {
+            ttscEntry = projectRequire.resolve('ttsc');
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND') continue;
+            console.error(`tsf-install: could not resolve ttsc for ${workspace.dir}: ${error instanceof Error ? error.message : String(error)}`);
+            return 1;
+        }
+
+        let TtscCompiler: new (context: { cwd: string; tsconfig: string }) => { prepare(): string[] };
+        try {
+            ({ TtscCompiler } = projectRequire(ttscEntry) as {
+                TtscCompiler: new (context: { cwd: string; tsconfig: string }) => { prepare(): string[] };
+            });
+        } catch (error) {
+            console.error(`tsf-install: could not load ttsc for ${workspace.dir}: ${error instanceof Error ? error.message : String(error)}`);
+            return 1;
+        }
+
+        try {
+            console.log(`tsf-install: preparing type compiler for ${workspace.dir}`);
+            new TtscCompiler({ cwd: workspace.dir, tsconfig }).prepare();
+        } catch (error) {
+            console.error(
+                `tsf-install: failed to prepare type compiler for ${workspace.dir}: ${error instanceof Error ? error.message : String(error)}`
+            );
+            return 1;
+        }
+    }
+    return 0;
 }
 
 function main(args = process.argv.slice(2)): number {

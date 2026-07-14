@@ -206,6 +206,50 @@ describe('CLI', () => {
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
     });
 
+    it('prepares an installed compiler after configuring the project', () => {
+        const dir = tempDir();
+        const marker = join(dir, 'prepared.json');
+        const ttscPackage = join(dir, 'node_modules', 'ttsc');
+        mkdirSync(ttscPackage, { recursive: true });
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify(
+                {
+                    name: 'fixture',
+                    devDependencies: {
+                        '@zyno-io/ts-server-foundation': expectedFoundationVersion,
+                        ttsc: expectedTtscVersion,
+                        typescript: expectedTypescriptVersion
+                    }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+        writeFileSync(join(ttscPackage, 'package.json'), JSON.stringify({ name: 'ttsc', main: 'index.js' }));
+        writeFileSync(
+            join(ttscPackage, 'index.js'),
+            [
+                "const { writeFileSync } = require('node:fs');",
+                'exports.TtscCompiler = class {',
+                '    constructor(context) { this.context = context; }',
+                `    prepare() { writeFileSync(${JSON.stringify(marker)}, JSON.stringify(this.context)); return []; }`,
+                '};',
+                ''
+            ].join('\n')
+        );
+
+        const result = runCli('tsf-install.js', [], dir);
+
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.stdout, /tsf-install: preparing type compiler/);
+        assert.deepStrictEqual(JSON.parse(readFileSync(marker, 'utf8')), {
+            cwd: realpathSync(dir),
+            tsconfig: join(realpathSync(dir), 'tsconfig.json')
+        });
+    });
+
     it('preserves an existing postinstall script and installs itself only once', () => {
         const dir = tempDir();
         writeFileSync(

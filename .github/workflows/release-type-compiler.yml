@@ -1,0 +1,125 @@
+# Build portable native type-compiler binaries for the npm version published from the mirrored commit.
+name: Release Type Compiler Prebuilds
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: type-compiler-prebuilds-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve published version
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(TZ=UTC0 git show -s --format=%cd --date=format-local:'%y.%-m%d.%-H%M' HEAD)
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: macos-14
+            target: darwin-arm64
+          - runner: windows-2025
+            target: win32-x64
+          - runner: windows-11-arm
+            target: win32-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: '0'
+      TTSC_CACHE_DIR: ${{ github.workspace }}/.cache/ttsc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Prepare type compiler
+        run: yarn ttsc prepare -p tsconfig.json
+
+      - name: Package prebuilt binary
+        shell: bash
+        run: |
+          node scripts/build-type-compiler-prebuilt.cjs \
+            --cache-dir "$TTSC_CACHE_DIR" \
+            --output prebuilt \
+            --version "${{ needs.version.outputs.value }}"
+
+      - name: Upload prebuilt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: type-compiler-${{ matrix.target }}
+          path: prebuilt/
+          if-no-files-found: error
+
+  release:
+    if: ${{ always() && needs.version.result == 'success' }}
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download successful prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: type-compiler-*
+          path: prebuilt
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.value }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          ASSETS=(prebuilt/*)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "No type compiler prebuilds completed successfully" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Type compiler prebuilds ${VERSION}" \
+              --notes "Optional native type-compiler prebuilds. Consumers fall back to a local source build when an asset is unavailable or incompatible."
+          fi

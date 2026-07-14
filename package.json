@@ -51,7 +51,7 @@
         "clean": "rm -rf dist",
         "build": "yarn clean && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
         "build:dirty": "ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
-        "build:type-compiler": "rm -rf dist/src/type-compiler && mkdir -p dist/src/type-compiler && cp -R src/type-compiler/index.cjs src/type-compiler/go dist/src/type-compiler/",
+        "build:type-compiler": "rm -rf dist/src/type-compiler && mkdir -p dist/src/type-compiler && cp -R src/type-compiler/*.cjs src/type-compiler/go dist/src/type-compiler/",
         "build:devconsole": "vite build --config devconsole/vite.config.ts",
         "docs:dev": "vitepress dev docs --host 0.0.0.0",
         "docs:build": "vitepress build docs",

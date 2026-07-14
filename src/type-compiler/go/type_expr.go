@@ -331,6 +331,19 @@ func objectLiteralExpr(info *fileInfo, reg *registry, typeName string, body stri
 }
 
 func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, decl interfaceInfo, ctx *typeContext) string {
+	if ctx == nil {
+		ctx = &typeContext{seen: map[string]bool{}}
+	}
+	if ctx.interfaces == nil {
+		ctx.interfaces = map[string]bool{}
+	}
+	key := info.moduleKey + "\x00" + strconv.Itoa(decl.pos)
+	if ctx.interfaces[key] {
+		return "{kind: 2, typeName: " + quote(typeName) + "}"
+	}
+	ctx.interfaces[key] = true
+	defer delete(ctx.interfaces, key)
+
 	props := interfaceFullProperties(info, reg, decl, map[string]bool{})
 	body := interfaceFullBody(info, reg, decl, map[string]bool{})
 	items := []string{

@@ -82,6 +82,29 @@ func TestTypeExprInstantiatesGenericInterfaceProperties(t *testing.T) {
 	assertNotContains(t, got, `kind: 16, typeName: "GenericContainer"`)
 }
 
+func TestTypeExprBoundsRecursiveGenericInterfaceExpansion(t *testing.T) {
+	info, reg := testTypeInfo()
+	info.interfaces["RecursiveContainer"] = []interfaceInfo{{
+		params: []string{"T"},
+		properties: []utilityProperty{
+			{name: "value", typeText: "T"},
+			{name: "next", typeText: "RecursiveContainer<T[]>", optional: true},
+		},
+		pos: 1,
+	}}
+
+	got := typeExpr(info, reg, "RecursiveContainer<string>")
+
+	assertContainsAll(t, got,
+		`kind: 18, typeName: "RecursiveContainer"`,
+		`name: "value", type: {kind: 6}`,
+		`name: "next", type: {kind: 12, types: [{kind: 2, typeName: "RecursiveContainer"}`,
+	)
+	if len(got) > 2000 {
+		t.Fatalf("recursive generic metadata should stay bounded, got %d bytes", len(got))
+	}
+}
+
 func TestSplitTopIgnoresNestedSyntax(t *testing.T) {
 	input := "Pick<User, 'id' | 'email'> | { value: string | number } | `x${a | b}` | Array<boolean>"
 	got := splitTop(input, "|")

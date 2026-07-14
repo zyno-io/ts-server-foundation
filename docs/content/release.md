@@ -88,6 +88,8 @@ Confirm generated build outputs are present and local-only artifacts such as `do
 
 CI derives release versions from the commit timestamp in UTC using `YY.MDD.HHmm`-style calendar versioning (for example, `26.711.1430` for July 11, 2026 at 14:30 UTC). Non-`main` builds append `-canary.<short-sha>`. Consumers that require reproducible behavior should pin an exact version rather than assuming semantic-version compatibility between calendar releases.
 
+After GitLab publishes and mirrors a `main` commit, the GitHub `Release Type Compiler Prebuilds` workflow builds CGO-disabled type-compiler binaries for Linux, macOS, and Windows on x64 and arm64. It creates or updates the `v<package-version>` GitHub release with one binary and manifest per successful target. A failed target does not prevent other target assets from being released, and consumers always retain the packaged-source fallback.
+
 Treat these as breaking changes:
 
 - removing or renaming a root export
