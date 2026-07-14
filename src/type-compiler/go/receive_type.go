@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	shimast "github.com/microsoft/typescript-go/shim/ast"
 )
 
 type sourceCallInfo struct {
@@ -16,6 +18,70 @@ type sourceCallInfo struct {
 	typeArgs []string
 	args     []string
 	pos      int
+}
+
+func resolvedReceiveTypeCall(info *fileInfo, reg *registry, node *shimast.Node) (callInfo, bool) {
+	if info == nil || info.file == nil || reg == nil || reg.checker == nil || node == nil || node.Kind != shimast.KindCallExpression {
+		return callInfo{}, false
+	}
+	call := node.AsCallExpression()
+	signature := reg.checker.GetResolvedSignature(node)
+	if signature == nil {
+		return callInfo{}, false
+	}
+	declaration := signature.Declaration()
+	if declaration == nil {
+		return callInfo{}, false
+	}
+	declarationFile := shimast.GetSourceFileOfNode(declaration)
+	if declarationFile == nil {
+		return callInfo{}, false
+	}
+	name := "ReceiveType"
+	if declaration.Name() != nil {
+		name = declaration.Name().Text()
+	}
+	fn := functionInfo{
+		name:       name,
+		typeParams: typeParameterNames(declaration),
+		params:     paramsFromNode(declarationFile, declaration),
+		pos:        declaration.Pos(),
+	}
+	receiveTypeText := ""
+	if _, text, ok := receiveTypeParameter(fn); ok {
+		receiveTypeText = unwrapReceiveTypeHelperType(text)
+	} else {
+		return callInfo{}, false
+	}
+	sourceCall := sourceCallInfo{name: name, pos: node.Pos()}
+	for _, typeArg := range node.TypeArguments() {
+		sourceCall.typeArgs = append(sourceCall.typeArgs, nodeText(info.file, typeArg))
+	}
+	if call.Arguments != nil {
+		for _, arg := range call.Arguments.Nodes {
+			sourceCall.args = append(sourceCall.args, nodeText(info.file, arg))
+		}
+	}
+	typeText, metadataArgIndex, ok := receiveTypeForCall(info, reg, fn, sourceCall)
+	if !ok {
+		return callInfo{}, false
+	}
+	var typeNode *shimast.Node
+	for index, typeParam := range fn.typeParams {
+		if receiveTypeText == typeParam && index < len(node.TypeArguments()) {
+			typeNode = node.TypeArguments()[index]
+			break
+		}
+	}
+	return callInfo{
+		name:             name,
+		nodePos:          node.Pos(),
+		metadataArgIndex: metadataArgIndex,
+		typeText:         typeText,
+		typeNode:         typeNode,
+		preferTypia:      typeNode != nil,
+		pos:              node.Pos(),
+	}, true
 }
 
 func collectReceiveTypeCalls(info *fileInfo, reg *registry) []callInfo {
@@ -322,7 +388,7 @@ func receiveTypeParameter(fn functionInfo) (int, string, bool) {
 func receiveTypeArgument(raw string) (string, bool) {
 	raw = strings.TrimSpace(trimParens(raw))
 	name, args, ok := generic(raw)
-	if !ok || name != "ReceiveType" || len(args) == 0 {
+	if !ok || name != "ReceiveType" && !strings.HasSuffix(name, ".ReceiveType") || len(args) == 0 {
 		return "", false
 	}
 	return firstArg(args), true

@@ -107,7 +107,7 @@ await session.rawExecuteUnsafe('UPDATE users SET active = ? WHERE id = ?', [fals
 
 Prefer the `sql` tag for new code because identifiers and values stay explicit in the same expression.
 
-When TSF's metadata compiler can provide `T`, `rawFindUnsafe<T>()` and `rawFindOneUnsafe<T>()` reflected-deserialize returned rows. They still do not validate them. This behavior is specific to the unsafe methods' receive-type signature; use query-builder entity reads for column-aware hydration.
+When TSF's metadata compiler can resolve an explicit or inferable `T`, `rawFindUnsafe<T>()` and `rawFindOneUnsafe<T>()` reflected-deserialize returned rows. Numeric values targeting booleans are converted to `true` or `false`, including MySQL `TINYINT(1)` results. Numeric strings targeting `number` are also converted, so precision-sensitive `DECIMAL` results should be typed as `string`. Calls without a resolvable row type keep driver-native values. Typed raw reads do not validate rows or attach ORM persistence state; use query-builder entity reads for column-aware hydration.
 
 ## Rendering For Logs Or Tests
 

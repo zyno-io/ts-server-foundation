@@ -84,6 +84,11 @@ describe('reflection deserialization', () => {
     it('coerces primitives, tuples, enums, and dates from reflected type metadata', () => {
         assert.equal(deserialize('42', numberType), 42);
         assert.equal(deserialize('true', booleanType), true);
+        assert.equal(deserialize(1, booleanType), true);
+        assert.equal(deserialize(0, booleanType), false);
+        assert.equal(deserialize(2, booleanType), true);
+        assert.equal(deserialize(1n, booleanType), true);
+        assert.equal(deserialize(0n, booleanType), false);
         assert.equal(deserialize('2', { kind: ReflectionKind.enum, values: [1, 2, 3] }), 2);
         assert.deepStrictEqual(
             deserialize(['1', 'false'], {
@@ -104,15 +109,19 @@ describe('reflection deserialization', () => {
     it('selects the first valid union branch after deserialization', () => {
         const numericType: Type = { kind: ReflectionKind.union, types: [numberType, stringType] };
         const fallbackType: Type = { kind: ReflectionKind.union, types: [booleanType, stringType] };
+        const nullableBooleanType: Type = { kind: ReflectionKind.union, types: [booleanType, { kind: ReflectionKind.null }] };
 
         assert.equal(deserialize('42', numericType), 42);
         assert.equal(deserialize('abc', fallbackType), 'abc');
+        assert.equal(deserialize(1, nullableBooleanType), true);
+        assert.equal(deserialize(0, nullableBooleanType), false);
+        assert.equal(deserialize(null, nullableBooleanType), null);
     });
 
     it('creates class instances and recursively deserializes properties', () => {
         const result = deserialize(
             {
-                child: { amount: '12.5', enabled: '1' },
+                child: { amount: '12.5', enabled: 1 },
                 tags: [1, 'ready']
             },
             { kind: ReflectionKind.class, classType: ReflectionDeserializeParent, typeName: 'ReflectionDeserializeParent' }
@@ -127,6 +136,24 @@ describe('reflection deserialization', () => {
                 tags: [1, 'ready']
             })
         );
+    });
+
+    it('preserves class and object-literal fields when deserializing intersections', () => {
+        const result = deserialize(
+            { amount: '12.5', enabled: 1, label: 'joined' },
+            {
+                kind: ReflectionKind.intersection,
+                types: [
+                    { kind: ReflectionKind.class, classType: ReflectionDeserializeChild, typeName: 'ReflectionDeserializeChild' },
+                    {
+                        kind: ReflectionKind.objectLiteral,
+                        types: [{ kind: ReflectionKind.propertySignature, name: 'label', type: stringType }]
+                    }
+                ]
+            }
+        );
+
+        assert.deepStrictEqual(result, { amount: 12.5, enabled: true, label: 'joined' });
     });
 
     it('throws the first validation error from validatedDeserialize', () => {

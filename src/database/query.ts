@@ -1,4 +1,5 @@
 import { ReflectionKind, Type } from '../reflection';
+import { coerceBooleanValue } from '../reflection/primitive-conversion';
 
 import { sql, SqlFragment, SqlQuery } from './sql';
 import type { BaseDatabase } from './database';
@@ -402,10 +403,9 @@ function coerceColumnValue(value: unknown, column: ColumnMetadata | undefined, d
     if (value === undefined) return value;
     value = deserializeColumnValue(column, value, dialect);
     if (isBooleanColumn(column)) {
-        if (typeof value === 'boolean') return value;
-        if (typeof value === 'number') return value !== 0;
-        if (typeof value === 'bigint') return value !== 0n;
-        if (typeof value === 'string') return value === '1' || value.toLowerCase() === 'true';
+        const coerced = coerceBooleanValue(typeof value === 'string' ? value.toLowerCase() : value);
+        if (typeof coerced === 'boolean') return coerced;
+        if (typeof value === 'string') return false;
     }
     if (isBigIntType(column.type)) {
         if (typeof value === 'bigint') return value;

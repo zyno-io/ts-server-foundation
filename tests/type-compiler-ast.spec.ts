@@ -36,15 +36,37 @@ function createFixture(): string {
             }
         })
     );
-    writeFileSync(join(packageDirectory, 'index.d.ts'), `export { typeOf } from './dist/src/reflection/reflection-class.js';\n`);
+    writeFileSync(
+        join(packageDirectory, 'index.d.ts'),
+        `export { typeOf } from './dist/src/reflection/reflection-class.js';
+         export type ReceiveType<T = any> = { kind: number; readonly __receiveType?: T };
+         export declare class BaseDatabase {
+             rawFindUnsafe<T = Record<string, unknown>>(text: string, bindings?: unknown[], session?: unknown, type?: ReceiveType<T>): T[];
+         }
+         export declare class DatabaseSession {
+             rawFindUnsafe<T = Record<string, unknown>>(text: string, bindings?: unknown[], type?: ReceiveType<T>): T[];
+         }
+         export declare function createMySQLDatabase(): new () => BaseDatabase;
+        `
+    );
     writeFileSync(join(reflectionDirectory, 'reflection-class.d.ts'), `export declare function typeOf<T>(type?: unknown): T;\n`);
     writeFileSync(
         join(packageDirectory, 'index.js'),
-        `export function typeOf(type) { if (!type) throw new Error('not transformed'); return type; }\n`
+        `export function typeOf(type) { if (!type) throw new Error('not transformed'); return type; }
+         export class BaseDatabase { rawFindUnsafe(...args) { return args; } }
+         export class DatabaseSession { rawFindUnsafe(...args) { return args; } }
+         export function createMySQLDatabase() { return class extends BaseDatabase {}; }
+        `
     );
     writeFileSync(
         join(packageDirectory, 'index.cjs'),
-        `exports.typeOf = function typeOf(type) { if (!type) throw new Error('not transformed'); return type; };\n`
+        `exports.typeOf = function typeOf(type) { if (!type) throw new Error('not transformed'); return type; };
+         class BaseDatabase { rawFindUnsafe(...args) { return args; } }
+         class DatabaseSession { rawFindUnsafe(...args) { return args; } }
+         exports.BaseDatabase = BaseDatabase;
+         exports.DatabaseSession = DatabaseSession;
+         exports.createMySQLDatabase = function createMySQLDatabase() { return class extends BaseDatabase {}; };
+        `
     );
     writeFileSync(
         join(packageDirectory, 'compact-metadata.d.ts'),
@@ -142,7 +164,7 @@ function createFixture(): string {
     writeFileSync(
         join(directory, 'model.mts'),
         `
-            import { typeOf } from '@zyno-io/ts-server-foundation';
+            import { createMySQLDatabase, DatabaseSession, typeOf } from '@zyno-io/ts-server-foundation';
             import type { EsmDependency } from './dependency.mjs';
             import type { AmbientDependency } from './ambient-dependency.mjs';
             declare class AmbientOnly { ignored: string; }
@@ -151,6 +173,17 @@ function createFixture(): string {
             export type RuntimeAlias = { active: boolean };
             export class EsmModel { dependency!: EsmDependency; }
             export const objectMetadata = typeOf<{ label: string }>();
+            type ContactRows = ({ id: string; hasAlerts: boolean; marketingOptOut: boolean | null; tagIds: string[] })[];
+            class Db extends createMySQLDatabase() {}
+            export function receiveTypeArguments() {
+                const db = new Db();
+                const session = new DatabaseSession();
+                return {
+                    database: db.rawFindUnsafe<Omit<ContactRows[number], 'tagIds'>>('SELECT contacts', []),
+                    session: session.rawFindUnsafe<{ enabled: boolean }>('SELECT session', []),
+                    untyped: db.rawFindUnsafe('SELECT raw', [])
+                };
+            }
             export function createNestedMetadata() {
                 class NestedDependency {}
                 class NestedModel { constructor(public dependency: NestedDependency) {} }
@@ -161,7 +194,7 @@ function createFixture(): string {
     writeFileSync(
         join(directory, 'model.cts'),
         `
-            import { typeOf } from '@zyno-io/ts-server-foundation';
+            import { createMySQLDatabase, DatabaseSession, typeOf } from '@zyno-io/ts-server-foundation';
             import type { CommonDependency } from './dependency.cjs';
             import type { OrderAlias } from '@fixture/order-alias';
             const evaluationOrder = ((globalThis as typeof globalThis & { __tsfOrder?: string[] }).__tsfOrder ??= []);
@@ -175,6 +208,17 @@ function createFixture(): string {
             export class CommonModel extends createBase() { dependency!: CommonDependency; alias!: OrderAlias; }
             export { decoratorMetadata, evaluationOrder };
             export const objectMetadata = typeOf<{ count: number }>();
+            type ContactRows = ({ id: string; hasAlerts: boolean; marketingOptOut: boolean | null; tagIds: string[] })[];
+            class Db extends createMySQLDatabase() {}
+            export function receiveTypeArguments() {
+                const db = new Db();
+                const session = new DatabaseSession();
+                return {
+                    database: db.rawFindUnsafe<Omit<ContactRows[number], 'tagIds'>>('SELECT contacts', []),
+                    session: session.rawFindUnsafe<{ enabled: boolean }>('SELECT session', []),
+                    untyped: db.rawFindUnsafe('SELECT raw', [])
+                };
+            }
             export function createNestedMetadata() {
                 class NestedDependency {}
                 class NestedModel { constructor(public dependency: NestedDependency) {} }
@@ -257,6 +301,22 @@ describe('AST metadata compiler integration', () => {
             assert.strictEqual(common.CommonModel.__tsfType, common.decoratorMetadata);
             assert.deepStrictEqual(common.evaluationOrder, ['base', 'metadata']);
             for (const compiled of [esm, common]) {
+                const received = compiled.receiveTypeArguments();
+                assert.equal(received.database.length, 4);
+                assert.equal(received.database[2], undefined);
+                assert.deepStrictEqual(
+                    received.database[3].types.map((property: { name: string }) => property.name),
+                    ['id', 'hasAlerts', 'marketingOptOut']
+                );
+                assert.equal(received.database[3].types[1].type.kind, 8);
+                assert.deepStrictEqual(
+                    received.database[3].types[2].type.types.map((type: { kind: number }) => type.kind),
+                    [8, 5]
+                );
+                assert.equal(received.session.length, 3);
+                assert.equal(received.session[2].types[0].name, 'enabled');
+                assert.equal(received.session[2].types[0].type.kind, 8);
+                assert.equal(received.untyped.length, 2);
                 const nested = compiled.createNestedMetadata();
                 const constructorType = nested.NestedModel.__tsfType.constructorParameters[0].type;
                 assert.strictEqual(constructorType.classType(), nested.NestedDependency);

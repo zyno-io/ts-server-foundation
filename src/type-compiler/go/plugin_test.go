@@ -258,6 +258,19 @@ func TestReceiveTypeMethodCandidatesIncludeStaticMethods(t *testing.T) {
 	}
 }
 
+func TestReceiveTypeArgumentAcceptsQualifiedImports(t *testing.T) {
+	for _, input := range []string{
+		"ReceiveType<T>",
+		"reflection.ReceiveType<T>",
+		`import("@zyno-io/ts-server-foundation").ReceiveType<T>`,
+	} {
+		got, ok := receiveTypeArgument(input)
+		if !ok || got != "T" {
+			t.Fatalf("receiveTypeArgument(%q) = %q, %v", input, got, ok)
+		}
+	}
+}
+
 func TestPropertiesFromBodyParsesFieldsAndIgnoresMembers(t *testing.T) {
 	body := `
         id: string;

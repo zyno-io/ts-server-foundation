@@ -25,10 +25,20 @@ export function unwrapValueType(type: Type): Type {
 
 export function mergedIntersectionObjectLiteral(type: Type): TypeObjectLiteral | undefined {
     if (type.kind !== ReflectionKind.intersection) return undefined;
+    if (!isObjectLiteralIntersection(type)) return undefined;
 
     const properties = mergeStructuredProperties(type);
     if (properties.length === 0) return undefined;
     return { kind: ReflectionKind.objectLiteral, typeName: type.typeName, types: properties };
+}
+
+function isObjectLiteralIntersection(type: Type): boolean {
+    if (type.kind !== ReflectionKind.intersection) return false;
+    return type.types.every(item => {
+        if (isMarkerType(item)) return true;
+        if (item.kind === ReflectionKind.intersection) return isObjectLiteralIntersection(item);
+        return item.kind === ReflectionKind.objectLiteral;
+    });
 }
 
 export function mergeStructuredProperties(type: Type): TypePropertySignature[] {

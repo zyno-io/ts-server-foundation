@@ -63,14 +63,14 @@ The migration generator reads entity metadata to infer table names, column names
 
 Database I/O does not run the reflected HTTP-input deserializer or validator over whole entities. TSF instead performs a small set of column-aware storage conversions and otherwise relies on the database driver and database engine.
 
-| Path                                           | Outbound conversion                                           | Inbound conversion                                               | Reflected validation |
-| ---------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------- | -------------------- |
-| Entity `save()` / `saveEntity()`               | Column-aware                                                  | N/A                                                              | No                   |
-| Query-builder filters and patches              | Column-aware                                                  | N/A                                                              | No                   |
-| Query-builder entity hydration                 | N/A                                                           | Column-aware                                                     | No                   |
-| `createEntity()` and related constructors      | None; assigns application values and fills framework defaults | N/A                                                              | No                   |
-| `rawFind<T>()` / `rawFindOne<T>()`             | Generic SQL binding normalization only                        | Driver values returned unchanged                                 | No                   |
-| `rawFindUnsafe<T>()` / `rawFindOneUnsafe<T>()` | Generic SQL binding normalization only                        | Reflected `deserialize<T>()` when compiler metadata is available | No                   |
+| Path                                           | Outbound conversion                                           | Inbound conversion                                                 | Reflected validation |
+| ---------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------ | -------------------- |
+| Entity `save()` / `saveEntity()`               | Column-aware                                                  | N/A                                                                | No                   |
+| Query-builder filters and patches              | Column-aware                                                  | N/A                                                                | No                   |
+| Query-builder entity hydration                 | N/A                                                           | Column-aware                                                       | No                   |
+| `createEntity()` and related constructors      | None; assigns application values and fills framework defaults | N/A                                                                | No                   |
+| `rawFind<T>()` / `rawFindOne<T>()`             | Generic SQL binding normalization only                        | Driver values returned unchanged                                   | No                   |
+| `rawFindUnsafe<T>()` / `rawFindOneUnsafe<T>()` | Generic SQL binding normalization only                        | Type-directed `deserialize<T>()` with an explicit or inferable `T` | No                   |
 
 Column-aware writes perform these conversions:
 
@@ -340,7 +340,9 @@ await db.rawExecute(
 
 `rawQuery<T>()` is the base row-returning method, and `rawFind<T>()` is its alias. `rawFindOne()` returns the first row or `undefined`. `rawExecute()` returns `{ affectedRows, rowCount?, insertId?, warningStatus? }`.
 
-The generic type on `rawFind<T>()` is a TypeScript-only assertion: returned rows keep the values produced by the database driver. The unsafe string methods have an additional compiler-injected reflected type slot, so `rawFindUnsafe<T>()` and `rawFindOneUnsafe<T>()` pass rows through `deserialize<T>()` when that metadata is available. That operation can coerce nested values or construct reflected classes, but it does not validate the rows. Prefer the query builder when entity column-aware hydration is required.
+The generic type on `rawFind<T>()` is a TypeScript-only assertion: returned rows keep the values produced by the database driver. The unsafe string methods have an additional compiler-injected reflected type slot, so an explicit or otherwise inferable `T` on `rawFindUnsafe<T>()` and `rawFindOneUnsafe<T>()` passes rows through `deserialize<T>()`. A call without a resolvable row type keeps the driver's values unchanged.
+
+Reflected raw-row deserialization is type-directed rather than column-aware. It recursively converts numeric boolean values such as MySQL `TINYINT(1)` (`0`, `1`, or other numeric values) to booleans, converts numeric strings to numbers when the target is `number`, and can construct reflected classes. Consequently, type precision-sensitive `DECIMAL` results as `string`, not `number`, and treat deserialized entity instances as unmanaged objects without ORM snapshots. The operation does not validate rows; prefer the query builder when entity column-aware hydration and persistence tracking are required.
 
 The unsafe variants accept a SQL string and bindings:
 

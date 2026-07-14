@@ -1647,6 +1647,27 @@ describe('database query builder and persistence', () => {
         assert.equal(rows[0].createdAt.toISOString(), '2026-07-01T12:34:56.000Z');
     });
 
+    it('deserializes numeric booleans in unsafe raw rows', async () => {
+        interface TypedBooleanRawRow {
+            active: boolean & HasDefault;
+            optional: boolean | null;
+        }
+
+        const driver = new FakeDriver('mysql');
+        driver.rows = [
+            { active: 1, optional: null },
+            { active: 0, optional: 1 }
+        ];
+        const db = new BaseDatabase(driver, [User]);
+
+        const rows = await db.rawFindUnsafe<TypedBooleanRawRow>('SELECT active, optional FROM users');
+
+        assert.deepStrictEqual(rows, [
+            { active: true, optional: null },
+            { active: false, optional: true }
+        ]);
+    });
+
     it('deserializes unsafe session raw rows when a receive type is provided', async () => {
         interface TypedSessionRawRow {
             id: number;
@@ -1663,6 +1684,22 @@ describe('database query builder and persistence', () => {
         assert.equal(rows[0].id, 1);
         assert.equal(rows[0].createdAt instanceof Date, true);
         assert.equal(rows[0].createdAt.toISOString(), '2026-07-01T12:34:56.000Z');
+    });
+
+    it('deserializes numeric booleans in unsafe session raw rows', async () => {
+        interface TypedSessionBooleanRawRow {
+            active: boolean;
+            optional: boolean | null;
+        }
+
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ active: 0, optional: 1 }];
+        const db = new BaseDatabase(driver, [User]);
+        const session = new DatabaseSession(db);
+
+        const rows = await session.rawFindUnsafe<TypedSessionBooleanRawRow>('SELECT active, optional FROM users');
+
+        assert.deepStrictEqual(rows, [{ active: false, optional: true }]);
     });
 
     it('emits database query observer start and finish phases', async () => {

@@ -16,6 +16,7 @@ import {
     unwrapValueType
 } from './type-utils';
 import { isReflectedType, ReflectionKind, type ClassType, type Type } from './model';
+import { coerceBooleanValue } from './primitive-conversion';
 
 export type RuntimeValidator = (value: unknown) => ValidatorError | undefined | void;
 
@@ -255,9 +256,8 @@ function deserializeValue(value: unknown, type: Type): unknown {
     let result: unknown = value;
     if (concrete.kind === ReflectionKind.number && typeof value === 'string' && value.trim() !== '') {
         result = Number(value);
-    } else if (concrete.kind === ReflectionKind.boolean && typeof value === 'string') {
-        if (value === 'true' || value === '1') result = true;
-        else if (value === 'false' || value === '0') result = false;
+    } else if (concrete.kind === ReflectionKind.boolean) {
+        result = coerceBooleanValue(value);
     } else if (concrete.kind === ReflectionKind.enum && typeof value === 'string') {
         const numeric = Number(value);
         if (!Number.isNaN(numeric) && concrete.values.includes(numeric)) result = numeric;

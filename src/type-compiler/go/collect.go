@@ -638,6 +638,7 @@ func parseExportItem(item string) (string, string, bool) {
 
 func collectGenericCalls(info *fileInfo, reg *registry) {
 	calls := []callInfo{}
+	seen := map[int]bool{}
 	var walk func(*shimast.Node)
 	walk = func(node *shimast.Node) {
 		if node == nil {
@@ -645,8 +646,12 @@ func collectGenericCalls(info *fileInfo, reg *registry) {
 		}
 		if node.Kind == shimast.KindCallExpression {
 			call := node.AsCallExpression()
+			if received, ok := resolvedReceiveTypeCall(info, reg, node); ok {
+				calls = append(calls, received)
+				seen[node.Pos()] = true
+			}
 			typeArgs := node.TypeArguments()
-			if len(typeArgs) > 0 {
+			if len(typeArgs) > 0 && !seen[node.Pos()] {
 				name, metadataArgIndex, recognized := metadataCallDetails(reg, call)
 				if recognized {
 					argumentCount := 0
@@ -673,7 +678,17 @@ func collectGenericCalls(info *fileInfo, reg *registry) {
 		})
 	}
 	walk(info.file.AsNode())
-	calls = append(calls, collectReceiveTypeCalls(info, reg)...)
+	fallbackCalls := collectReceiveTypeCalls(info, reg)
+	matchCallNodePositions(info.file, fallbackCalls)
+	for _, call := range fallbackCalls {
+		if call.nodePos >= 0 && seen[call.nodePos] {
+			continue
+		}
+		calls = append(calls, call)
+		if call.nodePos >= 0 {
+			seen[call.nodePos] = true
+		}
+	}
 	sort.Slice(calls, func(i, j int) bool { return calls[i].pos < calls[j].pos })
 	matchCallNodePositions(info.file, calls)
 	info.calls = calls
