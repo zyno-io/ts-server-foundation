@@ -9,6 +9,19 @@ export interface BullMqWorkerJobData<I = unknown> {
     options: IJobOptions;
 }
 
+export interface BullMqCronJobSchedule {
+    queue: string;
+    name: string;
+    pattern: string;
+}
+
+export interface RemovedBullMqJobScheduler {
+    queue: string;
+    name: string;
+    pattern?: string;
+    key: string;
+}
+
 export class WorkerQueueRegistry {
     private static readonly queues = new Map<string, QueuedWorkerJob[]>();
     private static readonly bullQueues = new Set<Queue<BullMqWorkerJobData>>();
@@ -126,6 +139,48 @@ export class WorkerQueueRegistry {
         return [...this.bullQueues.entries()].map(([name, queue]) => ({ name, queue }));
     }
 
+    async removeStaleBullMqJobSchedulers(desiredSchedules: readonly BullMqCronJobSchedule[]): Promise<RemovedBullMqJobScheduler[]> {
+        if (!this.usesBullMq()) return [];
+
+        const desiredByQueue = new Map<string, Map<string, BullMqCronJobSchedule>>();
+        for (const schedule of desiredSchedules) {
+            const queueSchedules = desiredByQueue.get(schedule.queue) ?? new Map<string, BullMqCronJobSchedule>();
+            queueSchedules.set(schedule.name, schedule);
+            desiredByQueue.set(schedule.queue, queueSchedules);
+        }
+
+        const removed: RemovedBullMqJobScheduler[] = [];
+        const defaultQueueName = this.getDefaultQueueName();
+        for (const queueName of await this.discoverBullMqJobSchedulerQueueNames()) {
+            const queue = this.getBullQueue(queueName);
+            const desiredQueueSchedules = desiredByQueue.get(queueName);
+            for (const scheduler of await queue.getJobSchedulers()) {
+                const isTsfScheduler = isTsfBullMqJobScheduler(scheduler);
+                const isLegacyRepeatable = queueName === defaultQueueName && isLegacyBullMqCronRepeatable(scheduler);
+                if (!isTsfScheduler && !isLegacyRepeatable) continue;
+                const desired = desiredQueueSchedules?.get(scheduler.name);
+                const matchesDesiredSchedule =
+                    desired !== undefined && desired.pattern === scheduler.pattern && scheduler.key === `${desired.name}:${desired.pattern}`;
+                // Legacy repeatables use a different key and rescheduling mechanism. Remove even
+                // matching definitions so the runner can replace them with one Job Scheduler.
+                if (isTsfScheduler && matchesDesiredSchedule) continue;
+
+                const wasRemoved = isLegacyRepeatable
+                    ? await queue.removeRepeatableByKey(scheduler.key)
+                    : await queue.removeJobScheduler(scheduler.key);
+                if (wasRemoved) {
+                    removed.push({
+                        queue: queueName,
+                        name: scheduler.name,
+                        pattern: scheduler.pattern,
+                        key: scheduler.key
+                    });
+                }
+            }
+        }
+        return removed;
+    }
+
     normalizeJobData<I>(data: I | null | undefined): I {
         return (data === undefined ? {} : data) as I;
     }
@@ -197,6 +252,28 @@ export class WorkerQueueRegistry {
 
         return { data: raw as I, options: {} };
     }
+
+    private async discoverBullMqJobSchedulerQueueNames(): Promise<string[]> {
+        const prefix = this.getBullMqOptions().prefix ?? 'bull';
+        const discoveryQueue = this.getBullQueue(this.getDefaultQueueName());
+        const client = await discoveryQueue.client;
+        const queueNames = new Set(this.bullQueues.keys());
+        const keyPrefix = `${prefix}:`;
+        const keySuffix = ':repeat';
+        let cursor = '0';
+
+        do {
+            const result = await client.scan(cursor, { MATCH: `${escapeRedisGlob(prefix)}:*${keySuffix}`, COUNT: 100 });
+            cursor = result[0];
+            for (const key of result[1]) {
+                if (!key.startsWith(keyPrefix) || !key.endsWith(keySuffix)) continue;
+                const queueName = key.slice(keyPrefix.length, -keySuffix.length);
+                if (queueName && !queueName.includes(':')) queueNames.add(queueName);
+            }
+        } while (cursor !== '0');
+
+        return [...queueNames].sort();
+    }
 }
 
 function getOwnQueueName(jobClass: JobClass): string | undefined {
@@ -211,4 +288,35 @@ function isWorkerPayloadWrapper(value: Record<string, unknown>): boolean {
     if (!Object.prototype.hasOwnProperty.call(value, 'options')) return false;
     if (Object.prototype.hasOwnProperty.call(value, 'data')) return true;
     return isRecord(value.options) && Object.prototype.hasOwnProperty.call(value.options, 'repeatKey');
+}
+
+function isTsfBullMqJobScheduler(scheduler: unknown): scheduler is {
+    key: string;
+    name: string;
+    pattern?: string;
+    template?: { data?: unknown };
+} {
+    if (!isRecord(scheduler) || typeof scheduler.key !== 'string' || typeof scheduler.name !== 'string') return false;
+    if (!isRecord(scheduler.template)) return false;
+    const templateData = scheduler.template.data;
+    if (!isRecord(templateData) || !isRecord(templateData.options)) return false;
+    return templateData.options.repeatKey === scheduler.key && scheduler.key.startsWith(`${scheduler.name}:`);
+}
+
+function isLegacyBullMqCronRepeatable(scheduler: unknown): scheduler is {
+    key: string;
+    name: string;
+    pattern: string;
+} {
+    return (
+        isRecord(scheduler) &&
+        typeof scheduler.key === 'string' &&
+        typeof scheduler.name === 'string' &&
+        typeof scheduler.pattern === 'string' &&
+        scheduler.iterationCount === undefined
+    );
+}
+
+function escapeRedisGlob(value: string): string {
+    return value.replace(/[\\*?[\]]/g, '\\$&');
 }

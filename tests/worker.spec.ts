@@ -100,6 +100,13 @@ class DailyCronJob extends BaseJob<void, string> {
     }
 }
 
+@WorkerJob({ cronSchedule: '0 5 * * *' })
+class DefaultLegacyCronJob extends BaseJob<void, string> {
+    handle(): string {
+        return 'legacy';
+    }
+}
+
 @WorkerJob({ queueName: 'repeat', cronSchedule: '* * * * *' })
 class RepeatCronJob extends BaseJob<void, string> {
     handle(): string {
@@ -409,6 +416,176 @@ describe('worker services', () => {
         assert.equal(bullPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, 'bull-prefix:bmq');
     });
 
+    it('removes only stale framework-managed BullMQ job schedulers', async () => {
+        process.env.APP_ENV = 'development';
+        const registry = new WorkerQueueRegistry({ APP_ENV: 'development', BULL_QUEUE: 'default' } as never);
+        const removedByQueue = new Map<string, string[]>();
+        const queues = new Map<string, object>([
+            [
+                'default',
+                {
+                    client: Promise.resolve({
+                        scan: async () => [
+                            '0',
+                            [
+                                'test[prefix]:default:repeat',
+                                'test[prefix]:critical:repeat',
+                                'test[prefix]:abandoned:repeat',
+                                'another-prefix:ignored:repeat'
+                            ]
+                        ]
+                    }),
+                    getJobSchedulers: async () => [
+                        {
+                            key: 'legacy-repeat-key',
+                            name: 'DefaultLegacyCronJob',
+                            pattern: '0 5 * * *'
+                        }
+                    ],
+                    removeRepeatableByKey: async (key: string) => {
+                        removedByQueue.set('default', [key]);
+                        return true;
+                    }
+                }
+            ],
+            [
+                'critical',
+                fakeBullQueue(
+                    'critical',
+                    [
+                        fakeTsfScheduler('ExampleJob', '* * * * *'),
+                        fakeTsfScheduler('ExampleJob', '*/5 * * * *'),
+                        fakeTsfScheduler('DeletedJob', '0 2 * * *'),
+                        fakeTsfScheduler('ExampleJob', '* * * * *', 'ExampleJob:wrong-key'),
+                        {
+                            key: 'ExternalJob:0 3 * * *',
+                            name: 'ExternalJob',
+                            pattern: '0 3 * * *',
+                            template: { data: { source: 'external' } }
+                        }
+                    ],
+                    removedByQueue
+                )
+            ],
+            ['abandoned', fakeBullQueue('abandoned', [fakeTsfScheduler('MovedJob', '0 4 * * *')], removedByQueue)]
+        ]);
+        let scanPattern = '';
+        const defaultQueue = queues.get('default') as {
+            client: Promise<{ scan: (...args: unknown[]) => Promise<[string, string[]]> }>;
+        };
+        const client = await defaultQueue.client;
+        const scan = client.scan;
+        client.scan = async (...args: unknown[]) => {
+            scanPattern = String((args[1] as { MATCH?: string }).MATCH);
+            return scan(...args);
+        };
+        registry.getBullMqOptions = (() => ({ prefix: 'test[prefix]' })) as never;
+        registry.getBullQueue = ((queueName: string) => queues.get(queueName)) as never;
+
+        const removed = await registry.removeStaleBullMqJobSchedulers([
+            { queue: 'critical', name: 'ExampleJob', pattern: '* * * * *' },
+            { queue: 'new-queue', name: 'MovedJob', pattern: '0 4 * * *' }
+        ]);
+
+        assert.equal(scanPattern, 'test\\[prefix\\]:*:repeat');
+        assert.deepEqual(
+            removedByQueue,
+            new Map([
+                ['abandoned', ['MovedJob:0 4 * * *']],
+                ['critical', ['ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']],
+                ['default', ['legacy-repeat-key']]
+            ])
+        );
+        assert.deepEqual(
+            removed.map(scheduler => ({ queue: scheduler.queue, key: scheduler.key })),
+            [
+                { queue: 'abandoned', key: 'MovedJob:0 4 * * *' },
+                { queue: 'critical', key: 'ExampleJob:*/5 * * * *' },
+                { queue: 'critical', key: 'DeletedJob:0 2 * * *' },
+                { queue: 'critical', key: 'ExampleJob:wrong-key' },
+                { queue: 'default', key: 'legacy-repeat-key' }
+            ]
+        );
+    });
+
+    it('reconciles BullMQ schedules only for cron jobs registered in the app', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            enableWorker: true,
+            providers: [WorkerDependency, ExampleJob, DefaultQueueJob]
+        });
+        const registry = app.get(WorkerQueueRegistry);
+        let desiredSchedules: unknown;
+        registry.removeStaleBullMqJobSchedulers = (async (schedules: Parameters<WorkerQueueRegistry['removeStaleBullMqJobSchedulers']>[0]) => {
+            desiredSchedules = schedules;
+            return [];
+        }) as never;
+
+        await app.get(WorkerRunnerService).removeStaleBullMqCronJobs();
+
+        assert.deepEqual(desiredSchedules, [{ queue: 'critical', name: 'ExampleJob', pattern: '* * * * *' }]);
+    });
+
+    it('reconciles real BullMQ job schedulers across queues', async t => {
+        const redisHost = process.env.REDIS_HOST;
+        if (!redisHost) {
+            t.skip('set REDIS_HOST to run BullMQ scheduler integration');
+            return;
+        }
+
+        process.env.APP_ENV = 'development';
+        const app = createApp({
+            enableWorker: true,
+            providers: [WorkerDependency, ExampleJob, DefaultLegacyCronJob],
+            defaultConfig: {
+                ENABLE_JOB_RUNNER: false,
+                REDIS_HOST: redisHost,
+                REDIS_PORT: process.env.REDIS_PORT ? Number(process.env.REDIS_PORT) : 6379,
+                REDIS_PREFIX: `tsf-scheduler-reconcile-${Date.now()}`
+            }
+        });
+        const registry = app.get(WorkerQueueRegistry);
+        const criticalQueue = registry.getBullQueue('critical');
+        const abandonedQueue = registry.getBullQueue('abandoned');
+        const defaultQueue = registry.getBullQueue('default');
+        const upsertTsfScheduler = async (queue: typeof criticalQueue, name: string, pattern: string) => {
+            const key = `${name}:${pattern}`;
+            await queue.upsertJobScheduler(
+                key,
+                { pattern },
+                {
+                    name,
+                    data: { data: {}, options: { repeatKey: key } }
+                }
+            );
+        };
+
+        try {
+            await upsertTsfScheduler(criticalQueue, 'ExampleJob', '* * * * *');
+            await upsertTsfScheduler(criticalQueue, 'ExampleJob', '*/5 * * * *');
+            await upsertTsfScheduler(criticalQueue, 'DeletedJob', '0 2 * * *');
+            await upsertTsfScheduler(abandonedQueue, 'MovedJob', '0 4 * * *');
+            await defaultQueue.add('DefaultLegacyCronJob', {} as never, { repeat: { pattern: '0 5 * * *' } });
+            await criticalQueue.upsertJobScheduler(
+                'ExternalJob:0 3 * * *',
+                { pattern: '0 3 * * *' },
+                { name: 'ExternalJob', data: { source: 'external' } as never }
+            );
+
+            await app.get(WorkerRunnerService).removeStaleBullMqCronJobs();
+
+            assert.deepEqual(
+                (await criticalQueue.getJobSchedulers()).map(scheduler => scheduler.key).sort(),
+                ['ExampleJob:* * * * *', 'ExternalJob:0 3 * * *'].sort()
+            );
+            assert.deepEqual(await abandonedQueue.getJobSchedulers(), []);
+            assert.deepEqual(await defaultQueue.getRepeatableJobs(), []);
+        } finally {
+            await Promise.all(registry.getBullQueues().map(({ queue }) => queue.obliterate({ force: true }).catch(() => {})));
+            await registry.shutdown();
+        }
+    });
+
     it('does not start the job runner in production unless ENABLE_JOB_RUNNER is enabled', async () => {
         process.env.APP_ENV = 'production';
         const app = createApp({
@@ -528,4 +705,30 @@ async function waitFor(fn: () => boolean, timeoutMs = 5000): Promise<void> {
         await new Promise(resolve => setTimeout(resolve, 25));
     }
     assert.fail('Timed out waiting for condition');
+}
+
+function fakeTsfScheduler(name: string, pattern: string, key = `${name}:${pattern}`): object {
+    return {
+        key,
+        name,
+        pattern,
+        template: {
+            data: {
+                data: {},
+                options: { repeatKey: key }
+            }
+        }
+    };
+}
+
+function fakeBullQueue(queueName: string, schedulers: object[], removedByQueue: Map<string, string[]>): object {
+    return {
+        getJobSchedulers: async () => schedulers,
+        removeJobScheduler: async (key: string) => {
+            const removed = removedByQueue.get(queueName) ?? [];
+            removed.push(key);
+            removedByQueue.set(queueName, removed);
+            return true;
+        }
+    };
 }

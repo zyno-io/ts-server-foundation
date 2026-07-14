@@ -1214,6 +1214,7 @@ import {
     BaseAppConfig,
     createApp,
     createDatabaseClass,
+    WorkerRunnerService,
     type DatabaseDriver,
     type DriverConnection,
     type ExecuteResult,
@@ -1248,7 +1249,10 @@ class FakeDriver implements DatabaseDriver {
 }
 
 const DB = createDatabaseClass(() => new FakeDriver());
-const app = createApp({ config: Config, db: DB, enableHealthcheck: false, controllers: [], listeners: [] });
+const app = createApp({ config: Config, db: DB, enableHealthcheck: false, enableWorker: true, controllers: [], listeners: [] });
+app.get(WorkerRunnerService).removeStaleBullMqCronJobs = async () => {
+    writeFileSync('worker-schedules-reconciled.txt', 'yes');
+};
 void app.run();
 `
         );
@@ -1270,6 +1274,7 @@ export default async function first(db: BaseDatabase): Promise<void> {
         assert.equal(result.status, 0, result.stderr);
         assert.match(result.stdout, /Ran 1 migration/);
         assert.equal(readFileSync(join(dir, 'entrypoint-migration.txt'), 'utf8'), 'migrate:run');
+        assert.equal(readFileSync(join(dir, 'worker-schedules-reconciled.txt'), 'utf8'), 'yes');
         assert.equal(readFileSync(join(dir, 'driver-closed.txt'), 'utf8'), 'yes');
     });
 
@@ -1282,7 +1287,7 @@ export default async function first(db: BaseDatabase): Promise<void> {
         writeFileSync(
             join(dir, 'app.js'),
             `
-const { BaseAppConfig, BaseDatabase, createApp } = require(${JSON.stringify(join(packageRoot, 'dist', 'src'))});
+const { BaseAppConfig, BaseDatabase, createApp, WorkerRunnerService } = require(${JSON.stringify(join(packageRoot, 'dist', 'src'))});
 
 class Config extends BaseAppConfig {
     APP_ENV = 'test';
@@ -1313,10 +1318,14 @@ class FakeDriver {
 exports.app = createApp({
     config: Config,
     providers: [{ provide: BaseDatabase, useValue: new BaseDatabase(new FakeDriver()) }],
-                enableHealthcheck: false,
-                controllers: [],
-                listeners: []
-            });
+    enableHealthcheck: false,
+    enableWorker: true,
+    controllers: [],
+    listeners: []
+});
+exports.app.get(WorkerRunnerService).removeStaleBullMqCronJobs = async () => {
+    require('node:fs').writeFileSync('standalone-worker-schedules-reconciled.txt', 'yes');
+};
 `
         );
         writeFileSync(
@@ -1329,6 +1338,7 @@ exports.app = createApp({
         assert.equal(result.status, 0, result.stderr);
         assert.match(result.stdout, /Ran 1 migration/);
         assert.equal(readFileSync(join(dir, 'ran.txt'), 'utf8'), 'ok');
+        assert.equal(readFileSync(join(dir, 'standalone-worker-schedules-reconciled.txt'), 'utf8'), 'yes');
     });
 
     it('loads zero-argument app factories with tsf-migrate', () => {

@@ -1,7 +1,7 @@
 import type { App } from '../../app';
 import { createAvailabilityMonitor, withContextData, type AvailabilityMonitor } from '../../helpers';
 import { ScopedLogger } from '../logger';
-import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
+import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData } from './queue';
 import { WorkerRecorderService } from './recorder';
 import { BaseJob, getRegisteredWorkerJobs, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
 import { notifyWorkerObservers } from './observer';
@@ -52,6 +52,24 @@ export class WorkerRunnerService {
         this.bullWorkers.clear();
         while (this.executing.size) {
             await new Promise(resolve => setTimeout(resolve, 10));
+        }
+    }
+
+    async removeStaleBullMqCronJobs(): Promise<void> {
+        const desiredSchedules: BullMqCronJobSchedule[] = [];
+        for (const jobClass of getRegisteredWorkerJobs()) {
+            const pattern = jobClass.CRON_SCHEDULE;
+            if (!pattern || !this.isRegisteredJob(jobClass)) continue;
+            desiredSchedules.push({
+                queue: this.queueRegistry.getQueueName(jobClass),
+                name: jobClass.name,
+                pattern
+            });
+        }
+
+        const removed = await this.queueRegistry.removeStaleBullMqJobSchedulers(desiredSchedules);
+        for (const scheduler of removed) {
+            this.logger.info('Removed stale BullMQ job scheduler', { job: scheduler });
         }
     }
 

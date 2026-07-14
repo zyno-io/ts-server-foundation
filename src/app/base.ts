@@ -354,8 +354,10 @@ Examples:
             const migrationsDir = parseEntrypointMigrationsDir(args);
             const migrations = await loadMigrationsFromDirectory(migrationsDir);
             const executions = await new MigrationRunner(db).run(migrations);
+            if (this.options.enableWorker) await this.get(WorkerRunnerService).removeStaleBullMqCronJobs();
             console.log(`Ran ${executions.length} migration(s).`);
         } finally {
+            if (this.options.enableWorker) await this.get(WorkerQueueRegistry).shutdown();
             await db.driver.close();
         }
     }
