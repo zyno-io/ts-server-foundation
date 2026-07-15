@@ -49,6 +49,7 @@ import { createApp } from '../src/app';
 import type { OpenApiReferenceObject, OpenApiSchemaObject } from '../src/openapi';
 import { OpenApiImportedReportSource } from './openapi-imported-utility-fixtures';
 import type {
+    OpenApiReexportedBindingNode,
     OpenApiReexportedOption,
     OpenApiReexportedSourceConfig,
     OpenApiReexportedStrategy,
@@ -275,6 +276,9 @@ type OpenApiImportedReportSummaryResponse = Omit<OpenApiImportedReportDetailResp
 type OpenApiReexportedSteps = {
     [key: string]: OpenApiReexportedStep;
 };
+interface OpenApiReexportedBindingRequest {
+    nodes: Record<string, OpenApiReexportedBindingNode>;
+}
 interface OpenApiReexportedRuleSetCreateRequest {
     name: string;
     strategy?: OpenApiReexportedStrategy;
@@ -480,6 +484,11 @@ class OpenApiUsersController {
 
     @http.POST('/reexported-steps')
     async reexportedSteps(_body: HttpBody<OpenApiReexportedSteps>): Promise<OkResponse> {
+        return { ok: true };
+    }
+
+    @http.POST('/reexported-distributed-bindings')
+    async reexportedDistributedBindings(_body: HttpBody<OpenApiReexportedBindingRequest>): Promise<OkResponse> {
         return { ok: true };
     }
 
@@ -1028,6 +1037,21 @@ describe('openapi', () => {
             stepVariants.some(schema => schema.properties?.options !== undefined),
             true
         );
+
+        const bindingRequest = schemaObject(doc.components?.schemas?.OpenApiReexportedBindingRequest);
+        const bindingNodes = resolveSchemaObject(doc, bindingRequest.properties?.nodes);
+        assert.ok(bindingNodes.additionalProperties && bindingNodes.additionalProperties !== true);
+        const bindingNode = resolveSchemaObject(doc, bindingNodes.additionalProperties);
+        const bindingVariants = schemaAlternatives(doc, bindingNode);
+        assert.deepStrictEqual(
+            bindingVariants.map(schema => schema.required),
+            [
+                ['id', 'type', 'matchNext', 'noMatchNext', 'timeConditionId'],
+                ['id', 'type', 'matchNext', 'noMatchNext', 'locationId']
+            ]
+        );
+        assert.deepStrictEqual(bindingVariants[0].properties?.locationId, { not: {} });
+        assert.deepStrictEqual(bindingVariants[1].properties?.timeConditionId, { not: {} });
 
         const containerUpdate = schemaObject(doc.components?.schemas?.OpenApiReexportedContainerUpdateRequest);
         const containerConfigTypes = collectDiscriminatorValues(doc, containerUpdate.properties?.selectedConfig, 'type');

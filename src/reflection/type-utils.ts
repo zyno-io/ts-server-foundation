@@ -199,7 +199,46 @@ export function normalizeTypeMetadata(value: unknown, seen = new Set<unknown>())
             normalizeTypeMetadata(child, seen);
         }
     }
+    distributeIntersectionOverUnions(record);
     expandUtilityTypeMetadata(record);
+}
+
+function distributeIntersectionOverUnions(record: Record<string, unknown>): void {
+    if (record.kind !== ReflectionKind.intersection || !Array.isArray(record.types)) return;
+    const members = record.types.filter(isReflectedType);
+    if (members.length !== record.types.length || !members.some(member => member.kind === ReflectionKind.union)) return;
+
+    let combinations: Type[][] = [[]];
+    for (const member of members) {
+        const alternatives = distributedUnionAlternatives(member);
+        combinations = combinations.flatMap(combination => alternatives.map(alternative => [...combination, ...alternative]));
+    }
+
+    record.kind = ReflectionKind.union;
+    record.types = combinations.map(intersectionBranch);
+}
+
+function distributedUnionAlternatives(type: Type): Type[][] {
+    if (type.kind !== ReflectionKind.union) return [[type]];
+
+    const marker = typeMetadataMarker(type);
+    return type.types.flatMap(item => distributedUnionAlternatives(item).map(alternative => (marker ? [...alternative, marker] : alternative)));
+}
+
+function typeMetadataMarker(type: Type): Type | undefined {
+    if (!type.annotations && !type.validation && !type.database) return undefined;
+    return {
+        kind: ReflectionKind.unknown,
+        annotations: type.annotations,
+        validation: type.validation,
+        database: type.database
+    };
+}
+
+function intersectionBranch(types: Type[]): Type {
+    if (types.some(type => type.kind === ReflectionKind.never)) return { kind: ReflectionKind.never };
+    if (types.length === 1) return types[0];
+    return { kind: ReflectionKind.intersection, types };
 }
 
 export function isClass(value: unknown): value is ClassType {

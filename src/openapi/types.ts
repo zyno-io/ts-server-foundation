@@ -79,6 +79,7 @@ export interface OpenApiSchemaObject {
     oneOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
     anyOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
     allOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
+    not?: OpenApiSchemaObject | OpenApiReferenceObject;
     minLength?: number;
     maxLength?: number;
     pattern?: string;

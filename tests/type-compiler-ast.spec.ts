@@ -149,12 +149,33 @@ function createFixture(): string {
             exports: { '.': { types: './index.d.cts', require: './index.cjs' } }
         })
     );
-    writeFileSync(join(orderAliasDirectory, 'index.d.cts'), `export type OrderAlias = { value: string };\n`);
+    writeFileSync(
+        join(orderAliasDirectory, 'index.d.cts'),
+        `export type OrderAlias = { value: string };
+         export type DistributionAlias = { id: string } & ({ a: string; b?: never } | { b: string; a?: never });\n`
+    );
     writeFileSync(
         join(orderAliasDirectory, 'index.cjs'),
         `(globalThis.__tsfOrder ??= []).push('metadata');
          exports.__tsfTypeAliases = {
-             OrderAlias: { kind: 18, typeName: 'OrderAlias', types: [{ kind: 20, name: 'value', type: { kind: 6 }, optional: false }] }
+             OrderAlias: { kind: 18, typeName: 'OrderAlias', types: [{ kind: 20, name: 'value', type: { kind: 6 }, optional: false }] },
+             DistributionAlias: {
+                 kind: 13,
+                 typeName: 'DistributionAlias',
+                 types: [
+                     { kind: 18, types: [{ kind: 20, name: 'id', type: { kind: 6 }, optional: false }] },
+                     { kind: 12, types: [
+                         { kind: 18, types: [
+                             { kind: 20, name: 'a', type: { kind: 6 }, optional: false },
+                             { kind: 20, name: 'b', type: { kind: 0 }, optional: true }
+                         ] },
+                         { kind: 18, types: [
+                             { kind: 20, name: 'b', type: { kind: 6 }, optional: false },
+                             { kind: 20, name: 'a', type: { kind: 0 }, optional: true }
+                         ] }
+                     ] }
+                 ]
+             }
          };\n`
     );
 
@@ -196,7 +217,7 @@ function createFixture(): string {
         `
             import { createMySQLDatabase, DatabaseSession, typeOf } from '@zyno-io/ts-server-foundation';
             import type { CommonDependency } from './dependency.cjs';
-            import type { OrderAlias } from '@fixture/order-alias';
+            import type { DistributionAlias, OrderAlias } from '@fixture/order-alias';
             const evaluationOrder = ((globalThis as typeof globalThis & { __tsfOrder?: string[] }).__tsfOrder ??= []);
             let decoratorMetadata: unknown;
             function createBase() { evaluationOrder.push('base'); return class {}; }
@@ -208,6 +229,7 @@ function createFixture(): string {
             export class CommonModel extends createBase() { dependency!: CommonDependency; alias!: OrderAlias; }
             export { decoratorMetadata, evaluationOrder };
             export const objectMetadata = typeOf<{ count: number }>();
+            export const importedDistributionMetadata = typeOf<Record<string, DistributionAlias>>();
             type ContactRows = ({ id: string; hasAlerts: boolean; marketingOptOut: boolean | null; tagIds: string[] })[];
             class Db extends createMySQLDatabase() {}
             export function receiveTypeArguments() {
@@ -297,6 +319,12 @@ describe('AST metadata compiler integration', () => {
             assert.equal(esm.EsmModel.__tsfType.properties[0].name, 'dependency');
             assert.equal(esm.__tsfTypeAliases.RuntimeAlias.types[0].name, 'active');
             assert.equal(common.objectMetadata.types[0].name, 'count');
+            assert.equal(common.importedDistributionMetadata.index.kind, 13);
+            assert.equal(common.importedDistributionMetadata.index.types[1].kind, 12);
+            assert.deepStrictEqual(
+                common.importedDistributionMetadata.index.types[1].types.map((type: { kind: number }) => type.kind),
+                [18, 18]
+            );
             assert.equal(common.CommonModel.__tsfType.properties[0].name, 'dependency');
             assert.strictEqual(common.CommonModel.__tsfType, common.decoratorMetadata);
             assert.deepStrictEqual(common.evaluationOrder, ['base', 'metadata']);

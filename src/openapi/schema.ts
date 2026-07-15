@@ -268,6 +268,8 @@ function schemaForNonNullableType(
         case ReflectionKind.void:
         case ReflectionKind.undefined:
             return {};
+        case ReflectionKind.never:
+            return { not: {} };
         case ReflectionKind.null:
             return { type: 'null' };
         case ReflectionKind.string:

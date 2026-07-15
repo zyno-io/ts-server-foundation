@@ -512,6 +512,86 @@ describe('reflection utility type metadata', () => {
         ]);
     });
 
+    it('distributes object intersections over unions for runtime metadata and OpenAPI', () => {
+        const baseNode = objectLiteral([
+            signature('id', stringType),
+            signature('type', literal('timeCondition')),
+            signature('matchNext', stringType),
+            signature('noMatchNext', stringType)
+        ]);
+        const nodeType: Type = {
+            kind: ReflectionKind.intersection,
+            typeName: 'DistributedTimeConditionNode',
+            types: [
+                baseNode,
+                union(
+                    objectLiteral([signature('timeConditionId', stringType), signature('locationId', { kind: ReflectionKind.never }, true)]),
+                    objectLiteral([signature('locationId', stringType), signature('timeConditionId', { kind: ReflectionKind.never }, true)])
+                )
+            ]
+        };
+        const recordType = {
+            kind: ReflectionKind.objectLiteral,
+            typeName: 'Record',
+            utilityType: 'Record',
+            typeArguments: [stringType, nodeType],
+            types: []
+        } as Type;
+        const baseValue = {
+            id: 'node-1',
+            type: 'timeCondition',
+            matchNext: 'matched',
+            noMatchNext: 'not-matched'
+        };
+
+        const deserialized = deserialize<Record<string, Record<string, unknown>>>(
+            {
+                condition: { ...baseValue, timeConditionId: 'condition-1' },
+                location: { ...baseValue, locationId: 'location-1' }
+            },
+            recordType
+        );
+
+        assert.equal(deserialized.condition.timeConditionId, 'condition-1');
+        assert.equal(deserialized.location.locationId, 'location-1');
+        assert.deepStrictEqual(validate({ condition: { ...baseValue, timeConditionId: 'condition-1' } }, recordType), []);
+        assert.deepStrictEqual(validate({ location: { ...baseValue, locationId: 'location-1' } }, recordType), []);
+        assert.notEqual(validate({ missing: baseValue }, recordType).length, 0);
+        assert.notEqual(validate({ both: { ...baseValue, timeConditionId: 'condition-1', locationId: 'location-1' } }, recordType).length, 0);
+        assert.equal(nodeType.kind, ReflectionKind.union);
+
+        const context = createOpenApiSchemaContext();
+        const recordSchema = schemaObject(typeToOpenApiSchema(recordType, context), context);
+        assert.ok(recordSchema.additionalProperties && recordSchema.additionalProperties !== true);
+        const nodeSchema = schemaObject(recordSchema.additionalProperties, context);
+        assert.equal(nodeSchema.oneOf?.length, 2);
+        const branches = nodeSchema.oneOf!.map(branch => schemaObject(branch, context));
+        assert.deepStrictEqual(
+            branches.map(branch => branch.required),
+            [
+                ['id', 'type', 'matchNext', 'noMatchNext', 'timeConditionId'],
+                ['id', 'type', 'matchNext', 'noMatchNext', 'locationId']
+            ]
+        );
+        assert.deepStrictEqual(branches[0].properties?.locationId, { not: {} });
+        assert.deepStrictEqual(branches[1].properties?.timeConditionId, { not: {} });
+    });
+
+    it('distributes reduced intersections without never properties', () => {
+        const type: Type = {
+            kind: ReflectionKind.intersection,
+            types: [
+                objectLiteral([signature('id', stringType)]),
+                union(objectLiteral([signature('a', stringType)]), objectLiteral([signature('b', stringType)]))
+            ]
+        };
+
+        assert.deepStrictEqual(validate({ id: 'id', a: 'a' }, type), []);
+        assert.deepStrictEqual(validate({ id: 'id', b: 'b' }, type), []);
+        assert.notEqual(validate({ id: 'id' }, type).length, 0);
+        assert.equal(type.kind, ReflectionKind.union);
+    });
+
     it('preserves validation metadata from marker-first intersections', () => {
         const minimumLengthMarker = {
             kind: ReflectionKind.unknown,

@@ -1,6 +1,25 @@
 export type OpenApiReexportedStrategy = 'alpha' | 'beta' | 'gamma';
 export type OpenApiReexportedOption = 'optionA' | 'optionB' | 'optionC';
 
+interface OpenApiReexportedBindingNodeBase {
+    id: string;
+    type: 'timeCondition';
+    matchNext: string;
+    noMatchNext: string;
+}
+
+export type OpenApiReexportedBindingNode = OpenApiReexportedBindingNodeBase &
+    (
+        | {
+              timeConditionId: string;
+              locationId?: never;
+          }
+        | {
+              locationId: string;
+              timeConditionId?: never;
+          }
+    );
+
 export type OpenApiReexportedRule =
     | {
           indexes: number[];

@@ -44,7 +44,7 @@ import {
     type TrimmedString,
     type RouteParameterResolverContext
 } from '../src';
-import type { ImportedBodyEntity, ImportedBodyItem } from './http-imported-types';
+import type { ImportedBindingRequest, ImportedBodyEntity, ImportedBodyItem } from './http-imported-types';
 
 const pngUploadBody = Buffer.from(
     '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
@@ -237,6 +237,56 @@ describe('http router', () => {
 
         assert.equal(response.statusCode, 400, JSON.stringify(response.json));
         assert.match(response.json.error, /body\.items\.1\.qty is required/);
+    });
+
+    it('preserves distributed intersection bindings in imported Record body types', async () => {
+        @http.controller('/imported-distributed-intersection-body')
+        class ImportedDistributedIntersectionBodyController {
+            @http.POST()
+            post(body: HttpBody<ImportedBindingRequest>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [ImportedDistributedIntersectionBodyController] });
+        const base = {
+            id: 'node-1',
+            type: 'timeCondition',
+            matchNext: 'matched',
+            noMatchNext: 'not-matched'
+        };
+        const timeCondition = await app.request(
+            HttpRequest.POST('/imported-distributed-intersection-body', {
+                nodes: { start: { ...base, timeConditionId: 'condition-1' } }
+            })
+        );
+        const location = await app.request(
+            HttpRequest.POST('/imported-distributed-intersection-body', {
+                nodes: { start: { ...base, locationId: 'location-1' } }
+            })
+        );
+        const neither = await app.request(
+            HttpRequest.POST('/imported-distributed-intersection-body', {
+                nodes: { start: base }
+            })
+        );
+        const both = await app.request(
+            HttpRequest.POST('/imported-distributed-intersection-body', {
+                nodes: { start: { ...base, timeConditionId: 'condition-1', locationId: 'location-1' } }
+            })
+        );
+
+        assert.equal(timeCondition.statusCode, 200, JSON.stringify(timeCondition.json));
+        assert.deepStrictEqual(timeCondition.json, {
+            nodes: { start: { ...base, timeConditionId: 'condition-1' } }
+        });
+        assert.equal(location.statusCode, 200, JSON.stringify(location.json));
+        assert.deepStrictEqual(location.json, {
+            nodes: { start: { ...base, locationId: 'location-1' } }
+        });
+        assert.equal(neither.statusCode, 400, JSON.stringify(neither.json));
+        assert.equal(both.statusCode, 400, JSON.stringify(both.json));
     });
 
     it('drops optional undefined HttpBody properties after deserialization', async () => {
