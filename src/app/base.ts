@@ -230,7 +230,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                 workerStartAttempted = true;
                 await this.container.get(WorkerRunnerService).start();
             }
-            if (shouldDumpOpenApiSchema(this.config)) this.scheduleOpenApiSchemaDump();
+            if (!this.cliServiceMode && shouldDumpOpenApiSchema(this.config)) this.scheduleOpenApiSchemaDump();
             this.started = true;
         } catch (error) {
             const cleanupErrors: unknown[] = [];

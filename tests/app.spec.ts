@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
@@ -712,6 +712,33 @@ describe('app lifecycle', () => {
         assert.equal(healthStatus, 200);
         assert.equal(metricsStatus, 503);
         assert.equal(applicationStatus, 404);
+    });
+
+    it('does not generate an OpenAPI schema for CLI service commands', async () => {
+        const dir = makeTempCwd();
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'service:test');
+
+        class CliServiceConfig extends BaseAppConfig {
+            APP_ENV = 'test';
+            ENABLE_OPENAPI_SCHEMA = true;
+        }
+
+        @cli.command('service:test')
+        class TestCliServiceCommand extends CliServiceCommand {
+            protected async runService(): Promise<void> {
+                await new Promise(resolve => setTimeout(resolve, 350));
+            }
+        }
+
+        const app = createApp({
+            config: CliServiceConfig,
+            commands: [TestCliServiceCommand],
+            frameworkConfig: { port: 0 }
+        });
+
+        await app.run();
+
+        assert.equal(existsSync(join(dir, 'openapi.yaml')), false);
     });
 
     it('runs imported module commands with module-local providers', async () => {
