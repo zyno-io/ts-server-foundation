@@ -63,6 +63,12 @@ interface RegisteredCommand {
     moduleId?: number;
 }
 
+export type AppCleanup = () => void | Promise<void>;
+
+interface RegisteredAppCleanup {
+    cleanup?: AppCleanup;
+}
+
 export class App<C extends BaseAppConfig = BaseAppConfig> {
     readonly container: Container;
     readonly events = new EventBus();
@@ -78,6 +84,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private forceWorkerRunner = false;
     private readonly devConsole?: DevConsoleRuntime;
     private openApiDumpTimer?: NodeJS.Timeout;
+    private readonly registeredCleanups: RegisteredAppCleanup[] = [];
 
     constructor(readonly options: CreateAppOptions<C>) {
         const configClass = options.config ?? (BaseAppConfig as ClassType<C>);
@@ -182,6 +189,21 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         return this.events.listen(token, handler, order);
     }
 
+    /**
+     * Register cleanup for a resource acquired by this application.
+     *
+     * Cleanups run once in reverse registration order after the normal shutdown event. They also run
+     * when `stop()` is called after a partial/failed startup, where lifecycle listeners are not safe to
+     * dispatch. The returned function unregisters cleanup for resources released early.
+     */
+    registerCleanup(cleanup: AppCleanup): () => void {
+        const registered: RegisteredAppCleanup = { cleanup };
+        this.registeredCleanups.push(registered);
+        return () => {
+            registered.cleanup = undefined;
+        };
+    }
+
     async start(): Promise<void> {
         if (this.started) return;
         if (this.starting) {
@@ -231,12 +253,6 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async stop(): Promise<void> {
-        if (!this.started) {
-            this.clearOpenApiDumpTimer();
-            this.devConsole?.close();
-            return;
-        }
-
         const errors: unknown[] = [];
         const runStep = async (step: () => void | Promise<void>) => {
             try {
@@ -245,6 +261,15 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                 errors.push(error);
             }
         };
+
+        if (!this.started) {
+            this.clearOpenApiDumpTimer();
+            await runStep(() => this.devConsole?.close());
+            await runStep(() => this.runRegisteredCleanups());
+            if (errors.length === 1) throw errors[0];
+            if (errors.length > 1) throw new AggregateError(errors, 'Application shutdown failed');
+            return;
+        }
 
         await runStep(() => this.events.dispatch(onServerShutdownRequested, undefined));
         this.clearOpenApiDumpTimer();
@@ -256,6 +281,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         await runStep(() => this.devConsole?.close());
         await runStep(() => this.http.close());
         await runStep(() => this.events.dispatch(onServerShutdown, undefined));
+        await runStep(() => this.runRegisteredCleanups());
         await runStep(() => this.shutdownTelemetryIfInstalled());
         this.started = false;
 
@@ -464,6 +490,24 @@ Examples:
         if (!OtelState.tracerProvider && !OtelState.meterProvider) return;
         const { shutdownTelemetry } = await import('../telemetry/otel/index');
         await shutdownTelemetry();
+    }
+
+    private async runRegisteredCleanups(): Promise<void> {
+        const errors: unknown[] = [];
+        while (this.registeredCleanups.length) {
+            const registered = this.registeredCleanups.pop()!;
+            const cleanup = registered.cleanup;
+            registered.cleanup = undefined;
+            if (!cleanup) continue;
+            try {
+                await cleanup();
+            } catch (error) {
+                errors.push(error);
+            }
+        }
+
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'Application resource cleanup failed');
     }
 
     private installSignalHandlers(): void {

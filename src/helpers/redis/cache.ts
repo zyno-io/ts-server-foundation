@@ -1,3 +1,4 @@
+import { type RedisEndEmitter, registerRedisStateReset } from './lifecycle';
 import { createRedis, type RedisConnection } from './redis';
 
 export interface CacheRedisClient {
@@ -10,7 +11,13 @@ export type CacheRedisProvider = () => RedisConnection<CacheRedisClient>;
 let defaultRedisConnection: RedisConnection<CacheRedisClient> | undefined;
 
 function getDefaultRedisConnection(): RedisConnection<CacheRedisClient> {
-    defaultRedisConnection ??= createRedis('CACHE') as RedisConnection<CacheRedisClient>;
+    if (!defaultRedisConnection) {
+        const connection = createRedis('CACHE') as RedisConnection<CacheRedisClient & RedisEndEmitter>;
+        registerRedisStateReset(connection.client, () => {
+            if (defaultRedisConnection === connection) defaultRedisConnection = undefined;
+        });
+        defaultRedisConnection = connection;
+    }
     return defaultRedisConnection;
 }
 

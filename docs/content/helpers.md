@@ -306,6 +306,7 @@ await withMutex({
     mode: 'redis'
 });
 
+// Normally automatic during app.stop(); release all tracked clients early when needed:
 await disconnectAllRedis();
 ```
 

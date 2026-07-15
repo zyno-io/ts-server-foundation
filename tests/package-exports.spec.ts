@@ -35,6 +35,7 @@ describe('package exports', () => {
         assert.equal(typeof root.HttpRequest, 'function');
         assert.equal(typeof root.HttpCorsOptions, 'function');
         assert.equal(typeof root.createAvailabilityMonitor, 'function');
+        assert.equal(typeof root.registerAppCleanup, 'function');
         assert.equal(typeof root.monitorRedisAvailability, 'function');
         assert.equal(typeof root.BaseDatabase, 'function');
         assert.equal(typeof root.sql, 'function');
@@ -127,6 +128,7 @@ describe('package exports', () => {
                     http,
                     installSentry,
                     monitorRedisAvailability,
+                    registerAppCleanup,
                     serializeOpenApiSchema,
                     sql,
                     typeOf,
@@ -180,6 +182,7 @@ describe('package exports', () => {
                     init,
                     installSentry,
                     monitorRedisAvailability,
+                    registerAppCleanup,
                     reflected,
                     serializeOpenApiSchema,
                     shutdownTelemetry,

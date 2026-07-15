@@ -1,5 +1,6 @@
 import type { MeshClientRegistryBackend, MeshClientRegistrationState, RegisteredClient, RegisterResult } from './types';
 
+import { registerRedisStateReset } from '../../helpers/redis/lifecycle';
 import { createRedis } from '../../helpers/redis/redis';
 
 // --- Lua Scripts ---
@@ -215,7 +216,11 @@ function getClientRedis(): { client: ClientRedisClient; prefix: string } {
         client.defineCommand('MC_UNREGISTER', { lua: UNREGISTER_SCRIPT, numberOfKeys: 2 });
         client.defineCommand('MC_UPDATE_METADATA', { lua: UPDATE_METADATA_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('MC_CLEANUP_NODE', { lua: CLEANUP_NODE_SCRIPT, numberOfKeys: 2 });
-        clientRedis = { client: client as ClientRedisClient, prefix };
+        const nextClient = client as ClientRedisClient;
+        registerRedisStateReset(nextClient, () => {
+            if (clientRedis?.client === nextClient) clientRedis = null;
+        });
+        clientRedis = { client: nextClient, prefix };
     }
     return clientRedis;
 }

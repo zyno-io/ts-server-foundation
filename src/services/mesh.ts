@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 
+import { registerRedisStateReset } from '../helpers/redis/lifecycle';
 import { createRedis } from '../helpers/redis/redis';
 import { LeaderService, LeaderServiceOptions } from './leader';
 import { createLogger } from './logger';
@@ -95,7 +96,11 @@ function getMeshRedis(): { client: MeshRedisClient; prefix: string } {
         client.defineCommand('HEARTBEAT', { lua: HEARTBEAT_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('CLEANUP', { lua: CLEANUP_SCRIPT, numberOfKeys: 2 });
         client.defineCommand('DEREGISTER', { lua: DEREGISTER_SCRIPT, numberOfKeys: 2 });
-        meshRedis = { client: client as MeshRedisClient, prefix };
+        const nextClient = client as MeshRedisClient;
+        registerRedisStateReset(nextClient, () => {
+            if (meshRedis?.client === nextClient) meshRedis = null;
+        });
+        meshRedis = { client: nextClient, prefix };
     }
     return meshRedis;
 }

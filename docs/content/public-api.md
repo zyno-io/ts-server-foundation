@@ -19,7 +19,7 @@ The root barrel groups the supported APIs below. The examples are representative
 
 | Area                        | Representative root exports                                                                                                                | Guide                                   |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------- |
-| Application and commands    | `App`, `createApp`, `BaseAppConfig`, `AppModule`, `createModule`, `AutoConstruct`, lifecycle tokens, `cli`                                 | [Getting Started](./getting-started.md) |
+| Application and commands    | `App`, `createApp`, `BaseAppConfig`, `AppModule`, `createModule`, `AutoConstruct`, lifecycle tokens, resource cleanup registration, `cli`  | [Getting Started](./getting-started.md) |
 | Dependency injection/events | `Container`, provider types, `resolve`, `EventBus`, `EventToken`, `event`                                                                  | [Dependency Injection](./di.md)         |
 | HTTP and uploads            | `http`, `HttpRequest`, `HttpResponse`, `HttpMiddleware`, `FileUpload`, HTTP errors, request/response workflow tokens                       | [HTTP](./http.md)                       |
 | Authentication and health   | `JWT`, `ParsedJwt`, `Auth`, auth middleware helpers, `HealthcheckService`, `HealthcheckController`                                         | [Authentication](./authentication.md)   |

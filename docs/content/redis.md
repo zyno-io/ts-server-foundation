@@ -14,7 +14,7 @@ const { client, prefix } = createRedis();
 const { client, prefix } = createRedis('CACHE');
 ```
 
-Each call creates a separate connection. All clients are tracked and can be disconnected with `disconnectAllRedis()`.
+Each call creates a separate connection and registers it with the current application. `app.stop()` closes those clients automatically, including clients acquired before a failed startup completes. `disconnectAllRedis()` remains available for callers that need to release every tracked Redis client before application shutdown.
 
 ## Availability Alerts
 

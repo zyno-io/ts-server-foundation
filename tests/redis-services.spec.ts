@@ -3,13 +3,14 @@ import type { AddressInfo } from 'node:net';
 import { after, before, describe, it, mock } from 'node:test';
 
 import {
+    type App,
+    Cache,
     ClientDisconnectedError,
     ClientInvocationError,
     createApp,
     createDistributedMethod,
     createRedis,
     createLogger,
-    disconnectAllRedis,
     LeaderService,
     MeshClientRedisRegistry,
     MeshClientRegistry,
@@ -19,8 +20,10 @@ import {
     MeshRequestTimeoutError,
     MeshService,
     MeshSrpcServer,
+    setCurrentApp,
     sleepMs,
-    SrpcClient
+    SrpcClient,
+    withMutex
 } from '../src';
 import type { BaseMessage, SrpcMessageFns, SrpcMeta } from '../src';
 
@@ -63,14 +66,16 @@ const JsonMessage: SrpcMessageFns<BaseMessage> = {
 };
 
 describe('Redis-backed services', { skip: redisSkip }, () => {
+    let app: App;
+
     before(() => {
         restoreRedisEnv();
         process.env.APP_ENV = 'test';
-        createApp({});
+        app = createApp({});
     });
 
     after(async () => {
-        await disconnectAllRedis();
+        await app.stop();
         restoreRedisEnv();
     });
 
@@ -228,6 +233,23 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         assert.equal((await first.getClient('pending-client'))?.metadata.role, 'active');
     });
 
+    it('recreates default Redis helper clients after their owning app stops', async () => {
+        const key = `lifecycle-${Date.now()}-${process.pid}`;
+        const firstApp = createApp({ enableHealthcheck: false });
+        await Cache.set(key, 'first');
+        await withMutex({ key, mode: 'redis', fn: async () => undefined });
+        await firstApp.stop();
+
+        const secondApp = createApp({ enableHealthcheck: false });
+        try {
+            assert.equal(await Cache.get(key), 'first');
+            await withMutex({ key, mode: 'redis', fn: async () => undefined });
+        } finally {
+            await secondApp.stop();
+            setCurrentApp(app);
+        }
+    });
+
     it('routes mesh-client delivery, persistence, conflicts, and supersession between nodes', async () => {
         const key = `client-service-${Date.now()}-${process.pid}`;
         const firstDeliveries: string[] = [];
@@ -285,7 +307,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
 
     it('tracks MeshSrpcServer activation, metadata synchronization, and lifecycle callbacks', async () => {
         const key = `mesh-srpc-${Date.now()}-${process.pid}`;
-        const app = createApp({ enableHealthcheck: false });
+        const nestedApp = createApp({ enableHealthcheck: false });
         const server = new MeshSrpcServer<SrpcMeta, BaseMessage, BaseMessage, { role: string }>({
             logger: createLogger('MeshSrpcIntegration'),
             clientMessage: JsonMessage,
@@ -306,7 +328,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         });
 
         await server.meshStart();
-        const httpServer = await app.http.listen(0, '127.0.0.1');
+        const httpServer = await nestedApp.http.listen(0, '127.0.0.1');
         const port = (httpServer.address() as AddressInfo).port;
         const client = new SrpcClient<BaseMessage, BaseMessage>(
             createLogger('MeshSrpcClient'),
@@ -342,7 +364,11 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             client.disconnect();
             await server.meshStop();
             server.close();
-            await app.stop();
+            try {
+                await nestedApp.stop();
+            } finally {
+                setCurrentApp(app);
+            }
         }
     });
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { getAppConfig } from '../app/resolver';
 import { getPackageName } from '../helpers/io/package';
+import { registerRedisStateReset } from '../helpers/redis/lifecycle';
 import { createRedis } from '../helpers/redis/redis';
 import { createLogger } from './logger';
 
@@ -43,7 +44,11 @@ function getRedisClient(): LeaderRedisClient {
         client.defineCommand('ACQUIRE', { lua: ACQUIRE_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('RENEW', { lua: RENEW_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('RELEASE', { lua: RELEASE_SCRIPT, numberOfKeys: 1 });
-        redisClient = client as LeaderRedisClient;
+        const nextClient = client as LeaderRedisClient;
+        registerRedisStateReset(nextClient, () => {
+            if (redisClient === nextClient) redisClient = undefined;
+        });
+        redisClient = nextClient;
     }
     return redisClient;
 }

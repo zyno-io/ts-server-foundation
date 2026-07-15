@@ -3,6 +3,7 @@ import { hostname } from 'node:os';
 
 import { r } from '../../app/resolver';
 import { Logger } from '../../services/logger';
+import { registerRedisStateReset } from './lifecycle';
 import { createRedis } from './redis';
 
 interface BroadcastLogger {
@@ -46,7 +47,7 @@ function createSharedBroadcastChannel() {
         }
     });
 
-    return {
+    const runtime = {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         subscribe: (eventName: string, fn: (data: any) => void) => {
             const listenersForEvent = listeners.get(eventName) ?? new Set();
@@ -59,6 +60,12 @@ function createSharedBroadcastChannel() {
             publishClient.publish(channel, JSON.stringify({ instanceKey: localInstanceKey, eventName, data }));
         }
     };
+
+    registerRedisStateReset([publishClient, subscribeClient], () => {
+        if (sharedBroadcastChannel === runtime) sharedBroadcastChannel = undefined;
+    });
+
+    return runtime;
 }
 
 export function createBroadcastChannel<T>(eventName: string, _type?: ReceiveType<T>) {

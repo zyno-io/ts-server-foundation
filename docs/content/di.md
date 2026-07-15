@@ -137,13 +137,13 @@ Normal injected services are singletons by default. This means a controller inst
 
 `App` exposes five lifecycle tokens:
 
-| Token                       | Dispatch point                                                                                                       |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `onAppBootstrap`            | At the start of `app.start()`, before database construction, `AutoConstruct` providers, and the worker runner.       |
-| `onServerBootstrap`         | After the Node HTTP server has successfully bound and after signal handlers/DevConsole startup.                      |
-| `onServerMainBootstrapDone` | Immediately after all `onServerBootstrap` handlers complete.                                                         |
-| `onServerShutdownRequested` | First step of a started app's `stop()` sequence, before framework-owned resources are closed.                        |
-| `onServerShutdown`          | After worker services, signal handlers, DevConsole, and the owned HTTP server are closed; before telemetry shutdown. |
+| Token                       | Dispatch point                                                                                                                               |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `onAppBootstrap`            | At the start of `app.start()`, before database construction, `AutoConstruct` providers, and the worker runner.                               |
+| `onServerBootstrap`         | After the Node HTTP server has successfully bound and after signal handlers/DevConsole startup.                                              |
+| `onServerMainBootstrapDone` | Immediately after all `onServerBootstrap` handlers complete.                                                                                 |
+| `onServerShutdownRequested` | First step of a started app's `stop()` sequence, before framework-owned resources are closed.                                                |
+| `onServerShutdown`          | After worker services, signal handlers, DevConsole, and the owned HTTP server are closed; before registered cleanups and telemetry shutdown. |
 
 `app.start()` dispatches only application bootstrap. `app.http.listen()` calls `start()` automatically and then dispatches the two server-bootstrap tokens after binding. Calling `start()` concurrently shares the in-flight startup work; calling it again after startup is a no-op. After a completed `stop()`, a later `start()` is a new lifecycle and dispatches bootstrap again.
 
@@ -184,7 +184,22 @@ Handlers run sequentially in descending numeric `order`; handlers with the same 
 
 If worker-runner startup fails, the app attempts both runner and queue-registry rollback. A rollback failure is attached as the startup error's cause when possible; otherwise startup and rollback failures are combined in an `AggregateError`.
 
-`app.stop()` is idempotent after shutdown and does nothing before startup. For a started app it dispatches `onServerShutdownRequested`, closes enabled worker runner/queue resources, removes installed signal handlers, closes DevConsole and the owned HTTP listener, dispatches `onServerShutdown`, then shuts down installed TSF telemetry. A failed listener or framework cleanup step does not prevent later steps from running; after cleanup, `stop()` rethrows the single failure or an `AggregateError` containing multiple failures. It does not infer teardown methods on arbitrary DI providers and does not close a configured database driver; use a shutdown listener for application-owned database clients, Redis clients, or other resources. SIGINT/SIGTERM handlers are installed only after an HTTP listener binds and call `app.stop()` before exiting.
+Resources acquired by the application can register explicit ownership with `app.registerCleanup()` or, from code that resolves against the current app, `registerAppCleanup()`:
+
+```ts
+import { registerAppCleanup } from '@zyno-io/ts-server-foundation';
+
+const client = await connectClient();
+const unregister = registerAppCleanup(() => client.close());
+
+// If the resource is released before application shutdown:
+await client.close();
+unregister();
+```
+
+Registered cleanups run exactly once in reverse registration order after `onServerShutdown`. The returned function removes a cleanup when its resource was released early. Cleanups also run when `stop()` follows a partial/failed startup, without dispatching shutdown lifecycle events that require a successfully started application. TSF attempts every registered cleanup and includes failures in normal shutdown error aggregation.
+
+`app.stop()` is idempotent after shutdown. For a started app it dispatches `onServerShutdownRequested`, closes enabled worker runner/queue resources, removes installed signal handlers, closes DevConsole and the owned HTTP listener, dispatches `onServerShutdown`, runs registered resource cleanups, then shuts down installed TSF telemetry. Before startup it skips lifecycle events but still closes partial-startup resources registered with the app. A failed listener or framework cleanup step does not prevent later steps from running; after cleanup, `stop()` rethrows the single failure or an `AggregateError` containing multiple failures. It does not infer teardown methods on arbitrary DI providers and does not close a configured database driver; register explicit cleanup for application-owned database clients or other resources. Redis clients created by `createRedis()` are registered automatically. SIGINT/SIGTERM handlers are installed only after an HTTP listener binds and call `app.stop()` before exiting.
 
 ## App-Level Resolution
 

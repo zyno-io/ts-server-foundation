@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { getAppConfig } from '../../app/resolver';
 import { sleepMs } from '../utils/date';
+import { type RedisEndEmitter, registerRedisStateReset } from './lifecycle';
 import { createRedis, type RedisConnection } from './redis';
 
 export type MutexKey = any;
@@ -485,7 +486,13 @@ function getAbortError(signal: AbortSignal | undefined, key: string): Error {
 }
 
 function getDefaultRedisConnection(): RedisConnection<RedisMutexClient> {
-    defaultRedisConnection ??= createRedis('MUTEX') as RedisConnection<RedisMutexClient>;
+    if (!defaultRedisConnection) {
+        const connection = createRedis('MUTEX') as RedisConnection<RedisMutexClient & RedisEndEmitter>;
+        registerRedisStateReset(connection.client, () => {
+            if (defaultRedisConnection === connection) defaultRedisConnection = undefined;
+        });
+        defaultRedisConnection = connection;
+    }
     return defaultRedisConnection;
 }
 

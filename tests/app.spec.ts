@@ -30,6 +30,7 @@ import {
     onServerShutdown,
     onServerShutdownRequested,
     type QueryResult,
+    registerAppCleanup,
     resetLogSink,
     setLogSink
 } from '../src';
@@ -341,6 +342,73 @@ describe('app lifecycle', () => {
         await app.stop();
 
         assert.deepStrictEqual(order, ['bootstrap-high', 'bootstrap-low', 'shutdown-requested', 'shutdown']);
+    });
+
+    it('runs registered application cleanups once in reverse acquisition order', async () => {
+        process.env.APP_ENV = 'test';
+        const order: string[] = [];
+        const app = createApp({});
+
+        app.registerCleanup(() => {
+            order.push('first-cleanup');
+        });
+        const unregister = app.registerCleanup(() => {
+            order.push('unregistered-cleanup');
+        });
+        registerAppCleanup(async () => {
+            await Promise.resolve();
+            order.push('last-cleanup');
+        });
+        unregister();
+        app.on(onServerShutdown, () => {
+            order.push('shutdown');
+        });
+
+        await app.start();
+        await app.stop();
+        await app.stop();
+
+        assert.deepStrictEqual(order, ['shutdown', 'last-cleanup', 'first-cleanup']);
+    });
+
+    it('runs registered cleanups after a partial startup without dispatching shutdown events', async () => {
+        process.env.APP_ENV = 'test';
+        const order: string[] = [];
+        const app = createApp({});
+        app.registerCleanup(() => {
+            order.push('cleanup');
+        });
+        app.on(onServerShutdown, () => {
+            order.push('shutdown');
+        });
+
+        await app.stop();
+
+        assert.deepStrictEqual(order, ['cleanup']);
+    });
+
+    it('attempts every application cleanup and aggregates failures', async () => {
+        process.env.APP_ENV = 'test';
+        const attempted: string[] = [];
+        const app = createApp({});
+        app.registerCleanup(() => {
+            attempted.push('first');
+            throw new Error('first cleanup failed');
+        });
+        app.registerCleanup(() => {
+            attempted.push('second');
+            throw new Error('second cleanup failed');
+        });
+
+        await assert.rejects(
+            () => app.stop(),
+            error => {
+                assert.ok(error instanceof AggregateError);
+                assert.equal(error.errors.length, 2);
+                return true;
+            }
+        );
+        assert.deepStrictEqual(attempted, ['second', 'first']);
     });
 
     it('coalesces concurrent starts and keeps startup idempotent while running', async () => {

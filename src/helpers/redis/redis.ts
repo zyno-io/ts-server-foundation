@@ -1,6 +1,6 @@
 import Redis, { type RedisOptions } from 'ioredis';
 
-import { getAppConfig } from '../../app/resolver';
+import { getAppConfig, registerAppCleanup } from '../../app/resolver';
 import { getPackageName } from '../io/package';
 
 export interface RedisConnection<TClient = Redis> {
@@ -62,12 +62,25 @@ export function createRedis(configPrefix?: string): RedisConnection {
     const { options, prefix } = createRedisOptions(configPrefix);
     const client = new Redis(options);
     allClients.add(client);
-    client.on('end', () => allClients.delete(client));
+    const unregisterCleanup = registerAppCleanup(() => closeRedisClient(client));
+    client.on('end', () => {
+        allClients.delete(client);
+        unregisterCleanup();
+    });
     return { client, prefix };
 }
 
 export async function disconnectAllRedis(): Promise<void> {
     const clients = [...allClients];
     allClients.clear();
-    await Promise.all(clients.map(client => client.quit().catch(() => {})));
+    await Promise.all(clients.map(closeRedisClient));
+}
+
+async function closeRedisClient(client: Redis): Promise<void> {
+    if (client.status === 'end') return;
+    try {
+        await client.quit();
+    } catch {
+        client.disconnect();
+    }
 }
