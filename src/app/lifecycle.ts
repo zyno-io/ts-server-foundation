@@ -8,12 +8,24 @@ export const onServerShutdown = new EventToken('server.shutdown');
 
 const AutoConstructSymbol = Symbol('AutoConstruct');
 
-export function AutoConstruct(): ClassDecorator {
+export interface AutoConstructOptions {
+    cli?: boolean;
+}
+
+interface AutoConstructMetadata {
+    cli: boolean;
+}
+
+export function AutoConstruct(options: AutoConstructOptions = {}): ClassDecorator {
     return target => {
-        (target as any)[AutoConstructSymbol] = true;
+        (target as unknown as { [AutoConstructSymbol]?: AutoConstructMetadata })[AutoConstructSymbol] = {
+            cli: options.cli === true
+        };
     };
 }
 
-export function isAutoConstructProvider(value: unknown): boolean {
-    return typeof value === 'function' && !!(value as any)[AutoConstructSymbol];
+export function isAutoConstructProvider(value: unknown, options: AutoConstructOptions = {}): boolean {
+    if (typeof value !== 'function') return false;
+    const metadata = (value as unknown as { [AutoConstructSymbol]?: AutoConstructMetadata })[AutoConstructSymbol];
+    return !!metadata && (options.cli !== true || metadata.cli);
 }

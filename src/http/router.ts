@@ -94,6 +94,7 @@ interface CompiledRouteParameterResolver {
 
 export class HttpRouter {
     private routes: HttpRoutePlan[] = [];
+    private restrictedControllers?: Set<ClassType>;
     private readonly unregisteredMiddlewareInstances = new WeakMap<ClassType<HttpMiddleware>, HttpMiddleware>();
     private readonly httpResolvers: CompiledRouteParameterResolver[];
 
@@ -106,6 +107,7 @@ export class HttpRouter {
     }
 
     registerController(controllerClass: ClassType, moduleId?: number): void {
+        if (this.restrictedControllers && !this.restrictedControllers.has(controllerClass)) return;
         const controller = getControllerMetadata(controllerClass);
         if (!controller) return;
 
@@ -138,6 +140,12 @@ export class HttpRouter {
                 uploadPolicy: compileMultipartRequestPolicy(parameters)
             });
         }
+    }
+
+    restrictControllers(controllerClasses: readonly ClassType[]): void {
+        const restrictedControllers = new Set(controllerClasses);
+        this.restrictedControllers = restrictedControllers;
+        this.routes = this.routes.filter(route => restrictedControllers.has(route.controllerClass));
     }
 
     listRoutes(): readonly HttpRoutePlan[] {

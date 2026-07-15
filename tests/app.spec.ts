@@ -13,6 +13,7 @@ import {
     BaseDatabase,
     BaseEntity,
     cli,
+    CliServiceCommand,
     ConfigLoader,
     createApp,
     createDatabaseClass,
@@ -23,6 +24,7 @@ import {
     eventDispatcher,
     EventToken,
     http,
+    HttpRequest,
     type ExecuteResult,
     onAppBootstrap,
     onServerBootstrap,
@@ -454,11 +456,18 @@ describe('app lifecycle', () => {
             }
         }
 
-        const app = createApp({ providers: [StartedService] });
+        @AutoConstruct({ cli: true })
+        class CliEnabledService {
+            constructor() {
+                constructed.push('cli-enabled');
+            }
+        }
+
+        const app = createApp({ providers: [StartedService, CliEnabledService] });
         void UnregisteredService;
         assert.deepStrictEqual(constructed, []);
         await app.start();
-        assert.deepStrictEqual(constructed, ['registered']);
+        assert.deepStrictEqual(constructed, ['registered', 'cli-enabled']);
         await app.stop();
     });
 
@@ -644,6 +653,65 @@ describe('app lifecycle', () => {
 
         assert.deepStrictEqual(calls, [['test', ['--limit=2']]]);
         assert.equal(process.exitCode, originalExitCode);
+    });
+
+    it('limits CLI services to operational controllers and CLI auto-construct providers', async () => {
+        process.env.APP_ENV = 'test';
+        process.env.OTEL_METRICS_ENDPOINT_ENABLED = 'true';
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'service:test');
+        const constructed: string[] = [];
+        let app!: ReturnType<typeof createApp>;
+        let healthStatus: number | undefined;
+        let metricsStatus: number | undefined;
+        let applicationStatus: number | undefined;
+        let routePaths: string[] = [];
+
+        @AutoConstruct()
+        class ServerStartupService {
+            constructor() {
+                constructed.push('server');
+            }
+        }
+
+        @AutoConstruct({ cli: true })
+        class CliStartupService {
+            constructor() {
+                constructed.push('cli');
+            }
+        }
+
+        @http.controller('/application')
+        class ApplicationController {
+            @http.GET()
+            get() {
+                return { ok: true };
+            }
+        }
+
+        @cli.command('service:test')
+        class TestCliServiceCommand extends CliServiceCommand {
+            protected async runService(): Promise<void> {
+                routePaths = app.router.listRoutes().map(route => route.path);
+                healthStatus = (await app.request(HttpRequest.GET('/healthz'))).statusCode;
+                metricsStatus = (await app.request(HttpRequest.GET('/metrics'))).statusCode;
+                applicationStatus = (await app.request(HttpRequest.GET('/application'))).statusCode;
+            }
+        }
+
+        app = createApp({
+            controllers: [ApplicationController],
+            providers: [ServerStartupService, CliStartupService],
+            commands: [TestCliServiceCommand],
+            frameworkConfig: { port: 0 }
+        });
+
+        await app.run();
+
+        assert.deepStrictEqual(constructed, ['cli']);
+        assert.deepStrictEqual(routePaths, ['/healthz', '/metrics']);
+        assert.equal(healthStatus, 200);
+        assert.equal(metricsStatus, 503);
+        assert.equal(applicationStatus, 404);
     });
 
     it('runs imported module commands with module-local providers', async () => {

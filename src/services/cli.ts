@@ -20,6 +20,7 @@ export abstract class CliServiceCommand {
         };
 
         try {
+            app.configureForCliService();
             await app.http.listen();
             await this.startService();
             serviceStarted = true;

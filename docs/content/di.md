@@ -180,7 +180,7 @@ const app = createApp({ listeners: [LifecycleListener] });
 
 Handlers run sequentially in descending numeric `order`; handlers with the same order retain registration order. `app.on()` registers the callback directly and returns an unsubscribe function. Decorated methods are discovered only on classes listed in `listeners` (including imported-module listeners); those classes are registered with DI and resolved when the event dispatches.
 
-`@AutoConstruct()` follows the provider graph rather than scanning every decorated class in the program. During startup, TSF instantiates only decorated classes already registered as class or `useClass` providers, including registered providers in imported modules. The decorator does not register a class. A configured database is constructed before these providers so entity metadata is ready for startup services.
+`@AutoConstruct()` follows the provider graph rather than scanning every decorated class in the program. During startup, TSF instantiates only decorated classes already registered as class or `useClass` providers, including registered providers in imported modules. The decorator does not register a class. A configured database is constructed before these providers so entity metadata is ready for startup services. `CliServiceCommand` processes skip these providers unless the decorator is configured as `@AutoConstruct({ cli: true })`.
 
 If worker-runner startup fails, the app attempts both runner and queue-registry rollback. A rollback failure is attached as the startup error's cause when possible; otherwise startup and rollback failures are combined in an `AggregateError`.
 

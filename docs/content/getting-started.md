@@ -171,6 +171,8 @@ Run custom commands through the same compiled entrypoint:
 node . receipts:requeue
 ```
 
+Long-running commands can extend `CliServiceCommand`. These commands start an HTTP listener with only the enabled `/healthz` and `/metrics` controllers; application, OpenAPI, and DevConsole controllers are not exposed by the service process.
+
 ## `createApp()` Options
 
 ```ts
@@ -257,7 +259,7 @@ Exported providers from imported modules are globally injectable. You do not nee
 
 ## AutoConstruct
 
-`@AutoConstruct()` instantiates a registered provider during app startup. The decorator does not register the class by itself:
+`@AutoConstruct()` instantiates a registered provider during normal app startup. The decorator does not register the class by itself:
 
 ```ts
 import { AutoConstruct, createApp } from '@zyno-io/ts-server-foundation';
@@ -270,6 +272,13 @@ class StartupProbe {
 }
 
 const app = createApp({ providers: [StartupProbe] });
+```
+
+CLI service commands skip auto-construct providers by default. Pass `cli: true` for providers that should also initialize in those processes:
+
+```ts
+@AutoConstruct({ cli: true })
+class CliStartupProbe {}
 ```
 
 ## Environment

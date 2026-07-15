@@ -85,6 +85,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly devConsole?: DevConsoleRuntime;
     private openApiDumpTimer?: NodeJS.Timeout;
     private readonly registeredCleanups: RegisteredAppCleanup[] = [];
+    private cliServiceMode = false;
 
     constructor(readonly options: CreateAppOptions<C>) {
         const configClass = options.config ?? (BaseAppConfig as ClassType<C>);
@@ -294,6 +295,12 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         await this.http.listen(port, host);
     }
 
+    configureForCliService(): void {
+        if (this.started || this.starting) throw new Error('Cannot configure CLI service mode after application startup');
+        this.cliServiceMode = true;
+        this.router.restrictControllers([HealthcheckController, MetricsController]);
+    }
+
     private async runEntrypointCommand(args: string[]): Promise<boolean> {
         const [command, ...rest] = args;
         if (command) {
@@ -408,7 +415,7 @@ Examples:
     private createAutoConstructInstances() {
         for (const registered of this.container.listRegisteredProviders()) {
             const classType = getProviderClass(registered.provider);
-            if (classType && isAutoConstructProvider(classType)) {
+            if (classType && isAutoConstructProvider(classType, { cli: this.cliServiceMode })) {
                 this.container.resolve(registered.token, registered.moduleId);
             }
         }
