@@ -76,6 +76,8 @@ if (require.main === module) {
 }
 ```
 
+If an entrypoint command or server startup rejects, `app.run()` preserves the rejection and sets `process.exitCode` to `1` so process managers cannot treat the failed run as successful even when the returned promise is intentionally discarded.
+
 ```bash
 node . server:start
 node . openapi:generate

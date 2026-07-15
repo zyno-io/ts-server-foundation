@@ -291,8 +291,13 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async run(port?: number, host?: string): Promise<void> {
-        if (await this.runEntrypointCommand(process.argv.slice(2))) return;
-        await this.http.listen(port, host);
+        try {
+            if (await this.runEntrypointCommand(process.argv.slice(2))) return;
+            await this.http.listen(port, host);
+        } catch (error) {
+            process.exitCode = 1;
+            throw error;
+        }
     }
 
     configureForCliService(): void {

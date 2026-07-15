@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -653,6 +653,51 @@ describe('app lifecycle', () => {
 
         assert.deepStrictEqual(calls, [['test', ['--limit=2']]]);
         assert.equal(process.exitCode, originalExitCode);
+    });
+
+    it('sets a failing exit code when an entrypoint command rejects', async () => {
+        process.env.APP_ENV = 'test';
+        process.exitCode = undefined;
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'jobs:fail');
+        const commandError = new Error('command failed');
+
+        @cli.command('jobs:fail')
+        class FailingCommand {
+            execute(): never {
+                throw commandError;
+            }
+        }
+
+        const app = createApp({ commands: [FailingCommand] });
+
+        await assert.rejects(app.run(0, '127.0.0.1'), error => error === commandError);
+
+        assert.equal(process.exitCode, 1);
+    });
+
+    it('exits nonzero when an unhandled-rejection listener observes an entrypoint failure', () => {
+        const dir = makeTempCwd();
+        const fixture = join(dir, 'entrypoint.js');
+        writeFileSync(
+            fixture,
+            `
+const { createApp } = require(${JSON.stringify(join(originalCwd, 'dist', 'src'))});
+
+process.on('unhandledRejection', error => console.error(error.message));
+
+const app = createApp({ enableHealthcheck: false });
+void app.run();
+`
+        );
+
+        const result = spawnSync(process.execPath, [fixture, 'migrate:run'], {
+            cwd: dir,
+            encoding: 'utf8',
+            env: { ...process.env, APP_ENV: 'test', NODE_OPTIONS: '' }
+        });
+
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, /Cannot run migrations without a configured database provider/);
     });
 
     it('limits CLI services to operational controllers and CLI auto-construct providers', async () => {
