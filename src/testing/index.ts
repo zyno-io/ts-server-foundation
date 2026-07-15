@@ -2,6 +2,7 @@ import { after, afterEach, before, beforeEach, mock } from 'node:test';
 import { resolve } from 'node:path';
 
 import { App, BaseAppConfig, createApp, setCurrentApp, type CreateAppOptions } from '../app';
+import { getProviderToken, type Provider, type Token } from '../di';
 import {
     BaseDatabase,
     completeSharedMySQLSessionSchema,
@@ -49,6 +50,7 @@ export interface TestingFacadeOptions<C extends BaseAppConfig = any> {
     onBeforeStop?: (facade: TestingFacade<C>) => Promise<void> | void;
     onStop?: (facade: TestingFacade<C>) => Promise<void> | void;
     enableDatabase?: boolean;
+    rejectDatabaseAccess?: boolean;
     dbAdapter?: TestDbAdapter;
     useSavepoints?: boolean;
     databasePrefix?: string;
@@ -58,6 +60,14 @@ export interface TestingFacadeOptions<C extends BaseAppConfig = any> {
     migrations?: readonly Migration[];
     migrationsDir?: string | readonly string[];
     truncateAfterMigrations?: boolean;
+}
+
+export interface UnitTestingFacadeOptions<C extends BaseAppConfig = BaseAppConfig> extends Omit<
+    TestingFacadeOptions<C>,
+    'enableDatabase' | 'rejectDatabaseAccess'
+> {
+    excludeProviders?: readonly Token[];
+    providerOverrides?: readonly Provider[];
 }
 
 export interface StandardHookOptions<C extends BaseAppConfig = any> {
@@ -79,6 +89,8 @@ export class TestingFacade<C extends BaseAppConfig = any> {
     private sharedMySQLSessionKey?: string;
     private sharedMySQLSessionLeaseId?: string;
     private databaseCreated = false;
+    private databaseAccessGuardEnabled: boolean;
+    private databaseAccessGuardCleanup?: () => void;
     private readonly logger = createLogger('TestingFacade');
 
     constructor(
@@ -89,6 +101,11 @@ export class TestingFacade<C extends BaseAppConfig = any> {
         this.originalDatabaseEnv = originalDatabaseEnv ?? (options.enableDatabase ? snapshotDatabaseEnv() : undefined);
         this.dbAdapter = options.enableDatabase ? resolveTestDbAdapter(app.config, options.dbAdapter) : options.dbAdapter;
         this.originalAppDatabaseConfig = snapshotAppDatabaseConfig(app.config);
+        this.databaseAccessGuardEnabled = options.rejectDatabaseAccess === true;
+    }
+
+    enableDatabaseAccessGuard(): void {
+        if (!this.options.enableDatabase) this.databaseAccessGuardEnabled = true;
     }
 
     async start(): Promise<void> {
@@ -100,6 +117,7 @@ export class TestingFacade<C extends BaseAppConfig = any> {
                 useSavepoints: this.shouldUseSavepoints
             });
             setCurrentApp(this.app);
+            this.installDatabaseAccessGuard();
             if (this.options.enableDatabase) await this.createDatabase();
             if (this.shouldPrepareDatabaseSchema()) await this.prepareDatabaseSchema();
             if (this.options.enableDatabase && this.shouldUseSavepoints) await this.initSavepointIsolation();
@@ -110,7 +128,11 @@ export class TestingFacade<C extends BaseAppConfig = any> {
             if (this.options.autoSeedData && !this.shouldUseSavepoints) await this.seed();
         } catch (error) {
             await this.app.stop().catch(() => {});
-            await this.cleanupDatabase();
+            try {
+                await this.cleanupDatabase();
+            } finally {
+                this.restoreDatabaseAccessGuard();
+            }
             throw error;
         }
     }
@@ -142,6 +164,8 @@ export class TestingFacade<C extends BaseAppConfig = any> {
             await this.options.onStop?.(this);
         } catch (error) {
             errorToThrow ??= error;
+        } finally {
+            this.restoreDatabaseAccessGuard();
         }
         if (errorToThrow) throw errorToThrow;
     }
@@ -341,6 +365,27 @@ export class TestingFacade<C extends BaseAppConfig = any> {
         } catch {
             // The DB may never have been constructed, or start() may have failed before it was usable.
         }
+    }
+
+    private installDatabaseAccessGuard(): void {
+        if (!this.databaseAccessGuardEnabled || this.options.enableDatabase || this.databaseAccessGuardCleanup) return;
+        const db = this.getDatabaseProvider();
+        if (!db) return;
+
+        const driver = db.driver;
+        const originalAcquire = driver.acquire;
+        const rejectAcquire = async (): Promise<DriverConnection> => {
+            throw new Error('Database is not enabled in testing mode');
+        };
+        driver.acquire = rejectAcquire;
+        this.databaseAccessGuardCleanup = () => {
+            if (driver.acquire === rejectAcquire) driver.acquire = originalAcquire;
+            this.databaseAccessGuardCleanup = undefined;
+        };
+    }
+
+    private restoreDatabaseAccessGuard(): void {
+        this.databaseAccessGuardCleanup?.();
     }
 
     private createAdminDatabase(adapter: TestDbAdapter): BaseDatabase {
@@ -718,6 +763,27 @@ export function createTestingFacadeWithDatabase<C extends BaseAppConfig = BaseAp
     return createTestingFacade(appOptions, { ...options, enableDatabase: true });
 }
 
+export function createUnitTestingFacade<C extends BaseAppConfig = BaseAppConfig>(
+    appOptions: TestingAppOptions<C>,
+    options: UnitTestingFacadeOptions<NoInferConfig<C>> = {}
+): TestingFacade<C> {
+    const { excludeProviders = [], providerOverrides = [], ...facadeOptions } = options;
+    const replacedTokens = new Set<Token>([...excludeProviders, ...providerOverrides.map(getProviderToken)]);
+    const providers = [...(appOptions.providers ?? []).filter(provider => !replacedTokens.has(getProviderToken(provider))), ...providerOverrides];
+
+    return createTestingFacade(
+        {
+            ...appOptions,
+            providers
+        },
+        {
+            ...facadeOptions,
+            enableDatabase: false,
+            rejectDatabaseAccess: true
+        }
+    );
+}
+
 export function createTestingFacadeBuilder<C extends BaseAppConfig = any>(
     defaultAppOptions: TestingFacadeAppOptionsSource<C>,
     defaultOptions: TestingFacadeOptionsSource<NoInferConfig<C>> = {}
@@ -877,6 +943,8 @@ export function installStandardHooks<C extends BaseAppConfig = BaseAppConfig>(tf
     const suiteSeedSavepoint = 'after_suite_seed';
     let suiteSeedUsesSavepoint = false;
 
+    tf.enableDatabaseAccessGuard();
+
     before(async () => {
         await tf.start();
         if (options.suiteSeedData) suiteSeedUsesSavepoint = await tf.createSeedSavepoint(suiteSeedSavepoint, options.suiteSeedData);
@@ -985,6 +1053,7 @@ export const TestingHelpers = {
     createTestingFacade,
     createTestingFacadeBuilder,
     createTestingFacadeWithDatabase,
+    createUnitTestingFacade,
     defineEntityFixtures,
     installStandardHooks,
     loadEntityFixtures,

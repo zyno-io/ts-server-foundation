@@ -31,7 +31,7 @@ describe('UserController', () => {
 });
 ```
 
-`installStandardHooks(tf)` installs `before`, `after`, `beforeEach`, and `afterEach` hooks. `beforeEach` calls `tf.resetToSeed()`. `afterEach` resets Node mock timers and restores all mocks.
+`installStandardHooks(tf)` installs `before`, `after`, `beforeEach`, and `afterEach` hooks. `beforeEach` calls `tf.resetToSeed()`. `afterEach` resets Node mock timers and restores all mocks. When the facade does not enable a database, the hooks also guard the configured application database for the full facade lifecycle. Any unmocked connection attempt fails with `Database is not enabled in testing mode` before it can reach MySQL or PostgreSQL.
 
 Pass `suiteSeedData` when a suite needs extra baseline rows on top of the facade seed. In savepoint mode, the hook creates a second savepoint after `suiteSeedData` and resets to it before each test. Without savepoints, the hook runs `suiteSeedData` after each `resetToSeed()`.
 
@@ -55,6 +55,7 @@ interface TestingFacadeOptions {
     onBeforeStop?: (facade: TestingFacade) => Promise<void> | void;
     onStop?: (facade: TestingFacade) => Promise<void> | void;
     enableDatabase?: boolean;
+    rejectDatabaseAccess?: boolean;
     dbAdapter?: 'mysql' | 'postgres';
     useSavepoints?: boolean;
     databasePrefix?: string;
@@ -70,6 +71,25 @@ interface StandardHookOptions {
     suiteSeedData?: (facade: TestingFacade) => Promise<void> | void;
 }
 ```
+
+`rejectDatabaseAccess` applies the same per-facade connection guard when lifecycle is managed manually. Standard hooks enable it automatically for database-disabled facades.
+
+## Unit Facades
+
+Use `createUnitTestingFacade()` for application-level unit tests that keep the configured database type for `tf.sql` entity mocks but must not open a real database connection. It also supports explicit root-provider exclusions and overrides so auto-constructed integrations do not start unless the suite needs them.
+
+```typescript
+const tf = TestingHelpers.createUnitTestingFacade(CoreAppOptions, {
+    excludeProviders: [ExternalEventHandlers],
+    providerOverrides: [{ provide: PublisherService, useValue: mockPublisher }]
+});
+
+TestingHelpers.installStandardHooks(tf);
+```
+
+Provider overrides replace root providers with the same token. Exclusions and overrides apply to `appOptions.providers`; use a testing-facade builder resolver when imported modules or other app-option collections need filtering.
+
+Unit facades do not mock raw SQL. Exclude the provider that owns an unrelated raw-SQL lifecycle, override that provider with a test double, or use `createTestingFacadeWithDatabase()` when raw SQL is behavior under test.
 
 Use `createTestingFacadeWithDatabase()` when the test always needs an isolated database.
 
@@ -132,17 +152,17 @@ export const createTestingFacade = TestingHelpers.createTestingFacadeBuilder(
 
 `installStandardHooks()` is the normal lifecycle owner, but the facade methods are public for custom harnesses:
 
-| Method | Behavior |
-| --- | --- |
-| `start()` | Runs `onBeforeStart`, creates/prepares the database when enabled, starts the app, then runs `onStart`. |
-| `stop()` | Runs `onBeforeStop`, stops the app, cleans up database state, then runs `onStop`. |
-| `get(token)` | Resolves a provider from the facade app. |
-| `request(request)` | Sends an in-memory `HttpRequest` through the app and returns a `MemoryHttpResponse`. |
-| `createDatabase()` / `destroyDatabase()` | Explicitly owns the configured test database lifecycle. |
-| `runMigrations()` | Loads and runs the facade's configured migrations. |
-| `truncateTables()` | Clears non-internal tables and resets identity state where supported. |
-| `seed()` / `resetToSeed()` | Applies seed data or restores the per-test baseline. |
-| `createSeedSavepoint()` / `resetToSeedSavepoint()` | Manages named seed baselines when savepoint isolation is active. |
+| Method                                             | Behavior                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`                                          | Installs an enabled database-access guard, runs `onBeforeStart`, creates/prepares the database when enabled, starts the app, then runs `onStart`. |
+| `stop()`                                           | Runs `onBeforeStop`, stops the app, cleans up database state, then runs `onStop`.                                                                 |
+| `get(token)`                                       | Resolves a provider from the facade app.                                                                                                          |
+| `request(request)`                                 | Sends an in-memory `HttpRequest` through the app and returns a `MemoryHttpResponse`.                                                              |
+| `createDatabase()` / `destroyDatabase()`           | Explicitly owns the configured test database lifecycle.                                                                                           |
+| `runMigrations()`                                  | Loads and runs the facade's configured migrations.                                                                                                |
+| `truncateTables()`                                 | Clears non-internal tables and resets identity state where supported.                                                                             |
+| `seed()` / `resetToSeed()`                         | Applies seed data or restores the per-test baseline.                                                                                              |
+| `createSeedSavepoint()` / `resetToSeedSavepoint()` | Manages named seed baselines when savepoint isolation is active.                                                                                  |
 
 `start()` and `stop()` should still be paired. Direct database lifecycle calls are intended for custom setup and debugging; they do not replace app shutdown or the facade hooks.
 
@@ -317,6 +337,7 @@ Environment changes performed while the global-setup module is loaded are retain
 - `createTestingFacade`
 - `createTestingFacadeBuilder`
 - `createTestingFacadeWithDatabase`
+- `createUnitTestingFacade`
 - `defineEntityFixtures`
 - `installStandardHooks`
 - `loadEntityFixtures`

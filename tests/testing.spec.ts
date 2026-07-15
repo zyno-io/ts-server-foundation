@@ -9,6 +9,7 @@ import {
     type App,
     arrayContaining,
     assertCalledWith,
+    AutoConstruct,
     BaseEntity,
     BaseDatabase,
     createDatabase,
@@ -234,6 +235,176 @@ describe('TestingHelpers', () => {
         } finally {
             await tf.stop();
         }
+    });
+
+    it('creates a database-safe unit facade with provider exclusions and overrides', async () => {
+        let acquireCalls = 0;
+        let closeCalls = 0;
+        let excludedConstructions = 0;
+        let observedDependency = '';
+
+        class UnitDriver implements DatabaseDriver {
+            readonly dialect = 'mysql' as const;
+
+            async connect(): Promise<void> {}
+
+            async close(): Promise<void> {
+                closeCalls++;
+            }
+
+            async acquire(): Promise<DriverConnection> {
+                acquireCalls++;
+                throw new Error('unguarded database access');
+            }
+        }
+
+        const driver = new UnitDriver();
+        class UnitDatabase extends BaseDatabase {
+            constructor() {
+                super(driver);
+            }
+        }
+
+        class ExternalDependency {
+            readonly name: string = 'production';
+        }
+
+        @AutoConstruct()
+        class ExcludedProvider {
+            constructor() {
+                excludedConstructions++;
+            }
+        }
+
+        @AutoConstruct()
+        class UnitConsumer {
+            constructor(dependency: ExternalDependency) {
+                observedDependency = dependency.name;
+            }
+        }
+
+        @entity.name('unit_testing_users')
+        class UnitTestingUser extends BaseEntity {
+            id!: string & PrimaryKey;
+            name!: string;
+        }
+
+        const testDependency = { name: 'test' } as ExternalDependency;
+        const tf = TestingHelpers.createUnitTestingFacade(
+            {
+                db: UnitDatabase,
+                enableHealthcheck: false,
+                providers: [ExternalDependency, ExcludedProvider, UnitConsumer]
+            },
+            {
+                excludeProviders: [ExcludedProvider],
+                providerOverrides: [{ provide: ExternalDependency, useValue: testDependency }]
+            }
+        );
+
+        await tf.start();
+        try {
+            assert.equal(excludedConstructions, 0);
+            assert.equal(observedDependency, 'test');
+            assert.equal(tf.get(ExternalDependency), testDependency);
+
+            tf.sql.mockEntity(UnitTestingUser, { id: '1', name: 'Mocked' });
+            assert.deepStrictEqual(await tf.get<UnitDatabase>(UnitDatabase).query(UnitTestingUser).find(), [
+                Object.assign(new UnitTestingUser(), { id: '1', name: 'Mocked' })
+            ]);
+
+            await assert.rejects(() => tf.get<UnitDatabase>(UnitDatabase).rawFindUnsafe('SELECT 1'), /Database is not enabled in testing mode/);
+            assert.equal(acquireCalls, 0);
+        } finally {
+            await tf.stop();
+        }
+
+        assert.equal(closeCalls, 1);
+        await assert.rejects(() => driver.acquire(), /unguarded database access/);
+        assert.equal(acquireCalls, 1);
+    });
+
+    it('keeps the database guard active through unit facade shutdown', async () => {
+        let acquireCalls = 0;
+        let closeCalls = 0;
+
+        class CleanupDriver implements DatabaseDriver {
+            readonly dialect = 'mysql' as const;
+
+            async connect(): Promise<void> {}
+            async close(): Promise<void> {
+                closeCalls++;
+            }
+            async acquire(): Promise<DriverConnection> {
+                acquireCalls++;
+                throw new Error('unguarded database access');
+            }
+        }
+
+        const driver = new CleanupDriver();
+        class CleanupDatabase extends BaseDatabase {
+            constructor() {
+                super(driver);
+            }
+        }
+
+        const tf = TestingHelpers.createUnitTestingFacade(
+            {
+                db: CleanupDatabase,
+                enableHealthcheck: false
+            },
+            {
+                onStart: facade => {
+                    facade.app.registerCleanup(async () => {
+                        await facade.get<CleanupDatabase>(CleanupDatabase).rawExecuteUnsafe('DELETE FROM cleanup');
+                    });
+                }
+            }
+        );
+
+        await tf.start();
+        await assert.rejects(() => tf.stop(), /Database is not enabled in testing mode/);
+
+        assert.equal(acquireCalls, 0);
+        assert.equal(closeCalls, 1);
+        await assert.rejects(() => driver.acquire(), /unguarded database access/);
+        assert.equal(acquireCalls, 1);
+    });
+
+    describe('database-disabled standard hooks', () => {
+        let acquireCalls = 0;
+
+        class StandardHookDriver implements DatabaseDriver {
+            readonly dialect = 'postgres' as const;
+
+            async connect(): Promise<void> {}
+            async close(): Promise<void> {}
+            async acquire(): Promise<DriverConnection> {
+                acquireCalls++;
+                throw new Error('unguarded database access');
+            }
+        }
+
+        const driver = new StandardHookDriver();
+        class StandardHookDatabase extends BaseDatabase {
+            constructor() {
+                super(driver);
+            }
+        }
+
+        const tf = TestingHelpers.createTestingFacade({
+            db: StandardHookDatabase,
+            enableHealthcheck: false
+        });
+        TestingHelpers.installStandardHooks(tf);
+
+        it('rejects connection attempts before they reach the configured driver', async () => {
+            await assert.rejects(
+                () => tf.get<StandardHookDatabase>(StandardHookDatabase).rawFindUnsafe('SELECT 1'),
+                /Database is not enabled in testing mode/
+            );
+            assert.equal(acquireCalls, 0);
+        });
     });
 
     it('logs test facade startup before lifecycle work', async () => {

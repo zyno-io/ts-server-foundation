@@ -42,6 +42,8 @@ describe('package exports', () => {
         assert.equal(typeof root.MigrationRunner, 'function');
         assert.equal(typeof root.createMigrationPlan, 'function');
         assert.equal(typeof root.TestingHelpers.createTestingFacade, 'function');
+        assert.equal(typeof root.TestingHelpers.createUnitTestingFacade, 'function');
+        assert.equal(typeof root.createUnitTestingFacade, 'function');
         assert.equal(typeof root.WorkerService, 'function');
         assert.equal(typeof root.LeaderService, 'function');
         assert.equal(typeof root.MailService, 'function');
