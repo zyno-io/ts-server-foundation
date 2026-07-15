@@ -204,7 +204,7 @@ export class WorkerQueueRegistry {
     }
 
     async shutdown(): Promise<void> {
-        await Promise.all([...this.bullQueues.values()].map(queue => queue.close().catch(() => {})));
+        await Promise.all([...this.bullQueues.values()].map(closeBullQueue));
         for (const queue of this.bullQueues.values()) WorkerQueueRegistry.bullQueues.delete(queue);
         this.bullQueues.clear();
     }
@@ -213,7 +213,7 @@ export class WorkerQueueRegistry {
         WorkerQueueRegistry.queues.clear();
         const queues = [...WorkerQueueRegistry.bullQueues];
         WorkerQueueRegistry.bullQueues.clear();
-        await Promise.all(queues.map(queue => queue.close().catch(() => {})));
+        await Promise.all(queues.map(closeBullQueue));
     }
 
     getBullMqOptions(): QueueOptions & Pick<WorkerOptions, 'connection' | 'prefix'> {
@@ -273,6 +273,23 @@ export class WorkerQueueRegistry {
         } while (cursor !== '0');
 
         return [...queueNames].sort();
+    }
+}
+
+async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> {
+    const clientPromise = queue.client.catch(() => undefined);
+    try {
+        await queue.close();
+    } catch {
+        // Queue cleanup is best-effort during application shutdown.
+    }
+
+    // BullMQ closes its ioredis client with QUIT, which leaves Sentinel failover detector
+    // subscriptions connected. Disconnect the underlying client to tear those sockets down.
+    try {
+        (await clientPromise)?.disconnect();
+    } catch {
+        // Force cleanup is also best-effort when graceful cleanup fails.
     }
 }
 

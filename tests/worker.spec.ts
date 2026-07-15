@@ -416,6 +416,61 @@ describe('worker services', () => {
         assert.equal(bullPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, 'bull-prefix:bmq');
     });
 
+    it('disconnects BullMQ clients after gracefully closing registry queues', async () => {
+        const calls: string[] = [];
+        const queue = {
+            client: Promise.resolve({
+                disconnect() {
+                    calls.push('disconnect');
+                }
+            }),
+            async close() {
+                calls.push('close');
+            }
+        };
+        const registry = new WorkerQueueRegistry({ APP_ENV: 'development' } as never);
+        const instanceQueues = (registry as unknown as { bullQueues: Map<string, typeof queue> }).bullQueues;
+        const globalQueues = (
+            WorkerQueueRegistry as unknown as {
+                bullQueues: Set<typeof queue>;
+            }
+        ).bullQueues;
+        instanceQueues.set('sentinel', queue);
+        globalQueues.add(queue);
+
+        await registry.shutdown();
+
+        assert.deepEqual(calls, ['close', 'disconnect']);
+        assert.equal(instanceQueues.size, 0);
+        assert.equal(globalQueues.size, 0);
+    });
+
+    it('disconnects BullMQ clients when graceful queue cleanup fails', async () => {
+        const calls: string[] = [];
+        const queue = {
+            client: Promise.resolve({
+                disconnect() {
+                    calls.push('disconnect');
+                }
+            }),
+            async close() {
+                calls.push('close');
+                throw new Error('close failed');
+            }
+        };
+        const globalQueues = (
+            WorkerQueueRegistry as unknown as {
+                bullQueues: Set<typeof queue>;
+            }
+        ).bullQueues;
+        globalQueues.add(queue);
+
+        await WorkerQueueRegistry.closeQueues();
+
+        assert.deepEqual(calls, ['close', 'disconnect']);
+        assert.equal(globalQueues.size, 0);
+    });
+
     it('removes only stale framework-managed BullMQ job schedulers', async () => {
         process.env.APP_ENV = 'development';
         const registry = new WorkerQueueRegistry({ APP_ENV: 'development', BULL_QUEUE: 'default' } as never);
