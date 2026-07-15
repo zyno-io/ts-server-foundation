@@ -1,5 +1,5 @@
 import { databaseAnnotation, isDatabaseUUIDType, ReflectionKind, Type, typeAnnotation, validationAnnotation } from '../../../reflection';
-import { flattenRuntimeUnionTypes, tryResolveClassType } from '../../../reflection/type-utils';
+import { flattenRuntimeUnionTypes, tryResolveClassType, unwrapValueType } from '../../../reflection/type-utils';
 import { Coordinate } from '../../../types/type-annotations';
 
 import type { Dialect } from '../../sql';
@@ -25,13 +25,14 @@ function resolveColumnTypeBase(type: Type, dialect: Dialect): ResolvedColumnType
     if (type.kind === ReflectionKind.union) {
         const nonNull = flattenRuntimeUnionTypes(type).filter(item => item.kind !== ReflectionKind.null && item.kind !== ReflectionKind.undefined);
         if (nonNull.length === 1) return resolveColumnType(nonNull[0], dialect);
+        const valueTypes = nonNull.map(unwrapValueType);
         if (
-            nonNull.length > 0 &&
-            nonNull.every(item => item.kind === ReflectionKind.literal && typeof (item as { literal: unknown }).literal === 'string')
+            valueTypes.length > 0 &&
+            valueTypes.every(item => item.kind === ReflectionKind.literal && typeof (item as { literal: unknown }).literal === 'string')
         ) {
             return {
                 type: 'enum',
-                enumValues: nonNull.map(item => String((item as { literal: unknown }).literal))
+                enumValues: valueTypes.map(item => String((item as { literal: unknown }).literal))
             };
         }
         return { type: 'json' };
