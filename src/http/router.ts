@@ -458,6 +458,10 @@ export class HttpRouter {
 
         const text = await request.readBodyText();
         if (!text) return undefined;
+        if (isFormUrlEncodedRequest(request)) {
+            request.parsedBody = parseFormUrlEncodedBody(text);
+            return request.parsedBody;
+        }
         try {
             request.parsedBody = JSON.parse(text);
             return request.parsedBody;
@@ -509,6 +513,21 @@ export class HttpRouter {
 
 function matchRoutePath(route: HttpRoutePlan, path: string): RegExpExecArray | null {
     return route.regex.exec(path) ?? (path.length > 1 && path.endsWith('/') ? route.regex.exec(path.slice(0, -1)) : null);
+}
+
+function isFormUrlEncodedRequest(request: HttpRequest): boolean {
+    return /^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers['content-type'] ?? '');
+}
+
+function parseFormUrlEncodedBody(text: string): Record<string, string | string[]> {
+    const body: Record<string, string | string[]> = Object.create(null);
+    for (const [name, value] of new URLSearchParams(text)) {
+        const current = body[name];
+        if (current === undefined) body[name] = value;
+        else if (Array.isArray(current)) current.push(value);
+        else body[name] = [current, value];
+    }
+    return body;
 }
 
 function getParameterPlanName(parameter: HttpRouteParameterPlan): string | undefined {

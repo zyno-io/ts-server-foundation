@@ -197,6 +197,70 @@ describe('http router', () => {
         assert.deepStrictEqual(response.json, { id: 1, name: 'Alpha' });
     });
 
+    it('routes x-www-form-urlencoded requests with typed HttpBody parameters', async () => {
+        @http.controller('/form-body')
+        class FormBodyController {
+            @http.POST()
+            post(body: HttpBody<{ name: string; active: boolean; count: number; tags: string[] }>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [FormBodyController] });
+        const response = await app.request(
+            new HttpRequest(
+                'POST',
+                '/form-body',
+                { 'content-type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+                'name=Ada+Lovelace&active=true&count=2&tags=math&tags=programming'
+            )
+        );
+        const invalid = await app.request(
+            new HttpRequest(
+                'POST',
+                '/form-body',
+                { 'content-type': 'application/x-www-form-urlencoded' },
+                'name=Ada&active=true&count=not-a-number&tags=math'
+            )
+        );
+
+        assert.equal(response.statusCode, 200);
+        assert.deepStrictEqual(response.json, {
+            name: 'Ada Lovelace',
+            active: true,
+            count: 2,
+            tags: ['math', 'programming']
+        });
+        assert.equal(invalid.statusCode, 400);
+        assert.match(invalid.json.error, /body\.count/);
+
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        try {
+            const form = new URLSearchParams();
+            form.set('name', 'Grace Hopper');
+            form.set('active', 'false');
+            form.set('count', '3');
+            form.append('tags', 'navy');
+            form.append('tags', 'compiler');
+            const streamedResponse = await fetch(`http://127.0.0.1:${address.port}/form-body`, {
+                method: 'POST',
+                body: form
+            });
+
+            assert.equal(streamedResponse.status, 200);
+            assert.deepStrictEqual(await streamedResponse.json(), {
+                name: 'Grace Hopper',
+                active: false,
+                count: 3,
+                tags: ['navy', 'compiler']
+            });
+        } finally {
+            await app.stop();
+        }
+    });
+
     it('rejects invalid structured array entries during HttpBody deserialization', async () => {
         @http.controller('/structured-array-body')
         class StructuredArrayBodyController {
