@@ -2089,11 +2089,26 @@ describe('http router', () => {
         assert.throws(() => createApp({ controllers: [InvalidUploadPolicyController] }), /Invalid FileUpload allowedTypes/);
     });
 
-    it('rejects undeclared multipart file fields unless a route opts into HttpRequestStream', async () => {
+    it('skips eager multipart parsing for bodyless routes while preserving upload guards when bytes are present', async () => {
         @http.controller('/multipart-guard')
         class MultipartGuardController {
             @http.POST('/request')
             request(_request: HttpRequest) {
+                return { ok: true };
+            }
+
+            @http.GET('/authz')
+            authz() {
+                return { ok: true };
+            }
+
+            @http.HEAD('/authz-head')
+            authzHead() {
+                return { ok: true };
+            }
+
+            @http.POST('/body')
+            body(_body: HttpBody<Record<string, unknown>>) {
                 return { ok: true };
             }
 
@@ -2119,11 +2134,62 @@ describe('http router', () => {
         assert.equal(guardedResponse.statusCode, 400);
         assert.deepStrictEqual(guardedResponse.json, { error: 'Unexpected file field "file"' });
 
+        const bodylessResponse = await app.request(new HttpRequest('GET', '/multipart-guard/authz', { 'content-type': multipart.contentType }));
+        assert.equal(bodylessResponse.statusCode, 200);
+        assert.deepStrictEqual(bodylessResponse.json, { ok: true });
+
+        const bodylessPostResponse = await app.request(
+            new HttpRequest('POST', '/multipart-guard/request', { 'content-type': multipart.contentType })
+        );
+        assert.equal(bodylessPostResponse.statusCode, 200);
+        assert.deepStrictEqual(bodylessPostResponse.json, { ok: true });
+
+        const bodylessHeadResponse = await app.request(
+            new HttpRequest('HEAD', '/multipart-guard/authz-head', { 'content-type': multipart.contentType })
+        );
+        assert.equal(bodylessHeadResponse.statusCode, 200);
+
+        const bodyfulGetResponse = await app.request(
+            new HttpRequest('GET', '/multipart-guard/authz', { 'content-type': multipart.contentType }, multipart.body)
+        );
+        assert.equal(bodyfulGetResponse.statusCode, 400);
+        assert.deepStrictEqual(bodyfulGetResponse.json, { error: 'Unexpected file field "file"' });
+
+        const parsedResponse = await app.request(
+            new HttpRequest('POST', '/multipart-guard/body', { 'content-type': multipart.contentType }, multipart.body)
+        );
+        assert.equal(parsedResponse.statusCode, 400);
+        assert.deepStrictEqual(parsedResponse.json, { error: 'Unexpected file field "file"' });
+
         const streamResponse = await app.request(
             new HttpRequest('POST', '/multipart-guard/stream', { 'content-type': multipart.contentType }, multipart.body)
         );
         assert.equal(streamResponse.statusCode, 200);
         assert.deepStrictEqual(streamResponse.json, { sawFileName: true, sawFileBytes: true });
+    });
+
+    it('accepts a bodyless multipart POST over Node HTTP', async () => {
+        @http.controller('/bodyless-auth')
+        class BodylessAuthController {
+            @http.POST()
+            post() {
+                return { ok: true };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [BodylessAuthController] });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        try {
+            const nodeBodylessPost = await requestNodeHttp(address.port, 'POST', '/bodyless-auth', {
+                'content-type': 'multipart/form-data; boundary=preserved-without-body'
+            });
+            assert.equal(nodeBodylessPost.statusCode, 200);
+            assert.deepStrictEqual(JSON.parse(nodeBodylessPost.text), { ok: true });
+        } finally {
+            await app.stop();
+        }
     });
 
     it('rejects parsed parameters combined with HttpRequestStream at registration', () => {
@@ -2500,6 +2566,57 @@ describe('http router', () => {
 
         assert.equal(response.statusCode, 400);
         assert.deepStrictEqual(response.json, { error: 'Failed to parse multipart JSON payload' });
+    });
+
+    it('normalizes malformed multipart bodies while preserving request body guard errors', async () => {
+        @http.controller('/malformed-upload')
+        class MalformedUploadController {
+            @http.POST()
+            post(body: HttpBody<{ value: string }>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [MalformedUploadController] });
+        for (const contentType of ['multipart/form-data', 'multipart/form-data; boundary=incomplete']) {
+            const response = await app.request(new HttpRequest('POST', '/malformed-upload', { 'content-type': contentType }));
+            assert.equal(response.statusCode, 400);
+            assert.deepStrictEqual(response.json, { error: 'Failed to parse multipart body' });
+        }
+
+        const multipart = makeMultipartBody([{ name: 'value', value: 'ok' }]);
+        const compressedResponse = await app.request(
+            new HttpRequest(
+                'POST',
+                '/malformed-upload',
+                { 'content-type': multipart.contentType, 'content-encoding': 'gzip' },
+                gzipSync(multipart.body)
+            )
+        );
+        const corruptResponse = await app.request(
+            new HttpRequest('POST', '/malformed-upload', { 'content-type': multipart.contentType, 'content-encoding': 'gzip' }, 'not-gzip')
+        );
+        const unsupportedResponse = await app.request(
+            new HttpRequest('POST', '/malformed-upload', { 'content-type': multipart.contentType, 'content-encoding': 'br' }, multipart.body)
+        );
+        const oversizedResponse = await app.request(
+            new HttpRequest(
+                'POST',
+                '/malformed-upload',
+                { 'content-type': multipart.contentType, 'content-length': String(101 * 1024 * 1024) },
+                multipart.body
+            )
+        );
+
+        assert.equal(compressedResponse.statusCode, 200);
+        assert.deepStrictEqual(compressedResponse.json, { value: 'ok' });
+        assert.equal(corruptResponse.statusCode, 400);
+        assert.deepStrictEqual(corruptResponse.json, { error: 'Failed to decode request body' });
+        assert.equal(unsupportedResponse.statusCode, 415);
+        assert.deepStrictEqual(unsupportedResponse.json, { error: 'Unsupported request content encoding: br' });
+        assert.equal(oversizedResponse.statusCode, 413);
+        assert.deepStrictEqual(oversizedResponse.json, { error: 'Request body is too large' });
     });
 
     it('writes explicit response result helpers', async () => {
@@ -3280,9 +3397,14 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, message: str
     }
 }
 
-function requestNodeHttp(port: number, method: string, path: string): Promise<{ statusCode: number; text: string }> {
+function requestNodeHttp(
+    port: number,
+    method: string,
+    path: string,
+    headers: Record<string, string> = {}
+): Promise<{ statusCode: number; text: string }> {
     return new Promise((resolve, reject) => {
-        const request = nodeHttpRequest({ host: '127.0.0.1', port, path, method }, response => {
+        const request = nodeHttpRequest({ host: '127.0.0.1', port, path, method, headers }, response => {
             const chunks: Buffer[] = [];
             response.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
             response.on('end', () => {

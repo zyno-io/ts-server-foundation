@@ -261,7 +261,7 @@ The full helper set is `getCachedValue`, `setCachedValue`, `hasCachedValue`, `cl
 
 ## Bodies And Streams
 
-JSON body parsing happens when a route resolves `HttpBody<T>`. Multipart requests are guarded eagerly on every route except one that opts into raw streaming with `HttpRequestStream`; file parts are rejected unless the route explicitly declares matching `FileUpload` fields.
+JSON body parsing happens when a route resolves `HttpBody<T>`. Multipart requests with body bytes are guarded eagerly; file parts are rejected unless the route explicitly declares matching `FileUpload` fields. Bodyless routes without parsed body parameters do not parse multipart input merely because the request carries a multipart `Content-Type`, including bodyless external-auth subrequests whose method was overridden to `POST`.
 
 `HttpRequest.readBodyBuffer()` and `HttpRequest.readBodyText()` decode supported request content encodings, enforce request size limits, and cache the consumed body on `request.body`. They are safe to call more than once; later calls resolve from the cached buffer. For an incoming Node request, `request.body` remains unset until a guarded read consumes it. In-memory requests constructed with a buffer, string, object, or `.multiPart()` set `request.body` immediately.
 
@@ -300,7 +300,7 @@ class FileController {
 
 Multipart field `_payload` is parsed as JSON and merged into the body object. Other text fields are also included. Multiple values for the same field are represented as arrays.
 
-Multipart parsing runs before middleware for every guarded multipart route, including a route that injects only `HttpRequest`. Use `HttpRequestStream` when the controller must consume the raw multipart bytes without parsing or temporary upload files. Temporary upload directories are automatically removed after request handling completes, including error responses.
+Multipart parsing runs before middleware for routes that declare `HttpBody<T>` or `FileUpload`, and remains guarded on routes without parsed parameters whenever request body bytes are present so undeclared file uploads are rejected. Bodyless routes that inject only `HttpRequest`, or use only custom parameter resolvers, do not parse multipart input eagerly. Use `HttpRequestStream` when the controller must consume the raw multipart bytes without parsing or temporary upload files. Temporary upload directories are automatically removed after request handling completes, including error responses.
 
 ## Responses
 

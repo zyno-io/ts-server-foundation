@@ -120,7 +120,7 @@ export class HttpRouter {
                 throw new Error(`Cannot declare multiple HttpBody parameters on ${controllerClass.name}.${String(route.propertyKey)}`);
             }
             const bodyMode = parameters.some(parameter => parameter.kind === 'requestStream') ? 'stream' : 'guarded';
-            if (bodyMode === 'stream' && parameters.some(parameter => parameter.kind === 'body' || parameter.kind === 'file')) {
+            if (bodyMode === 'stream' && hasParsedBodyParameters(parameters)) {
                 throw new Error(`Cannot combine HttpRequestStream with parsed body or file parameters on ${String(route.propertyKey)}`);
             }
             this.routes.push({
@@ -432,6 +432,7 @@ export class HttpRouter {
     }
 
     private async guardRequestBody(route: HttpRoutePlan, request: HttpRequest): Promise<void> {
+        if (!hasParsedBodyParameters(route.parameters) && isBodylessRequest(request)) return;
         if (isMultipartRequest(request)) await this.readBody(request, route);
     }
 
@@ -551,6 +552,17 @@ function compileMultipartRequestPolicy(parameters: HttpRouteParameterPlan[]): Mu
         }
     }
     return { files, rejectUndeclaredFiles: true };
+}
+
+function hasParsedBodyParameters(parameters: readonly HttpRouteParameterPlan[]): boolean {
+    return parameters.some(parameter => parameter.kind === 'body' || parameter.kind === 'file');
+}
+
+function isBodylessRequest(request: HttpRequest): boolean {
+    if (request.body?.length) return false;
+    const contentLength = Number.parseInt(request.headers['content-length'] ?? '', 10);
+    if (Number.isFinite(contentLength) && contentLength > 0) return false;
+    return request.headers['transfer-encoding'] === undefined;
 }
 
 function collectFileUploadPolicies(type: Type, files: Record<string, FileUploadPolicy>, fieldName?: string, seen = new Set<Type>()): void {
