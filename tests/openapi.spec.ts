@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
-import { MaxLength, MinLength } from '../src';
+import { MaxLength, MinLength, type DatabaseField } from '../src';
 
 import {
     BaseAppConfig,
@@ -63,6 +63,12 @@ class OpenApiUserDto {
     active!: boolean;
     status!: 'active' | 'disabled';
     createdAt!: Date;
+}
+
+type OpenApiWebhookDeliveryStatus = 'pending' | 'delivering' | 'succeeded';
+
+class OpenApiWebhookDeliveryDto {
+    status!: OpenApiWebhookDeliveryStatus & DatabaseField<{ type: 'VARCHAR(16)' }>;
 }
 
 class OpenApiCreateUserBody {
@@ -350,6 +356,11 @@ class OpenApiUsersController {
     @http.GET('/summarized')
     async listUsersSummarized(): Promise<OpenApiUserDto[]> {
         return [];
+    }
+
+    @http.GET('/webhook-delivery')
+    async webhookDelivery(): Promise<OpenApiWebhookDeliveryDto> {
+        return new OpenApiWebhookDeliveryDto();
     }
 
     @http.GET('/optional-queries')
@@ -874,6 +885,17 @@ describe('openapi', () => {
         assert.equal(schemaObject(userDto?.properties?.id).format, 'uuid');
         assert.deepStrictEqual(schemaObject(userDto?.properties?.status).enum, ['active', 'disabled']);
         assert.equal(schemaObject(userDto?.properties?.createdAt).format, 'date-time');
+
+        assert.equal(
+            referenceObject(doc.paths['/users/webhook-delivery'].get?.responses['200'].content?.['application/json'].schema).$ref,
+            '#/components/schemas/OpenApiWebhookDeliveryDto'
+        );
+        const webhookDelivery = doc.components?.schemas?.OpenApiWebhookDeliveryDto;
+        assert.equal(referenceObject(webhookDelivery?.properties?.status).$ref, '#/components/schemas/OpenApiWebhookDeliveryStatus');
+        assert.deepStrictEqual(doc.components?.schemas?.OpenApiWebhookDeliveryStatus, {
+            enum: ['pending', 'delivering', 'succeeded'],
+            type: 'string'
+        });
 
         const upload = doc.paths['/users/{id}/avatar'].post?.requestBody?.content['multipart/form-data'];
         const uploadSchema = schemaObject(upload?.schema);

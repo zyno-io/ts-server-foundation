@@ -206,7 +206,12 @@ export function normalizeTypeMetadata(value: unknown, seen = new Set<unknown>())
 function distributeIntersectionOverUnions(record: Record<string, unknown>): void {
     if (record.kind !== ReflectionKind.intersection || !Array.isArray(record.types)) return;
     const members = record.types.filter(isReflectedType);
-    if (members.length !== record.types.length || !members.some(member => member.kind === ReflectionKind.union)) return;
+    if (members.length !== record.types.length) return;
+    const unionMembers = members.filter(member => member.kind === ReflectionKind.union);
+    if (unionMembers.length === 0) return;
+    // Metadata-only markers do not change the value shape. Keep the wrapped
+    // union intact so named aliases remain visible to consumers such as OpenAPI.
+    if (unionMembers.length === 1 && members.every(member => member === unionMembers[0] || isMarkerType(member))) return;
 
     let combinations: Type[][] = [[]];
     for (const member of members) {

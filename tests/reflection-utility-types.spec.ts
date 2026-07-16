@@ -762,6 +762,34 @@ describe('reflection utility type metadata', () => {
         });
     });
 
+    it('preserves named literal unions wrapped in metadata intersections', () => {
+        const context = createOpenApiSchemaContext();
+        const statusType = {
+            kind: ReflectionKind.intersection,
+            types: [
+                {
+                    kind: ReflectionKind.union,
+                    typeName: 'WebhookDeliveryStatus',
+                    types: [literal('pending'), literal('delivering'), literal('succeeded')]
+                },
+                {
+                    kind: ReflectionKind.unknown,
+                    typeName: 'DatabaseField',
+                    database: { '*': { type: 'VARCHAR(16)' } }
+                }
+            ]
+        } as Type;
+
+        const schema = typeToOpenApiSchema(statusType, context);
+
+        assert.equal(statusType.kind, ReflectionKind.intersection);
+        assert.deepStrictEqual(schema, { $ref: '#/components/schemas/WebhookDeliveryStatus' });
+        assert.deepStrictEqual(context.schemas.WebhookDeliveryStatus, {
+            enum: ['pending', 'delivering', 'succeeded'],
+            type: 'string'
+        });
+    });
+
     it('preserves named union aliases in OpenAPI object properties', () => {
         const context = createOpenApiSchemaContext();
         const compactConfig = objectLiteral([signature('type', literal('compact')), signature('columns', numberType)], 'CompactConfig');
