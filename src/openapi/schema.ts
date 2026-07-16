@@ -437,8 +437,9 @@ function schemaForAdditionalProperties(type: Type, context: OpenApiSchemaContext
 function schemaForUnion(type: Type, context: OpenApiSchemaContext): OpenApiSchemaObject | OpenApiReferenceObject {
     if (type.kind !== ReflectionKind.union) return typeToOpenApiSchemaInternal(type, context);
 
-    const nullable = isNullable(type);
-    const nonNull = flattenUnionTypes(type).filter(item => item.kind !== ReflectionKind.null && item.kind !== ReflectionKind.undefined);
+    const unionTypes = flattenUnionTypes(type);
+    const nullable = unionTypes.some(item => item.kind === ReflectionKind.null);
+    const nonNull = unionTypes.filter(item => item.kind !== ReflectionKind.null && item.kind !== ReflectionKind.undefined);
     if (nonNull.length === 0) return { type: 'null' };
     if (nonNull.length === 1) {
         const schema = typeToOpenApiSchema(nonNull[0], context);
@@ -661,7 +662,14 @@ function unwrapNullable(type: Type): Type {
 
 function flattenUnionTypes(type: Type): Type[] {
     if (type.kind !== ReflectionKind.union) return [type];
-    return type.types.flatMap(flattenUnionTypes);
+    return type.types.flatMap(flattenNestedUnionType);
+}
+
+function flattenNestedUnionType(type: Type): Type[] {
+    // Anonymous nested unions can be flattened, but named aliases must remain
+    // visible so their branches are emitted behind a component reference.
+    if (type.kind !== ReflectionKind.union || getNamedAliasComponentName(type)) return [type];
+    return type.types.flatMap(flattenNestedUnionType);
 }
 
 function getClassComponentName(type: TypeClass, context: OpenApiSchemaContext): string {

@@ -577,6 +577,52 @@ describe('reflection utility type metadata', () => {
         assert.deepStrictEqual(branches[1].properties?.timeConditionId, { not: {} });
     });
 
+    it('preserves named aliases nested in outer OpenAPI unions', () => {
+        const baseNode = objectLiteral([
+            signature('id', stringType),
+            signature('type', literal('conditional')),
+            signature('matchNext', stringType),
+            signature('noMatchNext', stringType)
+        ]);
+        const conditionalNode: Type = {
+            kind: ReflectionKind.intersection,
+            typeName: 'NestedConditionalAlias',
+            types: [
+                baseNode,
+                union(
+                    objectLiteral([signature('conditionId', stringType), signature('locationId', { kind: ReflectionKind.never }, true)]),
+                    objectLiteral([signature('locationId', stringType), signature('conditionId', { kind: ReflectionKind.never }, true)])
+                )
+            ]
+        };
+        const answerNode = objectLiteral(
+            [signature('id', stringType), signature('type', literal('answer')), signature('next', stringType)],
+            'SimpleNode'
+        );
+        const nodeType = {
+            kind: ReflectionKind.union,
+            typeName: 'OuterNodeUnion',
+            types: [answerNode, conditionalNode]
+        } as Type;
+        const context = createOpenApiSchemaContext();
+
+        const schema = typeToOpenApiSchema(nodeType, context);
+
+        assert.deepStrictEqual(schema, { $ref: '#/components/schemas/OuterNodeUnion' });
+        assert.deepStrictEqual(context.schemas.OuterNodeUnion, {
+            oneOf: [{ $ref: '#/components/schemas/SimpleNode' }, { $ref: '#/components/schemas/NestedConditionalAlias' }]
+        });
+        const conditionalSchema = schemaObject(context.schemas.NestedConditionalAlias, context);
+        assert.equal(conditionalSchema.oneOf?.length, 2);
+        assert.deepStrictEqual(
+            conditionalSchema.oneOf?.map(branch => schemaObject(branch, context).required),
+            [
+                ['id', 'type', 'matchNext', 'noMatchNext', 'conditionId'],
+                ['id', 'type', 'matchNext', 'noMatchNext', 'locationId']
+            ]
+        );
+    });
+
     it('distributes reduced intersections without never properties', () => {
         const type: Type = {
             kind: ReflectionKind.intersection,
