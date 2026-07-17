@@ -55,6 +55,10 @@ Config loading reads from `Env` without deleting consumed keys from `process.env
 | `USE_REAL_IP_HEADER`                     | `boolean` | unset                                             | Trust proxy remote-address headers.                                                                           |
 | `HTTP_MAX_REQUEST_BODY_BYTES`            | `number`  | `104857600`                                       | Maximum decoded request body bytes.                                                                           |
 | `HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES` | `number`  | `26214400`                                        | Maximum compressed request body bytes before gzip decoding.                                                   |
+| `HTTP_MAX_FORM_FIELDS`                   | `number`  | `10000`                                           | Maximum URL-encoded or multipart text fields and imported form structure nodes.                               |
+| `HTTP_MAX_FORM_FIELD_NAME_LENGTH`        | `number`  | `2048`                                            | Maximum decoded form field-name length.                                                                       |
+| `HTTP_MAX_FORM_DEPTH`                    | `number`  | `16`                                              | Maximum bracket/object nesting depth in form bodies.                                                          |
+| `HTTP_MAX_FORM_ARRAY_INDEX`              | `number`  | `10000`                                           | Maximum explicit array index accepted in a form field name.                                                   |
 
 ### Database
 

@@ -261,6 +261,74 @@ describe('http router', () => {
         }
     });
 
+    it('expands nested x-www-form-urlencoded objects and indexed arrays before typed deserialization', async () => {
+        interface NestedFormBody {
+            contact: { firstName: string; active: boolean };
+            participants: Array<{ name: string; age: number }>;
+            tags: string[];
+        }
+
+        @http.controller('/nested-form-body')
+        class NestedFormBodyController {
+            @http.POST()
+            post(body: HttpBody<NestedFormBody>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [NestedFormBodyController] });
+        const response = await app.request(
+            new HttpRequest(
+                'POST',
+                '/nested-form-body',
+                { 'content-type': 'application/x-www-form-urlencoded' },
+                [
+                    'contact[firstName]=Ada',
+                    'contact[active]=true',
+                    'participants[1][name]=Grace',
+                    'participants[1][age]=85',
+                    'participants[0][name]=Ada',
+                    'participants[0][age]=36',
+                    'tags[]=math',
+                    'tags[]=programming'
+                ].join('&')
+            )
+        );
+
+        assert.equal(response.statusCode, 200);
+        assert.deepStrictEqual(response.json, {
+            contact: { firstName: 'Ada', active: true },
+            participants: [
+                { name: 'Ada', age: 36 },
+                { name: 'Grace', age: 85 }
+            ],
+            tags: ['math', 'programming']
+        });
+    });
+
+    it('applies configured structural limits to x-www-form-urlencoded bodies', async () => {
+        @http.controller('/limited-form-body')
+        class LimitedFormBodyController {
+            @http.POST()
+            post(body: HttpBody<Record<string, string>>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            controllers: [LimitedFormBodyController],
+            defaultConfig: { HTTP_MAX_FORM_FIELDS: 1 }
+        });
+        const response = await app.request(
+            new HttpRequest('POST', '/limited-form-body', { 'content-type': 'application/x-www-form-urlencoded' }, 'one=1&two=2')
+        );
+
+        assert.equal(response.statusCode, 413);
+        assert.deepStrictEqual(response.json, { error: 'Form contains too many fields' });
+    });
+
     it('rejects invalid structured array entries during HttpBody deserialization', async () => {
         @http.controller('/structured-array-body')
         class StructuredArrayBodyController {
@@ -1674,6 +1742,7 @@ describe('http router', () => {
         interface UploadBody {
             title: string;
             category?: string;
+            details?: { department: string };
             published?: boolean;
             file: FileUpload;
         }
@@ -1685,6 +1754,7 @@ describe('http router', () => {
                 return {
                     title: body.title,
                     category: body.category,
+                    details: body.details,
                     published: body.published,
                     publishedType: typeof body.published,
                     file: {
@@ -1724,6 +1794,7 @@ describe('http router', () => {
         const multipart = makeMultipartBody([
             { name: '_payload', value: JSON.stringify({ title: 'Quarterly report' }) },
             { name: 'category', value: 'finance' },
+            { name: 'details[department]', value: 'research' },
             { name: 'published', value: 'true' },
             { name: 'file', filename: 'report.txt', contentType: 'text/plain', value: 'upload-body' }
         ]);
@@ -1753,6 +1824,7 @@ describe('http router', () => {
         assert.deepStrictEqual(bodyJson, {
             title: 'Quarterly report',
             category: 'finance',
+            details: { department: 'research' },
             published: true,
             publishedType: 'boolean',
             file: {
@@ -1778,6 +1850,48 @@ describe('http router', () => {
         });
         assert.equal(existsSync(bodyJson.file.path), false);
         assert.equal(existsSync(directJson.path), false);
+    });
+
+    it('expands multipart text fields with the same object and array notation as URL-encoded bodies', async () => {
+        interface NestedMultipartBody {
+            contact: { firstName: string; active: boolean };
+            participants: Array<{ name: string; age: number }>;
+            tags: string[];
+        }
+
+        @http.controller('/nested-multipart-body')
+        class NestedMultipartBodyController {
+            @http.POST()
+            post(body: HttpBody<NestedMultipartBody>) {
+                return body;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [NestedMultipartBodyController] });
+        const multipart = makeMultipartBody([
+            { name: 'contact[firstName]', value: 'Ada' },
+            { name: 'contact[active]', value: 'true' },
+            { name: 'participants[1][name]', value: 'Grace' },
+            { name: 'participants[1][age]', value: '85' },
+            { name: 'participants[0][name]', value: 'Ada' },
+            { name: 'participants[0][age]', value: '36' },
+            { name: 'tags[]', value: 'math' },
+            { name: 'tags[]', value: 'programming' }
+        ]);
+        const response = await app.request(
+            new HttpRequest('POST', '/nested-multipart-body', { 'content-type': multipart.contentType }, multipart.body)
+        );
+
+        assert.equal(response.statusCode, 200);
+        assert.deepStrictEqual(response.json, {
+            contact: { firstName: 'Ada', active: true },
+            participants: [
+                { name: 'Ada', age: 36 },
+                { name: 'Grace', age: 85 }
+            ],
+            tags: ['math', 'programming']
+        });
     });
 
     it('requires standalone FileUpload parameters while preserving optional uploads', async () => {
@@ -2087,6 +2201,47 @@ describe('http router', () => {
 
         process.env.APP_ENV = 'test';
         assert.throws(() => createApp({ controllers: [InvalidUploadPolicyController] }), /Invalid FileUpload allowedTypes/);
+    });
+
+    it('rejects nested and array FileUpload body properties at startup', () => {
+        class NestedUploadPart {
+            file!: FileUpload;
+        }
+
+        @http.controller('/invalid-nested-upload')
+        class InvalidNestedUploadController {
+            @http.POST('/nested')
+            nested(_body: HttpBody<{ nested: NestedUploadPart }>) {
+                return {};
+            }
+        }
+
+        @http.controller('/invalid-array-upload')
+        class InvalidArrayUploadController {
+            @http.POST()
+            array(_body: HttpBody<{ files: FileUpload[] }>) {
+                return {};
+            }
+        }
+
+        @http.controller('/invalid-file-name-upload')
+        class InvalidFileNameUploadController {
+            @http.POST()
+            named(_body: HttpBody<{ 'nested[file]': FileUpload }>) {
+                return {};
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        assert.throws(
+            () => createApp({ controllers: [InvalidNestedUploadController] }),
+            /FileUpload body properties must be top-level; found "nested.file"/
+        );
+        assert.throws(
+            () => createApp({ controllers: [InvalidArrayUploadController] }),
+            /FileUpload body properties must be top-level; found "files.\[\]"/
+        );
+        assert.throws(() => createApp({ controllers: [InvalidFileNameUploadController] }), /File field "nested\[file\]" must be a top-level field/);
     });
 
     it('skips eager multipart parsing for bodyless routes while preserving upload guards when bytes are present', async () => {
@@ -2566,6 +2721,78 @@ describe('http router', () => {
 
         assert.equal(response.statusCode, 400);
         assert.deepStrictEqual(response.json, { error: 'Failed to parse multipart JSON payload' });
+    });
+
+    it('rejects unsafe, ambiguous, and oversized multipart form structures', async () => {
+        @http.controller('/guarded-multipart-fields')
+        class GuardedMultipartFieldsController {
+            @http.POST()
+            post(_body: HttpBody<Record<string, unknown>>) {
+                return { ok: true };
+            }
+
+            @http.POST('/file')
+            file(_file: FileUpload) {
+                return { ok: true };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [GuardedMultipartFieldsController] });
+        const invalidBodies = [
+            makeMultipartBody([{ name: '__proto__[polluted]', value: 'yes' }]),
+            makeMultipartBody([{ name: 'items[1]', value: 'sparse' }]),
+            makeMultipartBody([
+                { name: '_payload', value: '{"contact":{"firstName":"Ada"}}' },
+                { name: 'contact[firstName]', value: 'Grace' }
+            ]),
+            makeMultipartBody([
+                { name: '_payload', value: '{}' },
+                { name: '_payload', value: '{}' }
+            ]),
+            makeMultipartBody([{ name: '_payload', value: '{"safe":{"constructor":{"polluted":true}}}' }])
+        ];
+
+        for (const multipart of invalidBodies) {
+            const response = await app.request(
+                new HttpRequest('POST', '/guarded-multipart-fields', { 'content-type': multipart.contentType }, multipart.body)
+            );
+            assert.equal(response.statusCode, 400, JSON.stringify(response.json));
+        }
+
+        const limitedApp = createApp({
+            controllers: [GuardedMultipartFieldsController],
+            defaultConfig: { HTTP_MAX_FORM_FIELDS: 1 }
+        });
+        const tooMany = makeMultipartBody([
+            { name: 'one', value: '1' },
+            { name: 'two', value: '2' }
+        ]);
+        const limitedResponse = await limitedApp.request(
+            new HttpRequest('POST', '/guarded-multipart-fields', { 'content-type': tooMany.contentType }, tooMany.body)
+        );
+        assert.equal(limitedResponse.statusCode, 413);
+        assert.deepStrictEqual(limitedResponse.json, { error: 'Form contains too many fields' });
+
+        const before = listUploadTempDirs();
+        const nestedFile = makeMultipartBody([{ name: 'file[nested]', filename: 'nested.txt', contentType: 'text/plain', value: 'nested' }]);
+        const nestedFileResponse = await app.request(
+            new HttpRequest('POST', '/guarded-multipart-fields/file', { 'content-type': nestedFile.contentType }, nestedFile.body)
+        );
+        assert.equal(nestedFileResponse.statusCode, 400);
+        assert.match(nestedFileResponse.json.error, /must be a top-level field/);
+        assert.deepStrictEqual(listUploadTempDirs(), before);
+
+        const collision = makeMultipartBody([
+            { name: 'file', value: 'text' },
+            { name: 'file', filename: 'file.txt', contentType: 'text/plain', value: 'binary' }
+        ]);
+        const collisionResponse = await app.request(
+            new HttpRequest('POST', '/guarded-multipart-fields/file', { 'content-type': collision.contentType }, collision.body)
+        );
+        assert.equal(collisionResponse.statusCode, 400);
+        assert.match(collisionResponse.json.error, /Conflicting form field values/);
+        assert.deepStrictEqual(listUploadTempDirs(), before);
     });
 
     it('normalizes malformed multipart bodies while preserving request body guard errors', async () => {

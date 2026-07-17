@@ -103,6 +103,10 @@ export class BaseAppConfig {
     HEALTHZ_ENABLE_REQUEST_LOGGING: boolean = false;
     HTTP_MAX_REQUEST_BODY_BYTES: number = 100 * 1024 * 1024;
     HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES: number = 25 * 1024 * 1024;
+    HTTP_MAX_FORM_FIELDS: number = 10_000;
+    HTTP_MAX_FORM_FIELD_NAME_LENGTH: number = 2_048;
+    HTTP_MAX_FORM_DEPTH: number = 16;
+    HTTP_MAX_FORM_ARRAY_INDEX: number = 10_000;
 
     MAIL_FROM?: string;
     MAIL_FROM_NAME?: string;

@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 
 import { uuid7 } from '../helpers';
 import { HttpBadRequestError, HttpError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
+import { assertTopLevelFormFieldName, FormBodyBuilder } from './form-body';
 import type { HttpRequest } from './request';
 
 export type FileUploadAllowedTypes = readonly string[] | string;
@@ -71,38 +72,67 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
     let parser: ReturnType<typeof busboy>;
     try {
         parser = busboy({
-            headers: { 'content-type': contentType }
+            headers: { 'content-type': contentType },
+            limits: {
+                fields: request.bodyLimits.maxFormFields,
+                fieldNameSize: request.bodyLimits.maxFormFieldNameLength
+            }
         });
     } catch {
         throw new HttpBadRequestError('Failed to parse multipart body');
     }
 
-    const fields: Record<string, unknown> = {};
-    const uploadedFiles: UploadedFiles = {};
+    const fields = new FormBodyBuilder(request.bodyLimits);
+    const uploadedFiles: UploadedFiles = Object.create(null);
     const fileWrites: Array<Promise<{ name: string; upload: FileUpload }>> = [];
     const uploadDir = await mkdtemp(join(tmpdir(), 'tsf-upload-'));
     getUploadTempDirs(request).push(uploadDir);
     const fileWriteErrors = new Set<unknown>();
     let multipartError: HttpError | undefined;
+    let jsonPayload: Record<string, unknown> | undefined;
 
-    parser.on('field', (name, value) => {
+    parser.on('field', (name, value, info) => {
+        if (info.nameTruncated) {
+            multipartError ??= new HttpPayloadTooLargeError('Form field name is too long');
+            return;
+        }
+        if (info.valueTruncated) {
+            multipartError ??= new HttpPayloadTooLargeError(`Form field "${name}" is too large`);
+            return;
+        }
         if (name === multipartJsonKey) {
             try {
+                if (jsonPayload !== undefined) throw new Error('Multipart JSON payload may only be provided once');
                 const parsed = value ? JSON.parse(value) : {};
                 if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
                     throw new Error('Multipart JSON payload must be an object');
                 }
-                Object.assign(fields, parsed);
+                jsonPayload = parsed as Record<string, unknown>;
             } catch {
                 multipartError ??= new HttpBadRequestError('Failed to parse multipart JSON payload');
             }
             return;
         }
 
-        assignMultiValue(fields, name, value);
+        try {
+            fields.add(name, value);
+        } catch (error) {
+            multipartError ??= normalizeMultipartFieldError(error);
+        }
+    });
+
+    parser.on('fieldsLimit', () => {
+        multipartError ??= new HttpPayloadTooLargeError('Form contains too many fields');
     });
 
     parser.on('file', (name, file, info) => {
+        try {
+            assertTopLevelFormFieldName(name, request.bodyLimits);
+        } catch (error) {
+            multipartError ??= normalizeMultipartFieldError(error);
+            file.resume();
+            return;
+        }
         const filePolicy = policy.files?.[name];
         if (!filePolicy && policy.rejectUndeclaredFiles) {
             multipartError ??= new HttpBadRequestError(`Unexpected file field "${name}"`);
@@ -121,6 +151,7 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
     try {
         await pipeline(request.stream, parser);
         if (multipartError) throw multipartError;
+        if (jsonPayload) fields.mergeObject(jsonPayload);
         completedFiles = await Promise.all(fileWrites);
     } catch (error) {
         await Promise.allSettled(fileWrites);
@@ -129,12 +160,14 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
     }
     // Promise.all preserves the parser's file-event order even when a later,
     // smaller upload finishes writing first.
+    const fileFields = new FormBodyBuilder(request.bodyLimits);
     for (const { name, upload } of completedFiles) {
         assignMultiValue(uploadedFiles, name, upload);
-        assignMultiValue(fields, name, upload);
+        fileFields.addTopLevelFile(name, upload);
     }
 
-    return { body: fields, uploadedFiles };
+    fields.merge(fileFields);
+    return { body: fields.build(), uploadedFiles };
 }
 
 export function parseByteSize(value: unknown): number | undefined {
@@ -293,7 +326,7 @@ export async function cleanupUploadedFiles(request: HttpRequest): Promise<void> 
     if (!uploadDirs.length) return;
 
     request.store[UploadTempDirsSymbol] = [];
-    request.uploadedFiles = {};
+    request.uploadedFiles = Object.create(null);
     await Promise.all(uploadDirs.map(dir => rm(dir, { recursive: true, force: true })));
 }
 
@@ -311,6 +344,10 @@ function assignMultiValue<T>(target: Record<string, T | T[]>, name: string, valu
     } else {
         target[name] = [current, value];
     }
+}
+
+function normalizeMultipartFieldError(error: unknown): HttpError {
+    return error instanceof HttpError ? error : new HttpBadRequestError('Failed to parse multipart body');
 }
 
 function normalizeMimeType(value: string): string {

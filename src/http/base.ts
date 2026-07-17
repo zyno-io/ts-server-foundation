@@ -70,7 +70,11 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
         request.trustProxyHeaders = this.options.config.USE_REAL_IP_HEADER === true;
         request.setBodyLimits({
             maxBodyBytes: this.options.config.HTTP_MAX_REQUEST_BODY_BYTES,
-            maxCompressedBodyBytes: this.options.config.HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES
+            maxCompressedBodyBytes: this.options.config.HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES,
+            maxFormFields: this.options.config.HTTP_MAX_FORM_FIELDS,
+            maxFormFieldNameLength: this.options.config.HTTP_MAX_FORM_FIELD_NAME_LENGTH,
+            maxFormDepth: this.options.config.HTTP_MAX_FORM_DEPTH,
+            maxFormArrayIndex: this.options.config.HTTP_MAX_FORM_ARRAY_INDEX
         });
         const activeHttpContext = getActiveHttpContext();
         const hasActiveRequestContext = activeHttpContext === request.context;

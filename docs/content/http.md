@@ -135,7 +135,7 @@ Parameters are explicit by default. The router only auto-infers a parameter when
 | `HttpRequest`                             | Current request metadata and guarded body readers.                                       |
 | `HttpRequestStream`                       | Raw request stream escape hatch. Bypasses body parsing and guards.                       |
 | `HttpResponse`                            | Current response object for imperative writes.                                           |
-| `HttpBody<T>`                             | Parsed JSON body or parsed multipart `_payload` object; one per route.                   |
+| `HttpBody<T>`                             | Parsed JSON, URL-encoded, or multipart body; one per route.                              |
 | `HttpQueries<T>`                          | Full query object.                                                                       |
 | `HttpQuery<T>`                            | Query value matching the parameter name.                                                 |
 | `HttpQuery<T, { name: 'key' }>`           | Query value from an explicit key.                                                        |
@@ -193,7 +193,7 @@ Controller-facing values from `HttpBody<T>`, `HttpQueries<T>`, `HttpQuery<T>`, `
 
 ```text
 request bytes or URL strings
-  -> JSON/multipart parsing when needed
+  -> JSON/form/multipart parsing when needed
   -> HTTP normalization
   -> reflected deserialization
   -> reflected validation
@@ -261,7 +261,7 @@ The full helper set is `getCachedValue`, `setCachedValue`, `hasCachedValue`, `cl
 
 ## Bodies And Streams
 
-JSON body parsing happens when a route resolves `HttpBody<T>`. Multipart requests with body bytes are guarded eagerly; file parts are rejected unless the route explicitly declares matching `FileUpload` fields. Bodyless routes without parsed body parameters do not parse multipart input merely because the request carries a multipart `Content-Type`, including bodyless external-auth subrequests whose method was overridden to `POST`.
+JSON and URL-encoded body parsing happen when a route resolves `HttpBody<T>`. Multipart requests with body bytes are guarded eagerly; file parts are rejected unless the route explicitly declares matching `FileUpload` fields. Bodyless routes without parsed body parameters do not parse multipart input merely because the request carries a multipart `Content-Type`, including bodyless external-auth subrequests whose method was overridden to `POST`.
 
 `HttpRequest.readBodyBuffer()` and `HttpRequest.readBodyText()` decode supported request content encodings, enforce request size limits, and cache the consumed body on `request.body`. They are safe to call more than once; later calls resolve from the cached buffer. For an incoming Node request, `request.body` remains unset until a guarded read consumes it. In-memory requests constructed with a buffer, string, object, or `.multiPart()` set `request.body` immediately.
 
@@ -269,7 +269,26 @@ Guarded reads accept an absent encoding or `identity`, plus `gzip` and `x-gzip`.
 
 Compressed bytes are limited by `HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES` and decoded or identity bytes by `HTTP_MAX_REQUEST_BODY_BYTES`. A numeric `content-length` above the applicable limit is rejected before streaming, while the byte transforms still enforce the real size when the header is missing, invalid, or too small.
 
-`HttpRequestStream` deliberately bypasses content decoding, both byte limits, `content-length` rejection, JSON/multipart parsing, and upload guards. Routes combining it with `HttpBody<T>` or `FileUpload` fail registration.
+### Form-Encoded Objects
+
+`application/x-www-form-urlencoded` bodies and multipart text fields share one bracket-based object notation:
+
+```text
+contact[firstName]=Ada
+contact[address][city]=London
+tags[]=math
+tags[]=programming
+participants[0][name]=Ada
+participants[1][name]=Grace
+```
+
+`[property]` traverses an object, canonical non-negative indexes such as `[0]` traverse an array, and terminal `[]` appends an array value. Arrays of objects use explicit indexes; append notation is terminal. Repeating the exact same leaf name, such as `tag=one&tag=two`, also produces an ordered array. Dots are literal characters in property names rather than traversal syntax.
+
+The root is always an object. Indexed arrays must be contiguous from zero when parsing finishes, and one array cannot mix append and indexed notation. Scalar/container conflicts, object/array conflicts, malformed brackets, non-canonical indexes, and the property names `__proto__`, `prototype`, and `constructor` return HTTP `400`. Form objects are materialized with null prototypes.
+
+Form structure is bounded independently of body bytes by `HTTP_MAX_FORM_FIELDS`, `HTTP_MAX_FORM_FIELD_NAME_LENGTH`, `HTTP_MAX_FORM_DEPTH`, and `HTTP_MAX_FORM_ARRAY_INDEX`. Exceeding one of those limits returns HTTP `413`. `request.setBodyLimits()` can lower the same limits for an individual request before its non-multipart body is resolved.
+
+`HttpRequestStream` deliberately bypasses content decoding, both byte limits, `content-length` rejection, JSON/form/multipart parsing, and upload guards. Routes combining it with `HttpBody<T>` or `FileUpload` fail registration.
 
 In-memory object builders are a convenience boundary, not a wire-parser simulation: `HttpRequest.POST(url, object)` and `.json(object)` prepopulate `parsedBody`, so an `HttpBody<T>` route skips byte decoding and JSON parsing. Use a string or buffer with headers, or a real Node request, when testing encodings, malformed JSON, and byte limits. Both transports otherwise share CORS, static routing, route matching, parameter deserialization, middleware, handler, and observer behavior.
 
@@ -298,7 +317,9 @@ class FileController {
 }
 ```
 
-Multipart field `_payload` is parsed as JSON and merged into the body object. Other text fields are also included. Multiple values for the same field are represented as arrays.
+Multipart field `_payload` is parsed as JSON and structurally merged into the body object. Other text fields use the bracket notation above. Disjoint object properties may merge, while duplicate values and incompatible structures return HTTP `400`. Multiple values for the same text field are represented as arrays.
+
+File parts remain top-level only: their names cannot use bracket notation. A `FileUpload` property nested inside another DTO property, or inside an array, fails route registration.
 
 Multipart parsing runs before middleware for routes that declare `HttpBody<T>` or `FileUpload`, and remains guarded on routes without parsed parameters whenever request body bytes are present so undeclared file uploads are rejected. Bodyless routes that inject only `HttpRequest`, or use only custom parameter resolvers, do not parse multipart input eagerly. Use `HttpRequestStream` when the controller must consume the raw multipart bytes without parsing or temporary upload files. Temporary upload directories are automatically removed after request handling completes, including error responses.
 

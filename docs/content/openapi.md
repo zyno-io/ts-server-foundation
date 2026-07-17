@@ -61,7 +61,7 @@ The first paragraph of a route method's JSDoc becomes the OpenAPI operation `sum
 
 Bodies with a required `FileUpload` are documented only as `multipart/form-data`. If every file in the body is optional or nullable, the same schema is exposed for both `application/json` and `multipart/form-data`, allowing requests that omit the files to remain ordinary JSON. A standalone `FileUpload` controller parameter always makes the operation multipart; required and optional standalone parameters are reflected in the multipart schema and request-body requiredness. File constraints are emitted as `x-maxSizeBytes`, `x-allowedTypes`, and multipart encoding content types.
 
-File requiredness is discovered recursively for OpenAPI media-type selection. A required nested object containing a required file therefore makes the body multipart-only, while an optional nested object permits both JSON and multipart schemas. This is schema behavior only: the runtime multipart parser assigns file parts to top-level fields, so flatten upload DTO properties instead of relying on automatic population of `nested.file`.
+`FileUpload` body properties must be top-level. Nested file properties and arrays of `FileUpload` fail route registration, keeping the generated schema aligned with what the multipart runtime can populate.
 
 ## Responses
 

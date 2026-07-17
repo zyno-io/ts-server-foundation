@@ -106,6 +106,12 @@ export interface EnvObject {
 
     HTTP_REQUEST_LOGGING_MODE?: string;
     HEALTHZ_ENABLE_REQUEST_LOGGING?: string;
+    HTTP_MAX_REQUEST_BODY_BYTES?: string;
+    HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES?: string;
+    HTTP_MAX_FORM_FIELDS?: string;
+    HTTP_MAX_FORM_FIELD_NAME_LENGTH?: string;
+    HTTP_MAX_FORM_DEPTH?: string;
+    HTTP_MAX_FORM_ARRAY_INDEX?: string;
     ENABLE_PINO_PRETTY?: string;
     ENABLE_PINO_SINGLE_LINE?: string;
     LOG_LEVEL?: string;

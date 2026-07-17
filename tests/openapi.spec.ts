@@ -89,18 +89,6 @@ class OpenApiNestedUploadBody {
     caption?: string;
 }
 
-class OpenApiNestedUploadPart {
-    file!: FileUpload<{ allowedTypes: 'image/png' }>;
-}
-
-class OpenApiDeepRequiredUploadBody {
-    nested!: OpenApiNestedUploadPart;
-}
-
-class OpenApiDeepOptionalUploadBody {
-    nested?: OpenApiNestedUploadPart;
-}
-
 class OpenApiDraftAttachmentFields {
     title!: string;
     attachment!: FileUpload<{ maxSize: '2MB'; allowedTypes: 'application/pdf' }> | null;
@@ -409,16 +397,6 @@ class OpenApiUsersController {
 
     @http.POST('/nested-upload')
     async uploadNested(_body: HttpBody<OpenApiNestedUploadBody>): Promise<OpenApiUserDto> {
-        return new OpenApiUserDto();
-    }
-
-    @http.POST('/deep-required-upload')
-    async uploadDeepRequired(_body: HttpBody<OpenApiDeepRequiredUploadBody>): Promise<OpenApiUserDto> {
-        return new OpenApiUserDto();
-    }
-
-    @http.POST('/deep-optional-upload')
-    async uploadDeepOptional(_body: HttpBody<OpenApiDeepOptionalUploadBody>): Promise<OpenApiUserDto> {
         return new OpenApiUserDto();
     }
 
@@ -912,17 +890,6 @@ describe('openapi', () => {
         assert.equal(optionalDirectUpload?.required, false);
         assert.equal(schemaObject(optionalDirectUploadSchema.properties?.file).format, 'binary');
         assert.equal(optionalDirectUploadSchema.required, undefined);
-
-        const deepRequiredContent = doc.paths['/users/deep-required-upload'].post?.requestBody?.content;
-        assert.equal(deepRequiredContent?.['application/json'], undefined);
-        assert.equal(referenceObject(deepRequiredContent?.['multipart/form-data'].schema).$ref, '#/components/schemas/OpenApiDeepRequiredUploadBody');
-        assert.deepStrictEqual(doc.components?.schemas?.OpenApiDeepRequiredUploadBody?.required, ['nested']);
-        assert.deepStrictEqual(doc.components?.schemas?.OpenApiNestedUploadPart?.required, ['file']);
-
-        const deepOptionalContent = doc.paths['/users/deep-optional-upload'].post?.requestBody?.content;
-        assert.ok(deepOptionalContent?.['application/json']);
-        assert.ok(deepOptionalContent?.['multipart/form-data']);
-        assert.deepStrictEqual(deepOptionalContent?.['application/json'].schema, deepOptionalContent?.['multipart/form-data'].schema);
 
         const nestedUploadContent = doc.paths['/users/nested-upload'].post?.requestBody?.content;
         assert.equal(nestedUploadContent?.['application/json'], undefined);

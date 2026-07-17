@@ -3,6 +3,7 @@ import { PassThrough, Readable, Transform, pipeline } from 'node:stream';
 import { createGunzip } from 'node:zlib';
 
 import { HttpBadRequestError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
+import { defaultFormBodyLimits, type FormBodyLimits } from './form-body';
 import type { UploadedFiles } from './uploads';
 
 export type KnownHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD';
@@ -18,14 +19,15 @@ export interface MultipartRequestPart {
     contentType?: string;
 }
 
-export interface HttpRequestBodyLimits {
+export interface HttpRequestBodyLimits extends FormBodyLimits {
     maxBodyBytes: number;
     maxCompressedBodyBytes: number;
 }
 
 export const defaultHttpRequestBodyLimits: HttpRequestBodyLimits = {
     maxBodyBytes: 100 * 1024 * 1024,
-    maxCompressedBodyBytes: 25 * 1024 * 1024
+    maxCompressedBodyBytes: 25 * 1024 * 1024,
+    ...defaultFormBodyLimits
 };
 
 export class HttpRequest extends Readable {
@@ -36,7 +38,7 @@ export class HttpRequest extends Readable {
     readonly headers: HttpRequestHeaders;
     body?: Buffer;
     parsedBody?: unknown;
-    uploadedFiles: UploadedFiles = {};
+    uploadedFiles: UploadedFiles = Object.create(null);
     pathParams: Record<string, string> = {};
     remoteAddress = '127.0.0.1';
     socket: Pick<Socket, 'remoteAddress'> = { remoteAddress: this.remoteAddress };

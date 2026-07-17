@@ -106,7 +106,7 @@ Env.PORT; // "8080"
 
 The runtime recognizes these built-in config and environment keys. Most are reflected `BaseAppConfig` properties; early telemetry bootstrap also reads its `OTEL_*` controls directly from `Env`:
 
-- application and HTTP: `APP_ENV`, `DEVCONSOLE_ENABLED`, `PORT`, `USE_REAL_IP_HEADER`, `HTTP_MAX_REQUEST_BODY_BYTES`, `HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES`
+- application and HTTP: `APP_ENV`, `DEVCONSOLE_ENABLED`, `PORT`, `USE_REAL_IP_HEADER`, `HTTP_MAX_REQUEST_BODY_BYTES`, `HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES`, `HTTP_MAX_FORM_FIELDS`, `HTTP_MAX_FORM_FIELD_NAME_LENGTH`, `HTTP_MAX_FORM_DEPTH`, `HTTP_MAX_FORM_ARRAY_INDEX`
 - database: `DB_ADAPTER`, `MYSQL_*`, `PG_*`
 - auth: `AUTH_JWT_*`, `AUTH_BASIC_SECRET`
 - Redis and workers: `REDIS_*`, `CACHE_REDIS_*`, `MUTEX_REDIS_*`, `BROADCAST_REDIS_*`, `MESH_REDIS_*`, `BULL_REDIS_*`, `BULL_QUEUE`, `MUTEX_MODE`, `ENABLE_JOB_RUNNER`

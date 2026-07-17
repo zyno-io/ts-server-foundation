@@ -25,6 +25,7 @@ import {
     type RouteParameterResolverObject
 } from './decorators';
 import { HttpBadRequestError, HttpError, HttpNotFoundError, HttpUnauthorizedError } from './errors';
+import { assertTopLevelFormFieldName, defaultFormBodyLimits, parseFormUrlEncodedBody } from './form-body';
 import type { HttpMiddleware, HttpMiddlewareInput } from './middleware';
 import { HttpRequest, HttpRequestStream } from './request';
 import type { HttpMethod } from './request';
@@ -460,7 +461,7 @@ export class HttpRouter {
         const text = await request.readBodyText();
         if (!text) return undefined;
         if (isFormUrlEncodedRequest(request)) {
-            request.parsedBody = parseFormUrlEncodedBody(text);
+            request.parsedBody = parseFormUrlEncodedBody(text, request.bodyLimits);
             return request.parsedBody;
         }
         try {
@@ -520,17 +521,6 @@ function isFormUrlEncodedRequest(request: HttpRequest): boolean {
     return /^application\/x-www-form-urlencoded(?:\s*;|$)/i.test(request.headers['content-type'] ?? '');
 }
 
-function parseFormUrlEncodedBody(text: string): Record<string, string | string[]> {
-    const body: Record<string, string | string[]> = Object.create(null);
-    for (const [name, value] of new URLSearchParams(text)) {
-        const current = body[name];
-        if (current === undefined) body[name] = value;
-        else if (Array.isArray(current)) current.push(value);
-        else body[name] = [current, value];
-    }
-    return body;
-}
-
 function getParameterPlanName(parameter: HttpRouteParameterPlan): string | undefined {
     return 'name' in parameter ? parameter.name : undefined;
 }
@@ -541,7 +531,7 @@ function normalizeGlobalRouteParameterResolvers(registry?: RouteParameterResolve
 }
 
 function compileMultipartRequestPolicy(parameters: HttpRouteParameterPlan[]): MultipartRequestPolicy {
-    const files: Record<string, FileUploadPolicy> = {};
+    const files: Record<string, FileUploadPolicy> = Object.create(null);
     for (const parameter of parameters) {
         if (parameter.kind === 'file') {
             addFileUploadPolicy(files, parameter.name, fileUploadPolicyFromType(parameter.type));
@@ -565,47 +555,61 @@ function isBodylessRequest(request: HttpRequest): boolean {
     return request.headers['transfer-encoding'] === undefined;
 }
 
-function collectFileUploadPolicies(type: Type, files: Record<string, FileUploadPolicy>, fieldName?: string, seen = new Set<Type>()): void {
+function collectFileUploadPolicies(type: Type, files: Record<string, FileUploadPolicy>, path: string[] = [], seen = new Set<Type>()): void {
     if (seen.has(type)) return;
     seen.add(type);
 
-    if (isReflectedClass(type, FileUpload)) {
-        if (fieldName) addFileUploadPolicy(files, fieldName, fileUploadPolicyFromType(type));
-        return;
-    }
-
-    if (type.kind === ReflectionKind.union || type.kind === ReflectionKind.intersection) {
-        const merged = mergedIntersectionStructuredType(type);
-        if (merged) {
-            collectFileUploadPolicies(merged, files, fieldName, seen);
+    try {
+        if (isReflectedClass(type, FileUpload)) {
+            if (path.length !== 1) {
+                const location = path.length ? path.join('.') : '<body>';
+                throw new Error(`FileUpload body properties must be top-level; found "${location}"`);
+            }
+            addFileUploadPolicy(files, path[0], fileUploadPolicyFromType(type));
             return;
         }
-        for (const item of type.types) collectFileUploadPolicies(item, files, fieldName, seen);
-        return;
-    }
 
-    if (type.kind === ReflectionKind.objectLiteral) {
-        for (const property of getStructuredTypeProperties(type)) {
-            collectFileUploadPolicies(property.type, files, String(property.name), seen);
-        }
-        return;
-    }
-
-    if (type.kind === ReflectionKind.class && typeof type.classType === 'function' && type.classType.prototype) {
-        if (type.classType === Date || type.classType === Buffer || type.classType === Uint8Array) return;
-        let reflection: ReflectionClass;
-        try {
-            reflection = ReflectionClass.from(type.classType);
-        } catch {
+        if (type.kind === ReflectionKind.union || type.kind === ReflectionKind.intersection) {
+            const merged = mergedIntersectionStructuredType(type);
+            if (merged) {
+                collectFileUploadPolicies(merged, files, path, seen);
+                return;
+            }
+            for (const item of type.types) collectFileUploadPolicies(item, files, path, seen);
             return;
         }
-        for (const property of reflection.getProperties()) {
-            collectFileUploadPolicies(property.getType(), files, String(property.name), seen);
+
+        if (type.kind === ReflectionKind.array) {
+            collectFileUploadPolicies(type.type, files, [...path, '[]'], seen);
+            return;
         }
+
+        if (type.kind === ReflectionKind.objectLiteral) {
+            for (const property of getStructuredTypeProperties(type)) {
+                collectFileUploadPolicies(property.type, files, [...path, String(property.name)], seen);
+            }
+            return;
+        }
+
+        if (type.kind === ReflectionKind.class && typeof type.classType === 'function' && type.classType.prototype) {
+            if (type.classType === Date || type.classType === Buffer || type.classType === Uint8Array) return;
+            let reflection: ReflectionClass;
+            try {
+                reflection = ReflectionClass.from(type.classType);
+            } catch {
+                return;
+            }
+            for (const property of reflection.getProperties()) {
+                collectFileUploadPolicies(property.getType(), files, [...path, String(property.name)], seen);
+            }
+        }
+    } finally {
+        seen.delete(type);
     }
 }
 
 function addFileUploadPolicy(files: Record<string, FileUploadPolicy>, name: string, policy: FileUploadPolicy): void {
+    assertTopLevelFormFieldName(name, defaultFormBodyLimits);
     const existing = files[name];
     if (!existing) {
         files[name] = policy;

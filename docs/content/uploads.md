@@ -53,14 +53,17 @@ The multipart part `Content-Type` must match `allowedTypes` before the file is w
 
 ## Multipart Body Fields
 
-Regular multipart fields are merged into the parsed body. A field named `_payload` is parsed as JSON and merged into the body object.
+Regular multipart text fields are expanded with the same bracket notation as URL-encoded bodies. A field named `_payload` is parsed as JSON and structurally merged into the body object.
 
 ```text
 _payload={"description":"Profile photo"}
+metadata[category]=avatar
 file=<binary>
 ```
 
-If multiple text fields use the same name, the parsed body stores them in order as an array; declare the corresponding DTO property as an array. Duplicate files are arrays in `request.uploadedFiles` and the raw parsed body. A standalone `FileUpload` parameter selects the first file under its name. If its named field is absent, it falls back only when exactly one file exists across the route's other declared upload fields.
+`[property]` traverses an object, `[0]` addresses an array index, and terminal `[]` appends an array value. If multiple text fields use the same exact name, the parsed body stores them in order as an array; declare the corresponding DTO property as an array. `_payload` and text fields may contribute disjoint properties to the same object, but duplicate values and incompatible structures are rejected instead of overwriting one another.
+
+Duplicate files are arrays in `request.uploadedFiles` and the raw parsed body. A standalone `FileUpload` parameter selects the first file under its name. If its named field is absent, it falls back only when exactly one file exists across the route's other declared upload fields.
 
 Typed multi-file body properties are not supported: `file: FileUpload` expects one file and rejects the duplicate-file array. Use `HttpRequest.uploadedFiles` when an endpoint intentionally accepts repeated files, and apply application-level checks to the array.
 
@@ -83,11 +86,11 @@ class AttachmentController {
 
 For OpenAPI, a required body file makes the request multipart-only. When all body files are optional or nullable, the operation advertises both JSON (for requests without files) and multipart content.
 
-Keep runtime upload properties at the top level of the body DTO. Multipart file parts are assigned by their flat field name; a nested `nested.file: FileUpload` schema cannot be populated automatically from a file part.
+File parts and `FileUpload` body properties must be top-level. File part names cannot use bracket notation, and a nested `nested.file: FileUpload` or `FileUpload[]` body declaration fails route registration.
 
 ## Cleanup
 
-Uploaded files are written to a temporary directory created with the `tsf-upload-` prefix. The `onResponse` workflow runs while uploaded files still exist. Immediately afterward, the HTTP router removes every upload directory in a cleanup `finally`, including JSON/multipart parse failures, MIME and size rejections, controller errors, and failures thrown by `onResponse` listeners.
+Uploaded files are written to a temporary directory created with the `tsf-upload-` prefix. The `onResponse` workflow runs while uploaded files still exist. Immediately afterward, the HTTP router removes every upload directory in a cleanup `finally`, including form/multipart parse failures, MIME and size rejections, controller errors, and failures thrown by `onResponse` listeners.
 
 `FileUpload.path` is request-scoped. Do not store it for later background work without copying the file before the controller returns. By the time `app.http.request()` resolves—or rejects because the final response workflow failed—the temporary path has been removed.
 
