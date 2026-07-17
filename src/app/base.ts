@@ -18,7 +18,15 @@ import {
     type StaticFilesOptions
 } from '../http';
 import { getPackageName } from '../helpers';
-import { createLoggerProviders, ScopedLogger, WorkerQueueRegistry, WorkerRecorderService, WorkerRunnerService, WorkerService } from '../services';
+import {
+    createLoggerProviders,
+    ExtendedLogger,
+    ScopedLogger,
+    WorkerQueueRegistry,
+    WorkerRecorderService,
+    WorkerRunnerService,
+    WorkerService
+} from '../services';
 import { MailService } from '../services/mail';
 import { sql } from '../database/sql';
 import { OpenApiController, dumpOpenApiSchema, shouldDumpOpenApiSchema, shouldExposeOpenApi } from '../openapi';
@@ -123,9 +131,9 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                       WorkerRecorderService,
                       {
                           provide: WorkerRunnerService,
-                          useFactory: (app: App, queueRegistry: WorkerQueueRegistry, recorder: WorkerRecorderService, logger: ScopedLogger) =>
-                              new WorkerRunnerService(app, queueRegistry, recorder, logger),
-                          deps: [App, WorkerQueueRegistry, WorkerRecorderService, ScopedLogger]
+                          useFactory: (app: App, queueRegistry: WorkerQueueRegistry, recorder: WorkerRecorderService, logger: ExtendedLogger) =>
+                              new WorkerRunnerService(app, queueRegistry, recorder, logger.scoped(WorkerRunnerService.name)),
+                          deps: [App, WorkerQueueRegistry, WorkerRecorderService, ExtendedLogger]
                       },
                       WorkerService
                   ]

@@ -38,11 +38,21 @@ export class WorkerService {
             return this.runner.executeQueuedJob(job, options);
         }
 
-        const job = await this.queueRegistry.enqueue(jobClass, data, options);
-        this.logger.info('Queued job', { job: { name: job.name, id: job.id, queue: job.queue } });
+        try {
+            const job = await this.queueRegistry.enqueue(jobClass, data, options);
+            this.logger.info('Queued job', { job: { name: job.name, id: job.id, queue: job.queue } });
 
-        if (!this.queueRegistry.usesBullMq()) this.runner.schedule(job);
-        return job;
+            if (!this.queueRegistry.usesBullMq()) this.runner.schedule(job);
+            return job;
+        } catch (error) {
+            this.logger.error('Failed to queue job', error, {
+                job: {
+                    name: jobClass.name,
+                    queue: this.queueRegistry.getQueueName(jobClass, options)
+                }
+            });
+            throw error;
+        }
     }
 
     async runJob<I extends object, O, T extends BaseJob<I, O>>(

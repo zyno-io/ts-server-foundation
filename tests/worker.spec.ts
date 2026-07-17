@@ -11,8 +11,11 @@ import {
     ExecuteResult,
     getContextProp,
     getRegisteredWorkerJobs,
+    type LogEntry,
     QueryResult,
     QueuedWorkerJob,
+    resetLogSink,
+    setLogSink,
     WorkerJob,
     WorkerQueueRegistry,
     WorkerRunnerService,
@@ -25,6 +28,7 @@ const originalEnv = { ...process.env };
 
 afterEach(async () => {
     process.env = { ...originalEnv };
+    resetLogSink();
     await WorkerQueueRegistry.closeQueues();
 });
 
@@ -93,6 +97,13 @@ class DefaultQueueJob extends BaseJob<{ name: string }, string> {
     }
 }
 
+@WorkerJob({ queueName: 'failures' })
+class FailingJob extends BaseJob<Record<string, never>, void> {
+    handle(_data: Record<string, never>): void {
+        throw new Error('worker exploded');
+    }
+}
+
 @WorkerJob({ queueName: 'daily', cronSchedule: '0 2 * * *' })
 class DailyCronJob extends BaseJob<void, string> {
     handle(): string {
@@ -152,6 +163,76 @@ describe('worker services', () => {
 
         assert.equal(result, undefined);
         assert.deepEqual(app.get(WorkerQueueRegistry).getQueuedJobs('critical'), []);
+    });
+
+    it('logs queueing, registration, execution, and runner lifecycle events', async () => {
+        process.env.APP_ENV = 'test';
+        const entries: LogEntry[] = [];
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            enableWorker: true,
+            providers: [DefaultQueueJob],
+            defaultConfig: { BULL_QUEUE: 'configured' }
+        });
+
+        const queued = (await app.get(WorkerService).queueJob(DefaultQueueJob, { name: 'logged' }, { runInTest: true })) as QueuedWorkerJob;
+        await app.start();
+        await app.stop();
+
+        assert.deepEqual(
+            entries.map(entry => entry.message),
+            ['Queued job', 'Registering job', 'Worker started', 'Job activated', 'Job completed', 'Worker stopping', 'Worker stopped']
+        );
+        assert.deepEqual(
+            entries.map(entry => entry.scope),
+            [
+                'WorkerService',
+                'WorkerRunnerService',
+                'WorkerRunnerService',
+                'WorkerRunnerService',
+                'WorkerRunnerService',
+                'WorkerRunnerService',
+                'WorkerRunnerService'
+            ]
+        );
+        assert.deepEqual(entries[0].data?.job, {
+            name: 'DefaultQueueJob',
+            id: queued.id,
+            queue: 'configured'
+        });
+        assert.deepEqual(entries[1].data?.job, {
+            name: 'DefaultQueueJob',
+            queue: 'configured',
+            schedule: null
+        });
+        assert.deepEqual(entries[3].data?.job, {
+            queue: 'configured',
+            id: queued.id,
+            name: 'DefaultQueueJob',
+            attempt: 1
+        });
+        assert.deepEqual(entries[4].data?.job, entries[3].data?.job);
+    });
+
+    it('logs job execution failures with job identity', async () => {
+        process.env.APP_ENV = 'test';
+        const entries: LogEntry[] = [];
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            enableWorker: true,
+            providers: [FailingJob]
+        });
+
+        await assert.rejects(app.get(WorkerService).runJob(FailingJob, {}), /worker exploded/);
+
+        const failure = entries.find(entry => entry.message === 'Job failed: worker exploded');
+        assert.ok(failure);
+        assert.equal((failure.error as Error).message, 'worker exploded');
+        const loggedJob = failure.data?.job as Record<string, unknown>;
+        assert.equal(loggedJob.queue, 'failures');
+        assert.match(String(loggedJob.id), /^\d+$/);
+        assert.equal(loggedJob.name, 'FailingJob');
+        assert.equal(loggedJob.attempt, 1);
     });
 
     it('runs jobs inline through DI and records executions', async () => {

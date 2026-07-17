@@ -30,29 +30,69 @@ export class WorkerRunnerService {
     async start(): Promise<void> {
         if (this.running) return;
         this.running = true;
+        const registeredJobs = this.getRegisteredJobs();
+        for (const jobClass of registeredJobs) {
+            this.logger.info('Registering job', {
+                job: {
+                    name: jobClass.name,
+                    queue: this.queueRegistry.getQueueName(jobClass),
+                    schedule: jobClass.CRON_SCHEDULE
+                }
+            });
+        }
+
         if (this.queueRegistry.usesBullMq()) {
             await this.startBullMqWorkers();
             await this.scheduleBullMqCronJobs();
+            this.logger.info('Worker started', {
+                backend: 'bullmq',
+                queues: this.getRegisteredQueueNames()
+            });
             return;
         }
 
         this.scheduleCronJobs();
+        this.logger.info('Worker started', {
+            backend: 'memory',
+            queues: this.getRegisteredQueueNames()
+        });
         await this.drainReadyJobs();
     }
 
     async shutdown(): Promise<void> {
+        const wasStarted = this.running || this.timers.size > 0 || this.bullWorkers.size > 0 || this.executing.size > 0;
+        if (!wasStarted) return;
+
         this.running = false;
+        this.logger.info('Worker stopping', {
+            queues: this.getRegisteredQueueNames(),
+            runningJobIds: [...this.executing]
+        });
         for (const timer of this.timers.values()) clearTimeout(timer);
         this.timers.clear();
         for (const cleanup of this.bullWorkerRedisLifecycleCleanup) cleanup();
         this.bullWorkerRedisLifecycleCleanup.clear();
         this.bullWorkerRedisMonitor?.stop();
         this.bullWorkerRedisMonitor = undefined;
-        await Promise.all([...this.bullWorkers.values()].map(worker => worker.close().catch(() => {})));
+        if (this.executing.size) {
+            this.logger.warn('Waiting for jobs to finish', { jobIds: [...this.executing] });
+        }
+        let workerStopFailed = false;
+        await Promise.all(
+            [...this.bullWorkers.entries()].map(async ([queue, worker]) => {
+                try {
+                    await worker.close();
+                } catch (error) {
+                    workerStopFailed = true;
+                    this.logger.error('Failed to stop worker', error, { queue });
+                }
+            })
+        );
         this.bullWorkers.clear();
         while (this.executing.size) {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
+        if (!workerStopFailed) this.logger.info('Worker stopped');
     }
 
     async removeStaleBullMqCronJobs(): Promise<void> {
@@ -80,16 +120,16 @@ export class WorkerRunnerService {
             if (this.timers.has(job.id)) return;
             const timer = setTimeout(() => {
                 this.timers.delete(job.id);
-                this.runScheduledJob(job).catch(error => {
-                    this.logger.error('Queued job failed', error, { job: { name: job.name, id: job.id } });
+                this.runScheduledJob(job, false).catch(error => {
+                    this.logger.error('Queued job failed', error, { job: getJobLogData(job) });
                 });
             }, delay);
             this.timers.set(job.id, timer);
             return;
         }
 
-        this.runScheduledJob(job).catch(error => {
-            this.logger.error('Queued job failed', error, { job: { name: job.name, id: job.id } });
+        this.runScheduledJob(job, false).catch(error => {
+            this.logger.error('Queued job failed', error, { job: getJobLogData(job) });
         });
     }
 
@@ -107,12 +147,17 @@ export class WorkerRunnerService {
     }
 
     async executeQueuedJob<I, O>(job: QueuedWorkerJob<I>, options: IJobOptions = job.options): Promise<WorkerExecutionResult<I, O>> {
+        return this.executeJob(job, options, true);
+    }
+
+    private async executeJob<I, O>(job: QueuedWorkerJob<I>, options: IJobOptions, logFailure: boolean): Promise<WorkerExecutionResult<I, O>> {
         if (this.executing.has(job.id)) throw new Error(`Job ${job.name}:${job.id} is already executing`);
 
         this.executing.add(job.id);
         job.attemptsMade++;
         job.data = this.queueRegistry.normalizeJobData(job.data);
         notifyWorkerObservers({ type: 'active', job });
+        this.logger.info('Job activated', { job: getJobLogData(job) });
         try {
             const result = await withContextData(
                 {
@@ -126,10 +171,14 @@ export class WorkerRunnerService {
             );
             this.queueRegistry.markCompleted(job, result);
             await this.recorder.recordCompleted(job, result, options);
+            this.logger.info('Job completed', { job: getJobLogData(job) });
             return { job, result: result as O };
         } catch (error) {
             const failure = formatFailure(error);
             this.queueRegistry.markFailed(job, failure);
+            if (logFailure) {
+                this.logger.error(`Job failed: ${failure.message}`, error, { job: getJobLogData(job) });
+            }
             await this.recorder.recordFailed(job, failure, options);
             throw error;
         } finally {
@@ -158,9 +207,9 @@ export class WorkerRunnerService {
         this.schedule(next);
     }
 
-    private async runScheduledJob<I, O>(job: QueuedWorkerJob<I>): Promise<WorkerExecutionResult<I, O>> {
+    private async runScheduledJob<I, O>(job: QueuedWorkerJob<I>, logFailure = true): Promise<WorkerExecutionResult<I, O>> {
         try {
-            return await this.executeQueuedJob<I, O>(job);
+            return await this.executeJob<I, O>(job, job.options, logFailure);
         } finally {
             this.rescheduleCronJob(job);
         }
@@ -195,13 +244,17 @@ export class WorkerRunnerService {
                 this.queueRegistry.getBullMqOptions()
             );
             worker.on('failed', (job, error) => {
-                this.logger.error('BullMQ job failed', error, {
+                this.logger.error(`Job failed: ${error.message}`, error, {
                     job: {
                         queue: queueName,
                         id: job?.id,
-                        name: job?.name
+                        name: job?.name,
+                        attempt: job?.attemptsMade
                     }
                 });
+            });
+            worker.on('stalled', jobId => {
+                this.logger.warn('Job stalled', { job: { queue: queueName, id: jobId } });
             });
             worker.on('error', error => {
                 const timer = setTimeout(() => {
@@ -213,6 +266,9 @@ export class WorkerRunnerService {
                     }
                 }, 0);
                 timer.unref?.();
+            });
+            worker.on('ready', () => {
+                this.logger.info('Worker ready', { queue: queueName });
             });
             this.bullWorkers.set(queueName, worker);
             this.bullWorkerRedisLifecycleCleanup.add(
@@ -256,7 +312,7 @@ export class WorkerRunnerService {
     private async executeBullMqJob<I, O>(job: BullJob<BullMqWorkerJobData<I>>): Promise<WorkerExecutionResult<I, O>> {
         const jobClass = this.resolveJobClassByName<I, O>(job.name);
         const queuedJob = this.queueRegistry.fromBullJob(job, jobClass);
-        return this.executeQueuedJob<I, O>(queuedJob, queuedJob.options);
+        return this.executeJob<I, O>(queuedJob, queuedJob.options, false);
     }
 
     private resolveJobClassByName<I, O>(name: string): JobClass<I, O> {
@@ -271,6 +327,10 @@ export class WorkerRunnerService {
             if (this.isRegisteredJob(jobClass)) queues.add(this.queueRegistry.getQueueName(jobClass));
         }
         return [...queues];
+    }
+
+    private getRegisteredJobs(): JobClass[] {
+        return getRegisteredWorkerJobs().filter(jobClass => this.isRegisteredJob(jobClass));
     }
 }
 
@@ -314,6 +374,15 @@ function observeBullWorkerRedisLifecycle(worker: BullWorker, onUnavailable: () =
 function formatFailure(error: unknown): { message: string; stack?: string } {
     if (error instanceof Error) return { message: error.message, stack: error.stack };
     return { message: String(error) };
+}
+
+function getJobLogData(job: QueuedWorkerJob): { queue: string; id: string; name: string; attempt: number } {
+    return {
+        queue: job.queue,
+        id: job.id,
+        name: job.name,
+        attempt: job.attemptsMade
+    };
 }
 
 function getCronDelayMs(schedule: string): number {
