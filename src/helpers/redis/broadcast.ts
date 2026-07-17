@@ -56,8 +56,8 @@ function createSharedBroadcastChannel() {
         },
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        publish: (eventName: string, data: any) => {
-            publishClient.publish(channel, JSON.stringify({ instanceKey: localInstanceKey, eventName, data }));
+        publish: async (eventName: string, data: any): Promise<void> => {
+            await publishClient.publish(channel, JSON.stringify({ instanceKey: localInstanceKey, eventName, data }));
         }
     };
 
@@ -80,9 +80,7 @@ export function createBroadcastChannel<T>(eventName: string, _type?: ReceiveType
             });
         },
 
-        publish: (data: T) => {
-            channel.publish(eventName, data);
-        }
+        publish: (data: T): Promise<void> => channel.publish(eventName, data)
     };
 }
 
@@ -106,8 +104,9 @@ export function createDistributedMethod<T>(options: IDistributedMethodOptions, f
     channel.subscribe(wrappedFn);
 
     // publish & invoke locally when locally executed
-    return (data: T) => {
-        channel.publish(data);
-        return wrappedFn(data);
+    return async (data: T): Promise<void> => {
+        const [publishResult, localResult] = await Promise.allSettled([channel.publish(data), wrappedFn(data)]);
+        if (localResult.status === 'rejected') throw localResult.reason;
+        if (publishResult.status === 'rejected') throw publishResult.reason;
     };
 }
