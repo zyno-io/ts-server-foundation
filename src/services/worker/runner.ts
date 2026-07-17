@@ -109,7 +109,7 @@ export class WorkerRunnerService {
 
         const removed = await this.queueRegistry.removeStaleBullMqJobSchedulers(desiredSchedules);
         for (const scheduler of removed) {
-            this.logger.info('Removed stale BullMQ job scheduler', { job: scheduler });
+            this.logger.info('Deregistered job during migration', { job: scheduler });
         }
     }
 

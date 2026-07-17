@@ -662,6 +662,37 @@ describe('worker services', () => {
         assert.deepEqual(desiredSchedules, [{ queue: 'critical', name: 'ExampleJob', pattern: '* * * * *' }]);
     });
 
+    it('logs jobs deregistered during migration', async () => {
+        process.env.APP_ENV = 'test';
+        const entries: LogEntry[] = [];
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            enableWorker: true,
+            providers: [WorkerDependency, ExampleJob]
+        });
+        const removedScheduler = {
+            queue: 'retired',
+            name: 'RemovedJob',
+            pattern: '0 4 * * *',
+            key: 'RemovedJob:0 4 * * *'
+        };
+        const registry = app.get(WorkerQueueRegistry);
+        registry.removeStaleBullMqJobSchedulers = (async () => [removedScheduler]) as never;
+
+        await app.get(WorkerRunnerService).removeStaleBullMqCronJobs();
+
+        assert.deepEqual(
+            entries.map(entry => ({ scope: entry.scope, message: entry.message, job: entry.data?.job })),
+            [
+                {
+                    scope: 'WorkerRunnerService',
+                    message: 'Deregistered job during migration',
+                    job: removedScheduler
+                }
+            ]
+        );
+    });
+
     it('reconciles real BullMQ job schedulers across queues', async t => {
         const redisHost = process.env.REDIS_HOST;
         if (!redisHost) {
