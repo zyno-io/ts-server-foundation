@@ -870,6 +870,27 @@ void app.run();
         assert.equal(server, undefined);
     });
 
+    it('starts a fresh application REPL through the entrypoint command', async () => {
+        process.env.APP_ENV = 'test';
+        delete process.env.TSF_REPL_ENTRYPOINT_PROBE;
+        process.argv.splice(
+            0,
+            process.argv.length,
+            'node',
+            'dist/src/index.js',
+            'repl',
+            '--eval',
+            'process.env.TSF_REPL_ENTRYPOINT_PROBE = config.APP_ENV, undefined'
+        );
+        const app = createApp({});
+
+        await app.run(0, '127.0.0.1');
+
+        assert.equal(process.env.TSF_REPL_ENTRYPOINT_PROBE, 'test');
+        assert.equal(process.exitCode, originalExitCode);
+        await app.stop();
+    });
+
     it('generates OpenAPI through the app entrypoint command', async () => {
         const dir = makeTempCwd();
         process.env.APP_ENV = 'test';

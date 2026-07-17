@@ -5,6 +5,7 @@ import type { ModuleDefinition, ModuleLike, Provider, Token } from '../di';
 import { EventBus, EventToken, getListenerMethodMetadata } from '../events';
 import { HealthcheckController, HealthcheckService } from '../health';
 import { DevConsoleController, DevConsoleRuntime, shouldEnableDevConsole } from '../devconsole';
+import { runLocalAppRepl } from '../devconsole/repl';
 import {
     HttpRequest,
     HttpResponse,
@@ -337,6 +338,9 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
             case 'openapi:generate':
                 await this.runOpenApiGenerationFromEntrypoint(rest);
                 return true;
+            case 'repl':
+                await runLocalAppRepl(this, rest);
+                return true;
             case undefined:
                 this.printEntrypointUsage();
                 return true;
@@ -360,13 +364,15 @@ Commands:
   worker:start          Start the worker runner and HTTP health checks
   migrate, migrate:run  Run compiled database migrations
   openapi:generate      Write openapi.yaml from registered routes
+  repl                  Start an interactive application REPL
 ${customCommandLines ? `${customCommandLines}\n` : ''}
 
 Examples:
   node ${entrypoint} server:start
   node ${entrypoint} worker:start
   node ${entrypoint} migrate:run
-  node ${entrypoint} openapi:generate`);
+  node ${entrypoint} openapi:generate
+  node ${entrypoint} repl`);
         process.exitCode = 1;
     }
 

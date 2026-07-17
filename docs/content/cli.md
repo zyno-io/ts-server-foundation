@@ -6,12 +6,13 @@ TSF ships application scaffolding, compiler setup, development orchestration, te
 
 | Binary                 | Description                                                                        |
 | ---------------------- | ---------------------------------------------------------------------------------- |
-| `tsf`                  | Umbrella CLI for `create-app`, `test`, and `gen-proto`.                            |
+| `tsf`                  | Umbrella CLI for `create-app`, `test`, `gen-proto`, and `repl`.                    |
 | `ts-server-foundation` | Alias for the umbrella CLI.                                                        |
 | `tsf-create-app`       | Scaffold a new app from `template-app`.                                            |
 | `tsf-dev`              | Build/watch/run/test and application development workflows.                        |
 | `tsf-test`             | Compile-output-aware Node test runner.                                             |
 | `tsf-migrate`          | Create, run, reset, and charset migration commands.                                |
+| `tsf-repl`             | Connect to a running app REPL or start a fresh application REPL.                   |
 | `tsf-gen-proto`        | Generate TypeScript protobuf codecs through `ts-proto`.                            |
 | `tsf-install`          | Configure the supported TypeScript 7/`ttsc` compiler and TSF transform.            |
 | `tsf-update`           | Reserved update command; currently reports that no automatic updater is available. |
@@ -24,6 +25,7 @@ TSF ships application scaffolding, compiler setup, development orchestration, te
 tsf create-app <package-name> [path]
 tsf test [node-test-options] [test-files-or-dirs...]
 tsf gen-proto <proto-file-or-dir> <output-dir> [options]
+tsf repl [options]
 ```
 
 The standalone names remain useful in package scripts and when a command needs to be invoked directly.
@@ -61,6 +63,7 @@ All commands resolve the project root from the working directory. `-p <file>` an
 | `clean`                                   | Removes `dist/`.                                                                                        |
 | `build [--watch]`                         | Cleans when needed and compiles with the installed `ttsc`.                                              |
 | `run [--debug] [script] -- <app-command>` | Ensures a watch build, then starts Node with source maps, file watching, and the requested app command. |
+| `repl [--debug] [script]`                 | Builds and starts a fresh application REPL process.                                                     |
 | `test [--debug]`                          | Builds the test config and delegates to `tsf-test`.                                                     |
 | `migrate [--debug]`                       | Builds, then invokes the package entrypoint with `migrate:run`.                                         |
 | `migrate:create [--debug]`                | Builds, then delegates to `tsf-migrate create`.                                                         |
@@ -95,6 +98,32 @@ Arguments before `--` belong to `tsf-dev`; arguments after it are passed to the 
 The first `tsf-dev run` for a project owns the compiler watcher. Concurrent run processes share its build-ready state instead of starting duplicate compilers. If an existing output fingerprint is fresh, the watcher waits for an input change before compiling again.
 
 Normal run mode enables the Node inspector. `--debug` changes it to `--inspect-brk`. When `PORT` is set, the inspector uses `PORT + 1000`; otherwise Node selects/reports its inspector port.
+
+## Application REPL
+
+```bash
+tsf repl
+tsf repl --existing
+tsf repl --pid 12345
+tsf repl --url http://localhost:4000
+tsf repl --new
+tsf repl --eval 'process.pid'
+```
+
+`tsf repl` connects to the existing `tsf-dev run` application for the current project by default. `tsf-dev` records each runner PID and, after the application starts listening, the current watched application PID and DevConsole WebSocket URL. Node watch restarts update the application PID in the same run entry.
+
+When exactly one registered application is running, it is selected automatically. Multiple registered processes produce a list and require `--pid`; either the application PID or its `tsf-dev` runner PID can be used. `--url` bypasses process discovery and accepts a localhost HTTP, HTTPS, WebSocket, or secure WebSocket URL. DevConsole remains localhost-only.
+
+`--existing` makes the default intent explicit. It never falls back to starting another application. `--new` instead performs a freshness-aware build and starts the application entrypoint with its built-in `repl` command. It may be combined with `--script`, `-p`/`--tsconfig`, `--debug`, or `--eval`. Existing-target options and `--new` are mutually exclusive.
+
+Both modes expose `app`, `container`, `config`, an optional `db`, `resolve`, `r`, `$`, `process`, `Buffer`, and `inspect`. Existing-process mode evaluates through the same DevConsole SRPC methods as the browser REPL and supports terminal history, multiline input, completion, same-endpoint reconnection, `.exit`, Ctrl+C, and Ctrl+D. `--eval` evaluates once without opening an interactive terminal and returns a failing status for evaluation errors.
+
+The direct compiled-entrypoint equivalent of new-process mode is:
+
+```bash
+node . repl
+node . repl --eval 'config.APP_ENV'
+```
 
 ### Tests
 

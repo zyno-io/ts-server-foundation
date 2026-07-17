@@ -1,5 +1,4 @@
 import type { Server } from 'node:http';
-import { inspect } from 'node:util';
 
 import { BaseDatabase, getEntityMetadata, renderSql, sql } from '../database';
 import { HealthcheckService } from '../health';
@@ -17,6 +16,7 @@ import {
     type DevConsoleServerMessage as DCServerMsg
 } from './generated/devconsole';
 import { isLocalhostIncomingMessage } from './security';
+import { createReplContext, evaluateReplCode } from './repl';
 import type { DevConsoleStore } from './store';
 
 const SECRET_MASK_PATTERNS = ['SECRET', 'PASSWORD', 'DSN', 'TOKEN', 'KEY'];
@@ -263,29 +263,7 @@ export class DevConsoleSrpcServer {
     }
 
     private async handleReplEval(code: string): Promise<{ output: string; error?: string }> {
-        const logs: string[] = [];
-        const capture = (...args: unknown[]) =>
-            logs.push(args.map(item => (typeof item === 'string' ? item : inspect(item, { depth: 4, colors: false }))).join(' '));
-        const localConsole = {
-            log: capture,
-            warn: capture,
-            error: capture,
-            info: capture,
-            debug: capture
-        };
-
-        try {
-            const fn = new Function('context', 'console', `with (context) { return eval(${safeJsonStringify(code)}) }`);
-            let result = fn(this.replContext, localConsole);
-            if (result && typeof result === 'object' && typeof result.then === 'function') result = await result;
-            const resultText = result === undefined ? '' : inspect(result, { depth: 4, colors: false });
-            return { output: [...logs, resultText].filter(Boolean).join('\n') };
-        } catch (error) {
-            return {
-                output: logs.join('\n'),
-                error: error instanceof Error ? (error.stack ?? error.message) : String(error)
-            };
-        }
+        return evaluateReplCode(this.replContext, code);
     }
 
     private handleReplComplete(code: string, cursorPos: number): { items: UReplCompleteItem[]; replaceStart: number; replaceEnd: number } {
@@ -346,22 +324,6 @@ function tryGet<T>(app: App<any>, token: Token<T>): T | undefined {
     } catch {
         return undefined;
     }
-}
-
-function createReplContext(app: App<any>): Record<string, unknown> {
-    const resolve = <T>(token: Token<T>) => app.get(token);
-    return {
-        app,
-        container: app.container,
-        config: app.config,
-        db: tryGet(app, BaseDatabase),
-        resolve,
-        r: resolve,
-        $: resolve,
-        process,
-        Buffer,
-        inspect
-    };
 }
 
 function completeTopLevel(context: Record<string, unknown>, prefix: string): UReplCompleteItem[] {

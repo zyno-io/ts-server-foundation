@@ -8,7 +8,7 @@ The TSF compiler emits reflected type metadata used by validation, OpenAPI, rout
 
 | Document                                                          | Description                                                                                               |
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| [Feature Overview](./overview.md)                                 | Capability map, architecture boundaries, operational model, and links to every detailed feature guide.   |
+| [Feature Overview](./overview.md)                                 | Capability map, architecture boundaries, operational model, and links to every detailed feature guide.    |
 | [Getting Started](./getting-started.md)                           | Installation, app creation, module options, DI, lifecycle, and environment requirements.                  |
 | [Public API](./public-api.md)                                     | Package export surface, root imports, OTel bootstrap imports, and `app.http` boundary.                    |
 | [Dependency Injection](./di.md)                                   | Providers, scopes, request contexts, module exports, and controller/service lifecycle.                    |
@@ -47,6 +47,6 @@ The TSF compiler emits reflected type metadata used by validation, OpenAPI, rout
 | [Helpers](./helpers.md)                              | Async context, promises, objects, JSON, streams, crypto, validation, dates, errors, UUIDs, and Redis helpers. |
 | [Telemetry](./telemetry.md)                          | OpenTelemetry bootstrap, span helpers, metrics endpoint, shutdown, and Sentry helpers.                        |
 | [Testing](./testing.md)                              | Testing facade, mock HTTP requests, isolated test databases, seed hooks, and assertion helpers.               |
-| [CLI Tools](./cli.md)                                | `tsf`, `tsf-dev`, `tsf-test`, `tsf-migrate`, `tsf-gen-proto`, and app scaffolding.                            |
+| [CLI Tools](./cli.md)                                | `tsf`, `tsf-dev`, application REPLs, tests, migrations, protobuf generation, and app scaffolding.             |
 | [Release](./release.md)                              | Build, test, OpenAPI generation, package contents, tarball inspection, and publish checklist.                 |
 | [Documentation Maintenance](./documentation-plan.md) | How to keep the docs aligned with implementation changes.                                                     |

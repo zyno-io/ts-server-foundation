@@ -109,6 +109,8 @@ Interactive JavaScript REPL running in the server's context. Resolve DI tokens w
 
 The context also exposes `app`, `container`, `config`, an optional `db`, `process`, `Buffer`, and `inspect`. REPL code executes inside the server process with application privileges; the localhost restriction is the security boundary, so do not expose or proxy DevConsole to untrusted networks.
 
+The same running-process REPL is available from a terminal with `tsf repl`. It discovers the application started by `tsf-dev` or accepts `--pid`/`--url`; use `tsf repl --new` to build and start a separate application REPL process. See [CLI Tools](./cli.md#application-repl).
+
 ### Environment
 
 Displays application configuration from the config class. Keys containing `SECRET`, `PASSWORD`, `DSN`, `TOKEN`, or `KEY` are masked.

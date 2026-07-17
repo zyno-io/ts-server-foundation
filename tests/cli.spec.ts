@@ -19,7 +19,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, it, mock } from 'node:test';
 
 import { BaseAppConfig } from '../src/app';
+import { getDevStatePaths, pruneDevState, readDevState, registerDevRun, unregisterDevRun, updateDevState } from '../src/cli/dev-state';
 import { genProto } from '../src/cli/tsf-gen-proto';
+import { normalizeReplUrl, parseReplCliArgs, resolveExistingReplTarget } from '../src/cli/tsf-repl';
 import { resolveTestWorkerConcurrency } from '../src/cli/tsf-test';
 import { resetLogSink, setLogSink, type LogEntry } from '../src/services/logger';
 import { waitForTestDatabaseReady } from '../src/testing/database-readiness';
@@ -120,6 +122,169 @@ function installLocalFoundationPackage(projectDir: string, packageRoot: string):
 }
 
 describe('CLI', () => {
+    it('parses REPL modes and normalizes localhost targets', () => {
+        assert.deepStrictEqual(parseReplCliArgs([]), {
+            mode: 'existing',
+            script: '.',
+            debug: false,
+            timeoutMs: 10_000,
+            help: false
+        });
+        assert.deepStrictEqual(parseReplCliArgs(['--new', '--script', 'dist/custom.js', '-p=tsconfig.repl.json', '--eval=process.pid']), {
+            mode: 'new',
+            script: 'dist/custom.js',
+            debug: false,
+            timeoutMs: 10_000,
+            help: false,
+            tsconfig: 'tsconfig.repl.json',
+            evalCode: 'process.pid'
+        });
+        assert.equal(normalizeReplUrl('localhost:3100'), 'ws://localhost:3100/_devconsole/ws');
+        assert.equal(normalizeReplUrl('http://127.0.0.1:3200/_devconsole/'), 'ws://127.0.0.1:3200/_devconsole/ws');
+        assert.equal(normalizeReplUrl('ws://[::1]:3300/_devconsole/ws'), 'ws://[::1]:3300/_devconsole/ws');
+        assert.throws(() => normalizeReplUrl('http://example.com:3000'), /localhost-only/);
+        assert.throws(() => normalizeReplUrl('http://user:password@localhost:3000'), /must not contain credentials/);
+        assert.throws(() => normalizeReplUrl('ftp://localhost/tmp/repl'), /Unsupported REPL URL protocol/);
+        assert.throws(() => normalizeReplUrl('http://localhost:3000/not-devconsole'), /must target/);
+        assert.throws(() => parseReplCliArgs(['--new', '--existing']), /mutually exclusive/);
+        assert.throws(() => parseReplCliArgs(['--pid', '10', '--url', 'localhost:3000']), /mutually exclusive/);
+        assert.throws(() => parseReplCliArgs(['--new', '--pid', '10']), /cannot be combined/);
+        assert.throws(() => parseReplCliArgs(['--existing', '--script', 'dist/custom.js']), /only available with --new/);
+        assert.throws(() => parseReplCliArgs(['--pid', 'not-a-pid']), /Invalid PID/);
+        assert.throws(() => parseReplCliArgs(['--timeout', '0']), /Invalid timeout/);
+    });
+
+    it('exposes REPL help through umbrella and standalone binaries', () => {
+        const umbrella = runCli('tsf.js', ['repl', '--help']);
+        const standalone = runCli('tsf-repl.js', ['--help']);
+
+        assert.equal(umbrella.status, 0, umbrella.stderr);
+        assert.equal(standalone.status, 0, standalone.stderr);
+        assert.match(umbrella.stdout, /tsf repl \[options\]/);
+        assert.match(standalone.stdout, /--existing/);
+        assert.match(standalone.stdout, /--new/);
+    });
+
+    it('discovers registered REPL targets and requires PID selection when ambiguous', async () => {
+        const projectDir = tempDir();
+        writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'repl-state-test' }));
+        const { stateFile } = getDevStatePaths(projectDir);
+        const now = Date.now();
+        const secondaryPid = process.ppid;
+        assert.notEqual(secondaryPid, process.pid);
+        registerDevRun(stateFile, {
+            runId: 'primary',
+            runnerPid: process.pid,
+            appPid: process.pid,
+            script: '.',
+            command: ['server:start'],
+            devConsoleUrl: 'ws://127.0.0.1:3101/_devconsole/ws',
+            startedAt: now,
+            updatedAt: now
+        });
+        registerDevRun(stateFile, {
+            runId: 'secondary',
+            runnerPid: secondaryPid,
+            appPid: secondaryPid,
+            script: 'dist/worker.js',
+            command: ['server:start'],
+            devConsoleUrl: 'ws://127.0.0.1:3102/_devconsole/ws',
+            startedAt: now + 1,
+            updatedAt: now + 1
+        });
+
+        try {
+            await assert.rejects(resolveExistingReplTarget(projectDir), /Multiple running TSF processes/);
+            const selected = await resolveExistingReplTarget(projectDir, secondaryPid);
+            assert.equal(selected.run?.runId, 'secondary');
+            assert.equal(selected.url, 'ws://127.0.0.1:3102/_devconsole/ws');
+
+            updateDevState(stateFile, state => {
+                state.runs.secondary.runnerPid = 99_999_999;
+                state.runs.secondary.appPid = 99_999_999;
+            });
+            const pruned = await resolveExistingReplTarget(projectDir);
+            assert.equal(pruned.run?.runId, 'primary');
+            assert.equal(readDevState(stateFile)?.runs.secondary, undefined);
+        } finally {
+            unregisterDevRun(stateFile, 'primary', process.pid);
+            unregisterDevRun(stateFile, 'secondary', secondaryPid);
+            rmSync(stateFile, { force: true });
+            rmSync(`${stateFile}.state-lock`, { force: true });
+        }
+    });
+
+    it('preserves concurrent tsf-dev process-state registrations', async () => {
+        const dir = tempDir();
+        const stateFile = join(dir, 'dev-state.json');
+        const stateModule = join(process.cwd(), 'dist', 'src', 'cli', 'dev-state.js');
+        const children = Array.from({ length: 8 }, (_, index) =>
+            spawn(
+                process.execPath,
+                [
+                    '-e',
+                    `
+                        const { registerDevRun } = require(${JSON.stringify(stateModule)});
+                        const now = Date.now();
+                        registerDevRun(${JSON.stringify(stateFile)}, {
+                            runId: 'run-${index}',
+                            runnerPid: process.pid,
+                            script: '.',
+                            command: ['server:start'],
+                            startedAt: now,
+                            updatedAt: now
+                        });
+                    `
+                ],
+                { stdio: 'pipe' }
+            )
+        );
+
+        const results = await Promise.all(
+            children.map(
+                child =>
+                    new Promise<{ code: number | null; stderr: string }>(resolve => {
+                        let stderr = '';
+                        child.stderr.on('data', data => (stderr += data.toString()));
+                        child.on('close', code => resolve({ code, stderr }));
+                    })
+            )
+        );
+
+        for (const result of results) assert.equal(result.code, 0, result.stderr);
+        assert.deepStrictEqual(Object.keys(readDevState(stateFile)?.runs ?? {}).sort(), [
+            'run-0',
+            'run-1',
+            'run-2',
+            'run-3',
+            'run-4',
+            'run-5',
+            'run-6',
+            'run-7'
+        ]);
+    });
+
+    it('clears a stale watched-app endpoint while its tsf-dev runner remains alive', () => {
+        const dir = tempDir();
+        const stateFile = join(dir, 'dev-state.json');
+        const now = Date.now();
+        registerDevRun(stateFile, {
+            runId: 'restarting',
+            runnerPid: process.pid,
+            appPid: 99_999_999,
+            script: '.',
+            command: ['server:start'],
+            devConsoleUrl: 'ws://127.0.0.1:3999/_devconsole/ws',
+            startedAt: now,
+            updatedAt: now
+        });
+
+        const state = pruneDevState(stateFile);
+        assert.equal(state?.runs.restarting.appPid, undefined);
+        assert.equal(state?.runs.restarting.devConsoleUrl, undefined);
+        assert.equal(state?.runs.restarting.runnerPid, process.pid);
+    });
+
     it('scaffolds a template app with tsf-create-app', () => {
         const dir = tempDir();
         const target = join(dir, 'api');
@@ -904,6 +1069,170 @@ describe('CLI', () => {
         }
 
         assert.match(output, /\[ttsc\] watch build complete/);
+    });
+
+    it('connects tsf repl to the application published by tsf-dev state', async () => {
+        const dir = repoTempDir();
+        mkdirSync(join(dir, 'src'), { recursive: true });
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify({
+                name: 'repl-process-fixture',
+                type: 'commonjs',
+                main: 'dist/src/index.js',
+                dependencies: {
+                    '@zyno-io/ts-server-foundation': '*',
+                    tslib: '^2.8.1'
+                },
+                devDependencies: {
+                    '@types/node': '^26',
+                    ttsc: expectedTtscVersion,
+                    typescript: expectedTypescriptVersion
+                }
+            })
+        );
+        linkLocalTemplateDependencies(dir);
+        writeFileSync(
+            join(dir, 'tsconfig.json'),
+            JSON.stringify({
+                compilerOptions: {
+                    target: 'ES2022',
+                    module: 'commonjs',
+                    rootDir: '.',
+                    outDir: 'dist',
+                    strict: true,
+                    skipLibCheck: true,
+                    experimentalDecorators: true,
+                    emitDecoratorMetadata: true,
+                    importHelpers: true,
+                    types: ['node'],
+                    plugins: [{ transform: '@zyno-io/ts-server-foundation/type-compiler' }]
+                },
+                include: ['src/**/*.ts'],
+                reflection: true
+            })
+        );
+        writeFileSync(
+            join(dir, 'src', 'index.ts'),
+            [
+                "import { BaseAppConfig, createApp } from '@zyno-io/ts-server-foundation';",
+                'class ReplConfig extends BaseAppConfig {',
+                "    APP_ENV = 'development';",
+                '    DEVCONSOLE_ENABLED = true;',
+                '}',
+                'const app = createApp({ config: ReplConfig, enableHealthcheck: false });',
+                "if (require.main === module) void app.run(0, '127.0.0.1');",
+                ''
+            ].join('\n')
+        );
+
+        const { NODE_TEST_CONTEXT: _nodeTestContext, ...env } = process.env;
+        const runner = spawn(
+            process.execPath,
+            [join(process.cwd(), 'dist', 'src', 'cli', 'tsf-dev.js'), 'run', 'dist/src/index.js', '--', 'server:start'],
+            {
+                cwd: dir,
+                env: { ...env, APP_ENV: 'development', TTSC_CACHE_DIR: sharedTtscCacheDir },
+                stdio: ['ignore', 'pipe', 'pipe']
+            }
+        );
+        let output = '';
+        runner.stdout.on('data', data => (output += data.toString()));
+        runner.stderr.on('data', data => (output += data.toString()));
+        const closed = new Promise<number | null>(resolve => runner.on('close', code => resolve(code)));
+        const { stateFile } = getDevStatePaths(dir);
+
+        try {
+            let run: NonNullable<ReturnType<typeof readDevState>>['runs'][string] | undefined;
+            for (let attempt = 0; attempt < 600; attempt++) {
+                run = Object.values(readDevState(stateFile)?.runs ?? {})[0];
+                if (run?.appPid && run.devConsoleUrl) break;
+                if (runner.exitCode !== null) throw new Error(`tsf-dev exited before publishing REPL state\n${output}`);
+                await sleep(50);
+            }
+            assert.ok(run?.appPid, output);
+            assert.ok(run.devConsoleUrl, output);
+
+            const discovered = runCli('tsf.js', ['repl', '--eval', '[process.pid, config.APP_ENV]'], dir);
+            assert.equal(discovered.status, 0, discovered.stderr);
+            assert.match(discovered.stdout, new RegExp(`\\[ ${run.appPid}, 'development' \\]`));
+
+            const byRunnerPid = runCli('tsf-repl.js', ['--pid', String(run.runnerPid), '--eval', 'process.pid'], dir);
+            assert.equal(byRunnerPid.status, 0, byRunnerPid.stderr);
+            assert.equal(byRunnerPid.stdout.trim(), String(run.appPid));
+
+            const byUrl = runCli('tsf-repl.js', ['--url', run.devConsoleUrl, '--eval', 'config.APP_ENV'], dir);
+            assert.equal(byUrl.status, 0, byUrl.stderr);
+            assert.equal(byUrl.stdout.trim(), "'development'");
+
+            const interactive = spawn(process.execPath, [join(process.cwd(), 'dist', 'src', 'cli', 'tsf-repl.js')], {
+                cwd: dir,
+                env,
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+            let interactiveOutput = '';
+            interactive.stdout.on('data', data => (interactiveOutput += data.toString()));
+            interactive.stderr.on('data', data => (interactiveOutput += data.toString()));
+            const interactiveClosed = new Promise<number | null>(resolve => interactive.on('close', code => resolve(code)));
+            interactive.stdin.write("'interactive repl probe'\n");
+            for (let attempt = 0; attempt < 200 && !interactiveOutput.includes("'interactive repl probe'"); attempt++) await sleep(25);
+            let previousOutputLength = interactiveOutput.length;
+            interactive.stdin.write('({\n');
+            for (let attempt = 0; attempt < 200 && interactiveOutput.length === previousOutputLength; attempt++) await sleep(25);
+            previousOutputLength = interactiveOutput.length;
+            interactive.stdin.write("    probe: 'multiline repl probe'\n");
+            for (let attempt = 0; attempt < 200 && interactiveOutput.length === previousOutputLength; attempt++) await sleep(25);
+            interactive.stdin.write('})\n');
+            for (let attempt = 0; attempt < 200 && !interactiveOutput.includes("probe: 'multiline repl probe'"); attempt++) await sleep(25);
+            interactive.stdin.end('.exit\n');
+            assert.equal(await interactiveClosed, 0, interactiveOutput);
+            assert.match(interactiveOutput, /Connected to repl-process-fixture \(development\), pid \d+/);
+            assert.match(interactiveOutput, /'interactive repl probe'/);
+            assert.match(interactiveOutput, /probe: 'multiline repl probe'/);
+
+            const firstAppPid = run.appPid;
+            const sourcePath = join(dir, 'src', 'index.ts');
+            writeFileSync(sourcePath, `${readFileSync(sourcePath, 'utf8')}\n// trigger watched application replacement\n`);
+            let restartedRun = run;
+            for (let attempt = 0; attempt < 600; attempt++) {
+                const candidate = readDevState(stateFile)?.runs[run.runId];
+                if (candidate?.appPid && candidate.appPid !== firstAppPid && candidate.devConsoleUrl) {
+                    restartedRun = candidate;
+                    break;
+                }
+                if (runner.exitCode !== null) throw new Error(`tsf-dev exited during watched restart\n${output}`);
+                await sleep(50);
+            }
+            assert.notEqual(restartedRun.appPid, firstAppPid, output);
+            const afterRestart = runCli('tsf.js', ['repl', '--eval', 'process.pid'], dir);
+            assert.equal(afterRestart.status, 0, afterRestart.stderr);
+            assert.equal(afterRestart.stdout.trim(), String(restartedRun.appPid));
+
+            const fresh = runCli('tsf.js', ['repl', '--new', '--eval', "'fresh application repl'"], dir, { APP_ENV: 'development' });
+            assert.equal(fresh.status, 0, fresh.stderr);
+            assert.match(fresh.stdout, /'fresh application repl'/);
+
+            const freshError = runCli('tsf.js', ['repl', '--new', '--eval', "throw new Error('fresh repl error')"], dir, {
+                APP_ENV: 'development'
+            });
+            assert.equal(freshError.status, 1);
+            assert.match(freshError.stderr, /fresh repl error/);
+        } finally {
+            runner.kill('SIGTERM');
+            const exited = await Promise.race([
+                closed.then(() => true),
+                new Promise<boolean>(resolve => {
+                    const timer = setTimeout(() => resolve(false), 5_000);
+                    timer.unref();
+                })
+            ]);
+            if (!exited) {
+                runner.kill('SIGKILL');
+                await closed;
+            }
+            rmSync(stateFile, { force: true });
+            rmSync(`${stateFile}.state-lock`, { force: true });
+        }
     });
 
     it('skips tsf-dev build when tracked inputs are unchanged', () => {

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, it } from 'node:test';
 
 import { BaseAppConfig, BaseJob, createApp, HttpRequest, SrpcClient, WorkerJob, WorkerService } from '../src';
@@ -13,6 +14,16 @@ import {
     type DevConsoleServerMessage as DCServerMsg
 } from '../src/devconsole/generated/devconsole';
 import { DevConsoleStore, RingBuffer, type DevConsoleDatabaseQueryEntry } from '../src/devconsole';
+import {
+    TSF_DEV_RUNNER_PID_ENV,
+    TSF_DEV_RUN_ID_ENV,
+    TSF_DEV_STATE_FILE_ENV,
+    getDevStatePaths,
+    readDevState,
+    registerDevRun,
+    unregisterDevRun
+} from '../src/cli/dev-state';
+import { runReplCli } from '../src/cli/tsf-repl';
 
 const originalEnv = { ...process.env };
 
@@ -209,6 +220,88 @@ describe('devconsole', () => {
         } finally {
             client.disconnect();
             await app.stop();
+        }
+    });
+
+    it('publishes tsf-dev discovery state and serves one-shot CLI REPL evaluations', async () => {
+        const projectDir = mkdtempSync(join(tmpdir(), 'tsf-repl-discovery-'));
+        const previousCwd = process.cwd();
+        writeFileSync(join(projectDir, 'package.json'), JSON.stringify({ name: 'repl-discovery-test' }));
+        process.chdir(projectDir);
+        const { stateFile } = getDevStatePaths(projectDir);
+        const runId = 'repl-discovery-run';
+        const now = Date.now();
+        registerDevRun(stateFile, {
+            runId,
+            runnerPid: process.pid,
+            script: '.',
+            command: ['server:start'],
+            startedAt: now,
+            updatedAt: now
+        });
+        process.env[TSF_DEV_STATE_FILE_ENV] = stateFile;
+        process.env[TSF_DEV_RUN_ID_ENV] = runId;
+        process.env[TSF_DEV_RUNNER_PID_ENV] = String(process.pid);
+        process.env.APP_ENV = 'development';
+
+        const app = createApp({ config: DevConsoleTestConfig });
+        try {
+            const server = await app.http.listen(0, '127.0.0.1');
+            const address = server.address() as AddressInfo;
+            const published = readDevState(stateFile)?.runs[runId];
+            assert.equal(published?.appPid, process.pid);
+            assert.equal(published?.devConsoleUrl, `ws://127.0.0.1:${address.port}/_devconsole/ws`);
+
+            const stdout = new PassThrough();
+            const stderr = new PassThrough();
+            let stdoutText = '';
+            let stderrText = '';
+            stdout.setEncoding('utf8');
+            stderr.setEncoding('utf8');
+            stdout.on('data', chunk => (stdoutText += chunk));
+            stderr.on('data', chunk => (stderrText += chunk));
+
+            const status = await runReplCli(['--eval', '[process.pid, config.APP_ENV]'], {
+                stdout: stdout as unknown as NodeJS.WriteStream,
+                stderr: stderr as unknown as NodeJS.WriteStream,
+                stdin: process.stdin
+            });
+            assert.equal(status, 0, stderrText);
+            assert.match(stdoutText, new RegExp(`\\[ ${process.pid}, 'development' \\]`));
+
+            const outsideProject = mkdtempSync(join(tmpdir(), 'tsf-repl-url-'));
+            process.chdir(outsideProject);
+            try {
+                const urlStatus = await runReplCli(['--url', published!.devConsoleUrl!, '--eval', 'process.pid'], {
+                    stdout: stdout as unknown as NodeJS.WriteStream,
+                    stderr: stderr as unknown as NodeJS.WriteStream,
+                    stdin: process.stdin
+                });
+                assert.equal(urlStatus, 0, stderrText);
+            } finally {
+                process.chdir(projectDir);
+                rmSync(outsideProject, { recursive: true, force: true });
+            }
+
+            const errorStatus = await runReplCli(['--pid', String(process.pid), '--eval', "throw new Error('repl probe')"], {
+                stdout: stdout as unknown as NodeJS.WriteStream,
+                stderr: stderr as unknown as NodeJS.WriteStream,
+                stdin: process.stdin
+            });
+            assert.equal(errorStatus, 1);
+            assert.match(stderrText, /Error: repl probe/);
+
+            await app.stop();
+            const stopped = readDevState(stateFile)?.runs[runId];
+            assert.equal(stopped?.appPid, undefined);
+            assert.equal(stopped?.devConsoleUrl, undefined);
+        } finally {
+            await app.stop();
+            unregisterDevRun(stateFile, runId, process.pid);
+            rmSync(stateFile, { force: true });
+            rmSync(`${stateFile}.state-lock`, { force: true });
+            process.chdir(previousCwd);
+            rmSync(projectDir, { recursive: true, force: true });
         }
     });
 

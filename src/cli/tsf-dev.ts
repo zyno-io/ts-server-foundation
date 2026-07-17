@@ -1,26 +1,30 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, globSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { Env } from '../env';
 import { cleanDist, extractTsconfigArg, findProjectRoot, resolveFromProject, runNode } from './common';
+import {
+    TSF_DEV_RUNNER_PID_ENV,
+    TSF_DEV_RUN_ID_ENV,
+    TSF_DEV_STATE_FILE_ENV,
+    getDevStatePaths,
+    isPidAlive,
+    pruneDevState,
+    readDevState,
+    registerDevRun,
+    unregisterDevRun,
+    updateDevState
+} from './dev-state';
 
 Env.APP_ENV ||= 'development';
 
 const projectDir = findProjectRoot();
-const projectHash = createHash('md5').update(projectDir).digest('hex').slice(0, 12);
-const devLockFile = join(tmpdir(), `tsf-dev-${projectHash}.lock`);
-const devStateFile = join(tmpdir(), `tsf-dev-${projectHash}.json`);
-
-interface DevState {
-    ready: boolean;
-    pids: number[];
-}
+const { stateFile: devStateFile, buildLockFile: devLockFile } = getDevStatePaths(projectDir);
 
 interface BuildState {
     version: 2;
@@ -66,6 +70,8 @@ async function main(args = process.argv.slice(2)): Promise<number> {
             return await cmdBuild(rest);
         case 'run':
             return cmdRun(rest);
+        case 'repl':
+            return cmdRepl(rest);
         case 'test':
             return cmdTest(rest);
         case 'migrate':
@@ -92,6 +98,7 @@ Commands:
   build [--watch] [-p file]     Clean and compile TypeScript
   run [--debug] [script] -- server:start
                                 Ensure a watch build and run node --watch
+  repl [--debug] [script]       Build and start a fresh application REPL
   test [--debug] [-p file]      Build tests and run tsf-test
   migrate [-p file]             Build and run compiled migrations
   migrate:create [-p file]      Build and create a raw SQL migration
@@ -126,18 +133,44 @@ async function cmdRun(args: string[]): Promise<number> {
     const tsconfig = extractTsconfigArg(ownArgs) ?? 'tsconfig.json';
     const script = ownArgs.find(arg => !arg.startsWith('-')) ?? '.';
     const tscChild = await ensureDevBuild(tsconfig);
-    registerDevPid();
-    process.on('exit', unregisterDevPid);
+    const runId = randomUUID();
+    const now = Date.now();
+    registerDevRun(devStateFile, {
+        runId,
+        runnerPid: process.pid,
+        script,
+        command: childArgs,
+        startedAt: now,
+        updatedAt: now
+    });
+    let registered = true;
+    const unregister = () => {
+        if (!registered) return;
+        registered = false;
+        try {
+            unregisterDevRun(devStateFile, runId, process.pid);
+        } catch {
+            // Stale state is pruned by PID on the next command if shutdown races with another writer.
+        }
+    };
+    process.on('exit', unregister);
 
     const inspectFlag = debug ? '--inspect-brk' : '--inspect';
     const inspectArg = Env.PORT ? `${inspectFlag}=${Number(Env.PORT) + 1000}` : inspectFlag;
     const child = spawn(process.execPath, ['--enable-source-maps', '--watch', '--watch-preserve-output', inspectArg, script, ...childArgs], {
         cwd: projectDir,
+        env: {
+            ...process.env,
+            [TSF_DEV_STATE_FILE_ENV]: devStateFile,
+            [TSF_DEV_RUN_ID_ENV]: runId,
+            [TSF_DEV_RUNNER_PID_ENV]: String(process.pid)
+        },
         stdio: 'inherit'
     });
 
     return await new Promise(resolve => {
         child.on('close', code => {
+            unregister();
             tscChild?.kill();
             resolve(code ?? 0);
         });
@@ -146,6 +179,56 @@ async function cmdRun(args: string[]): Promise<number> {
             tscChild?.kill('SIGTERM');
         });
     });
+}
+
+function cmdRepl(args: string[]): number {
+    const debug = takeFlag(args, '--debug');
+    const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
+    let script = '.';
+    let scriptSelected = false;
+    const entrypointArgs: string[] = [];
+
+    for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (arg === '--eval' || arg === '-e') {
+            const value = args[index + 1];
+            if (value === undefined) throw new Error(`${arg} requires JavaScript source`);
+            entrypointArgs.push('--eval', value);
+            index++;
+            continue;
+        }
+        if (arg.startsWith('--eval=')) {
+            entrypointArgs.push('--eval', arg.slice('--eval='.length));
+            continue;
+        }
+        if (arg === '--script') {
+            const value = args[index + 1];
+            if (value === undefined) throw new Error('--script requires an entrypoint path');
+            script = value;
+            scriptSelected = true;
+            index++;
+            continue;
+        }
+        if (arg.startsWith('--script=')) {
+            script = arg.slice('--script='.length);
+            scriptSelected = true;
+            continue;
+        }
+        if (!arg.startsWith('-') && !scriptSelected) {
+            script = arg;
+            scriptSelected = true;
+            continue;
+        }
+        throw new Error(`Unknown repl option: ${arg}`);
+    }
+
+    const tscStatus = runTscIfNeeded(tsconfig);
+    if (tscStatus !== 0) return tscStatus;
+    const debugArgs = debug ? [Env.PORT ? `--inspect-brk=${Number(Env.PORT) + 1000}` : '--inspect-brk'] : [];
+    return runNode([...debugArgs, '--enable-source-maps', script, 'repl', ...entrypointArgs], projectDir, {
+        APP_ENV: Env.APP_ENV ?? 'development',
+        TSF_TSCONFIG: tsconfig
+    }).status;
 }
 
 function cmdTest(args: string[]): number {
@@ -211,53 +294,16 @@ function takeFlag(args: string[], flag: string): boolean {
     return true;
 }
 
-function isPidAlive(pid: number): boolean {
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch {
-        return false;
-    }
-}
-
-function readDevState(): DevState | undefined {
-    try {
-        return JSON.parse(readFileSync(devStateFile, 'utf8')) as DevState;
-    } catch {
-        return undefined;
-    }
-}
-
-function writeDevState(state: DevState): void {
-    mkdirSync(dirname(devStateFile), { recursive: true });
-    writeFileSync(devStateFile, JSON.stringify(state));
-}
-
 function isDevRunning(): boolean {
-    const state = readDevState();
+    const state = pruneDevState(devStateFile);
     return !!state?.ready && state.pids.some(isPidAlive);
 }
 
-function registerDevPid(): void {
-    const state = readDevState() ?? { ready: true, pids: [] };
-    state.pids = state.pids.filter(isPidAlive);
-    if (!state.pids.includes(process.pid)) state.pids.push(process.pid);
-    writeDevState(state);
-}
-
-function unregisterDevPid(): void {
-    const state = readDevState();
-    if (!state) return;
-    state.pids = state.pids.filter(pid => pid !== process.pid && isPidAlive(pid));
-    if (state.pids.length === 0) {
-        try {
-            unlinkSync(devStateFile);
-        } catch {
-            // ignore
-        }
-    } else {
-        writeDevState(state);
-    }
+function setDevBuildReady(ready: boolean): void {
+    updateDevState(devStateFile, state => {
+        state.ready = ready;
+        state.pids = state.pids.filter(isPidAlive);
+    });
 }
 
 function tryAcquireBuildLock(): boolean {
@@ -291,7 +337,7 @@ async function ensureDevBuild(tsconfig: string): Promise<DevBuildHandle | undefi
     if (isDevRunning()) return undefined;
     if (!tryAcquireBuildLock()) {
         while (true) {
-            if (readDevState()?.ready) return undefined;
+            if (readDevState(devStateFile)?.ready) return undefined;
             await sleep(200);
             try {
                 const pid = Number(readFileSync(devLockFile, 'utf8'));
@@ -304,13 +350,13 @@ async function ensureDevBuild(tsconfig: string): Promise<DevBuildHandle | undefi
 
     const status = getBuildStatus(tsconfig);
     if (status.fresh) {
-        writeDevState({ ready: true, pids: [] });
+        setDevBuildReady(true);
         releaseBuildLock();
         return watchBuildInputsUntilChanged(tsconfig, collectCompilerWatchInputs(tsconfig));
     }
 
     cleanDist(projectDir);
-    writeDevState({ ready: false, pids: [] });
+    setDevBuildReady(false);
     const compiler = startTscWatch(tsconfig);
     try {
         await compiler.ready;
@@ -318,7 +364,7 @@ async function ensureDevBuild(tsconfig: string): Promise<DevBuildHandle | undefi
         releaseBuildLock();
         throw error;
     }
-    writeDevState({ ready: true, pids: [] });
+    setDevBuildReady(true);
     releaseBuildLock();
     return compiler;
 }

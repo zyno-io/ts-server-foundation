@@ -11,6 +11,7 @@
         "tsf-gen-proto": "dist/src/cli/tsf-gen-proto.js",
         "tsf-install": "dist/src/cli/tsf-install.js",
         "tsf-migrate": "dist/src/cli/tsf-migrate.js",
+        "tsf-repl": "dist/src/cli/tsf-repl.js",
         "tsf-test": "dist/src/cli/tsf-test.js",
         "tsf-update": "dist/src/cli/tsf-update.js"
     },
