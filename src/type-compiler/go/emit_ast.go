@@ -311,7 +311,7 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 		}
 		result := output.AsSourceFile()
 		if plan.aliases != nil {
-			result = appendAliasMetadata(ec, result, materializeCompactMetadataExpression(
+			result = appendAliasMetadata(ec, result, materializeCompactAliasMetadataExpression(
 				ec,
 				imports,
 				runtimeReferences,

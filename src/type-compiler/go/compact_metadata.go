@@ -313,7 +313,18 @@ func materializeCompactMetadataExpression(
 	if _, ok := compactMetadataTypeRecipe(metadata, metadataTypeResolver); ok {
 		return metadata
 	}
-	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false)
+	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false, false)
+}
+
+func materializeCompactAliasMetadataExpression(
+	ec *shimprinter.EmitContext,
+	imports *astImportRegistry,
+	runtimeReferences *compactMetadataRuntimeInterner,
+	template expressionTemplate,
+	metadataTypeResolver string,
+) *shimast.Node {
+	metadata := template.materialize(ec, imports)
+	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false, true)
 }
 
 func materializeCompactMetadataRegistry(
@@ -328,7 +339,7 @@ func materializeCompactMetadataRegistry(
 		elements = append(elements, template.materialize(ec, imports))
 	}
 	metadata := ec.Factory.NewArrayLiteralExpression(ec.Factory.NewNodeList(elements), false)
-	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, true)
+	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, true, false)
 }
 
 func materializeCompactMetadataNode(
@@ -338,6 +349,7 @@ func materializeCompactMetadataNode(
 	metadata *shimast.Node,
 	metadataTypeResolver string,
 	registry bool,
+	inlinePureJSON bool,
 ) *shimast.Node {
 	encoding := encodeCompactMetadataWithRuntimeRecipes(
 		metadata,
@@ -353,6 +365,26 @@ func materializeCompactMetadataNode(
 		// classes and validators, leaving the generated closure unable to resolve
 		// its original binding.
 		references = append(references, ec.Factory.DeepCloneNode(reference))
+	}
+	if inlinePureJSON && len(references) == 0 && !strings.Contains(encoding.serialized, `"$tsf`) {
+		parsed := ec.Factory.NewCallExpression(
+			ec.Factory.NewPropertyAccessExpression(
+				ec.Factory.NewIdentifier("JSON"),
+				nil,
+				ec.Factory.NewIdentifier("parse"),
+				shimast.NodeFlagsNone,
+			),
+			nil,
+			nil,
+			ec.Factory.NewNodeList([]*shimast.Node{ec.Factory.NewStringLiteral(encoding.serialized, shimast.TokenFlagsNone)}),
+			shimast.NodeFlagsNone,
+		)
+		return ec.Factory.NewElementAccessExpression(
+			parsed,
+			nil,
+			ec.Factory.NewNumericLiteral("1", shimast.TokenFlagsNone),
+			shimast.NodeFlagsNone,
+		)
 	}
 	helperName := compactMetadataDecoderName
 	if registry {

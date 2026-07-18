@@ -171,6 +171,8 @@ For a shared package:
 
 `__tsfTypeAliases` is generated compiler data, not an application API to edit by hand. The consumer resolves it by package import/export identity; TSF does not rely on a monorepo path, workspace name, or consumer-specific model name.
 
+Alias metadata containing only JSON-representable type information is emitted as self-contained JavaScript and does not add a TSF runtime dependency to the shared package. Aliases that refer to runtime values, such as classes or validators, retain the generated runtime import; those packages must declare the matching TSF runtime dependency.
+
 If a package is built without emitted alias metadata, the consumer may retain only an unresolved external type boundary. Validation, deserialization, and OpenAPI cannot safely reconstruct missing alias semantics from the alias name alone.
 
 ## Runtime Boundaries

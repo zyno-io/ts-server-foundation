@@ -172,6 +172,53 @@ func TestClassMetadataTransformMaterializesOneSharedObject(t *testing.T) {
 	}
 }
 
+func TestPureJSONAliasMetadataDoesNotLoadTheRuntimeDecoder(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/shared.ts", `export type Status = "ready" | "busy"`)
+	template, err := parseExpressionTemplate(`{Status: {kind: 12, types: [{kind: 10, literal: "ready"}, {kind: 10, literal: "busy"}]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := emissionPlans{file.FileName(): {
+		calls:    map[int]callEmissionPlan{},
+		classes:  map[int]classEmissionPlan{},
+		aliases:  &template,
+		commonJS: true,
+	}}
+
+	transformed := metadataTransform(plans)(shimprinter.NewEmitContext(), file)
+	if astContainsIdentifier(transformed.AsNode(), compactMetadataDecoderName) {
+		t.Fatal("pure JSON aliases loaded the compact metadata runtime")
+	}
+	if !astContainsIdentifier(transformed.AsNode(), "JSON") || !astContainsIdentifier(transformed.AsNode(), "parse") {
+		t.Fatal("pure JSON aliases were not decoded with JSON.parse")
+	}
+	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindImportDeclaration)); got != 0 {
+		t.Fatalf("generated imports = %d, want none", got)
+	}
+}
+
+func TestAliasMetadataWithRuntimeValuesStillLoadsTheRuntimeDecoder(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/shared.ts", `export class Model {}; export type Wrapped = { value: Model }`)
+	template, err := parseExpressionTemplate(`{Wrapped: {kind: 16, properties: [{key: "value", value: {kind: 16, classType: () => Model}}]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := emissionPlans{file.FileName(): {
+		calls:    map[int]callEmissionPlan{},
+		classes:  map[int]classEmissionPlan{},
+		aliases:  &template,
+		commonJS: true,
+	}}
+
+	transformed := metadataTransform(plans)(shimprinter.NewEmitContext(), file)
+	if !astContainsIdentifier(transformed.AsNode(), compactMetadataDecoderName) {
+		t.Fatal("alias metadata with runtime values did not load the compact metadata runtime")
+	}
+	if got := len(collectAstNodes(transformed.AsNode(), shimast.KindImportDeclaration)); got != 1 {
+		t.Fatalf("generated imports = %d, want one decoder import", got)
+	}
+}
+
 func TestCompactMetadataHidesGeneratedObjectFromBuiltinTransforms(t *testing.T) {
 	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
 	template, err := parseExpressionTemplate(`{kind: 16, classType: () => Model}`)
