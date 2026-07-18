@@ -4,7 +4,7 @@ import { coerceBooleanValue } from '../reflection/primitive-conversion';
 import { sql, SqlFragment, SqlQuery } from './sql';
 import type { BaseDatabase } from './database';
 import { markEntityClean } from './entity';
-import { ColumnMetadata, EntityClass, getEntityMetadata } from './metadata';
+import { ColumnMetadata, EntityClass, EntityMetadata, getEntityMetadata } from './metadata';
 import type { DatabaseSession } from './session';
 import { deserializeColumnValue, serializeColumnValue } from './values';
 
@@ -43,6 +43,7 @@ export class QueryBuilder<T extends object> {
     private order: { field: string; direction: Direction }[] = [];
     private limitValue?: number;
     private offsetValue?: number;
+    private lockForUpdate = false;
 
     constructor(
         private db: BaseDatabase,
@@ -92,6 +93,13 @@ export class QueryBuilder<T extends object> {
 
     skip(offset: number): this {
         return this.offset(offset);
+    }
+
+    /** Locks selected rows until the active transaction completes. */
+    forUpdate(): this {
+        if (!this.session?.isTransactional) throw new Error('FOR UPDATE requires an active transaction');
+        this.lockForUpdate = true;
+        return this;
     }
 
     async find(): Promise<T[]> {
@@ -146,62 +154,104 @@ export class QueryBuilder<T extends object> {
     }
 
     async patchMany(patch: PatchRecord<T>): Promise<QueryMutationResult> {
-        return this.runMutation(async () => {
+        return this.runMutation(async session => {
             const metadata = getEntityMetadata(this.Entity);
+            this.assertObservedPrimaryKeyIsStable(metadata, patch);
             const patchSet = this.renderPatchSet(patch);
             if (!patchSet) return createMutationResult(0, []);
 
-            const primaryKeys = await this.findPrimaryKeys();
+            const { primaryKeys, before } = await this.findMutationTargets(session);
             if (!primaryKeys.length) return createMutationResult(0, []);
 
             const result = await this.db.rawExecute(
                 sql`UPDATE ${sql.identifier(metadata.tableName)} SET ${patchSet} WHERE ${renderPrimaryKeyRowsWhere(metadata.primaryKeys, primaryKeys, this.db.driver.dialect)}`,
-                this.session
+                session
             );
+
+            if (session && this.db.hasMutationInterceptorFor(metadata) && result.affectedRows) {
+                session.recordQueryMutation({
+                    kind: 'query',
+                    operation: 'update',
+                    metadata,
+                    primaryKeys,
+                    before,
+                    changedFields: getPatchFields(metadata, patch),
+                    patch
+                });
+            }
 
             return createMutationResult(result.affectedRows, primaryKeys);
         });
     }
 
     async patchOne(patch: PatchRecord<T>): Promise<QueryMutationResult> {
-        return this.runMutation(async () => {
+        return this.runMutation(async session => {
             const metadata = getEntityMetadata(this.Entity);
+            this.assertObservedPrimaryKeyIsStable(metadata, patch);
             const primaryKey = this.requirePrimaryKeyFilter('patchOne');
             const patchSet = this.renderPatchSet(patch);
             if (!patchSet) return createMutationResult(0, []);
+            const snapshotFields = this.db.getMutationQuerySnapshotFields(metadata);
+            const targets = snapshotFields.length ? await this.findMutationTargets(session) : { primaryKeys: [primaryKey], before: [primaryKey] };
+            if (!targets.primaryKeys.length) return createMutationResult(0, []);
 
             const result = await this.db.rawExecute(
                 sql`UPDATE ${sql.identifier(metadata.tableName)} SET ${patchSet} WHERE ${this.renderWhere()!}`,
-                this.session
+                session
             );
-            return createMutationResult(result.affectedRows, result.affectedRows ? [primaryKey] : []);
+            if (session && this.db.hasMutationInterceptorFor(metadata) && result.affectedRows) {
+                session.recordQueryMutation({
+                    kind: 'query',
+                    operation: 'update',
+                    metadata,
+                    primaryKeys: targets.primaryKeys,
+                    before: targets.before,
+                    changedFields: getPatchFields(metadata, patch),
+                    patch
+                });
+            }
+            return createMutationResult(result.affectedRows, result.affectedRows ? targets.primaryKeys : []);
         });
     }
 
     async deleteMany(): Promise<QueryMutationResult> {
-        return this.runMutation(async () => {
+        return this.runMutation(async session => {
             const metadata = getEntityMetadata(this.Entity);
-            const primaryKeys = await this.findPrimaryKeys();
+            const { primaryKeys, before } = await this.findMutationTargets(session);
             if (!primaryKeys.length) return createMutationResult(0, []);
 
             const result = await this.db.rawExecute(
                 sql`DELETE FROM ${sql.identifier(metadata.tableName)} WHERE ${renderPrimaryKeyRowsWhere(metadata.primaryKeys, primaryKeys, this.db.driver.dialect)}`,
-                this.session
+                session
             );
+
+            if (session && this.db.hasMutationInterceptorFor(metadata) && result.affectedRows) {
+                session.recordQueryMutation({ kind: 'query', operation: 'delete', metadata, primaryKeys, before, changedFields: [] });
+            }
 
             return createMutationResult(result.affectedRows, primaryKeys);
         });
     }
 
     async deleteOne(): Promise<QueryMutationResult> {
-        return this.runMutation(async () => {
+        return this.runMutation(async session => {
             const metadata = getEntityMetadata(this.Entity);
             const primaryKey = this.requirePrimaryKeyFilter('deleteOne');
-            const result = await this.db.rawExecute(
-                sql`DELETE FROM ${sql.identifier(metadata.tableName)} WHERE ${this.renderWhere()!}`,
-                this.session
-            );
-            return createMutationResult(result.affectedRows, result.affectedRows ? [primaryKey] : []);
+            const snapshotFields = this.db.getMutationQuerySnapshotFields(metadata);
+            const targets = snapshotFields.length ? await this.findMutationTargets(session) : { primaryKeys: [primaryKey], before: [primaryKey] };
+            if (!targets.primaryKeys.length) return createMutationResult(0, []);
+            const result = await this.db.rawExecute(sql`DELETE FROM ${sql.identifier(metadata.tableName)} WHERE ${this.renderWhere()!}`, session);
+            if (session && this.db.hasMutationInterceptorFor(metadata) && result.affectedRows) {
+                session.recordQueryMutation({
+                    kind: 'query',
+                    operation: 'delete',
+                    metadata,
+                    primaryKeys: targets.primaryKeys,
+                    before: targets.before,
+                    changedFields: []
+                });
+            }
+            return createMutationResult(result.affectedRows, result.affectedRows ? targets.primaryKeys : []);
         });
     }
 
@@ -243,6 +293,7 @@ export class QueryBuilder<T extends object> {
                 query = sql`${query} LIMIT ${sql.rawTrusted(MYSQL_OFFSET_ONLY_LIMIT)}`;
             if (this.offsetValue !== undefined) query = sql`${query} OFFSET ${this.offsetValue}`;
         }
+        if (this.lockForUpdate) query = sql`${query} FOR UPDATE`;
         return query;
     }
 
@@ -250,23 +301,37 @@ export class QueryBuilder<T extends object> {
         return renderFilterRecord(this.filters, field => this.resolveColumn(field), this.db.driver.dialect);
     }
 
-    private async findPrimaryKeys(): Promise<Record<string, unknown>[]> {
+    private async findMutationTargets(
+        session = this.session
+    ): Promise<{ primaryKeys: Record<string, unknown>[]; before: Record<string, unknown>[] }> {
         const metadata = getEntityMetadata(this.Entity);
-        const rows = await this.db.rawFind<Record<string, unknown>>(
-            this.buildSelectSql(
-                metadata.primaryKeys.map(column => sql.identifier(column.columnName)),
-                { includeOrderAndPaging: true }
-            ),
-            this.session
+        const requestedFields = this.db.getMutationQuerySnapshotFields(metadata);
+        const selectedColumns = [...metadata.primaryKeys];
+        for (const field of requestedFields) {
+            const column = metadata.columns.find(candidate => candidate.propertyName === field || candidate.columnName === field);
+            if (!column) throw new Error(`Mutation interceptor requested unknown field ${metadata.classType.name}.${field}`);
+            if (!selectedColumns.includes(column)) selectedColumns.push(column);
+        }
+        let targetQuery = this.buildSelectSql(
+            selectedColumns.map(column => sql.identifier(column.columnName)),
+            { includeOrderAndPaging: true }
         );
-        return rows.map(row =>
+        if (session?.isTransactional) targetQuery = sql`${targetQuery} FOR UPDATE`;
+        const rows = await this.db.rawFind<Record<string, unknown>>(targetQuery, session);
+        const before = rows.map(row =>
             Object.fromEntries(
-                metadata.primaryKeys.map(column => [
+                selectedColumns.map(column => [
                     column.propertyName,
                     coerceColumnValue(getRowValue(row, column.columnName, column.propertyName), column, this.db.driver.dialect)
                 ])
             )
         );
+        return {
+            primaryKeys: before.map(snapshot =>
+                Object.fromEntries(metadata.primaryKeys.map(column => [column.propertyName, snapshot[column.propertyName]]))
+            ),
+            before
+        };
     }
 
     private hydrate(row: Record<string, unknown>): T {
@@ -337,6 +402,16 @@ export class QueryBuilder<T extends object> {
         return result;
     }
 
+    private assertObservedPrimaryKeyIsStable(metadata: EntityMetadata, patch: PatchRecord<T>): void {
+        if (!this.db.hasMutationInterceptorFor(metadata)) return;
+        const changedPrimaryKey = metadata.primaryKeys.find(column => Object.hasOwn(patch, column.propertyName));
+        if (changedPrimaryKey) {
+            throw new Error(
+                `Observed entity ${metadata.classType.name} cannot patch primary key ${changedPrimaryKey.propertyName}; load and replace the entity explicitly`
+            );
+        }
+    }
+
     private async withTemporaryLimit<R>(limit: number, worker: () => Promise<R>): Promise<R> {
         const previousLimit = this.limitValue;
         this.limitValue = limit;
@@ -347,13 +422,34 @@ export class QueryBuilder<T extends object> {
         }
     }
 
-    private runMutation<R>(worker: () => Promise<R>): Promise<R> {
-        return this.session ? this.session.trackOperation(worker) : worker();
+    private runMutation<R>(worker: (session?: DatabaseSession) => Promise<R>): Promise<R> {
+        const metadata = getEntityMetadata(this.Entity);
+        const observed = this.db.hasMutationInterceptorFor(metadata);
+        if (this.session) {
+            if (this.session.db !== this.db) throw new Error(`Cannot mutate ${metadata.classType.name} through a session owned by another database`);
+            if (observed && !this.session.isTransactional) {
+                throw new Error(`Observed entity ${metadata.classType.name} requires a transactional database session`);
+            }
+            return this.session.trackOperation(() => worker(this.session));
+        }
+        if (observed) return this.db.transaction(session => session.trackOperation(() => worker(session)));
+        return worker();
     }
 
     private runRead<R>(worker: () => Promise<R>): Promise<R> {
         return this.session ? this.session.withoutAutoFlush(worker) : worker();
     }
+}
+
+function getPatchFields(metadata: ReturnType<typeof getEntityMetadata>, patch: Readonly<Record<string, unknown>>): string[] {
+    const fields = new Set<string>();
+    const increment = isRecord(patch.$inc) ? patch.$inc : undefined;
+    for (const column of metadata.columns) {
+        if (Object.hasOwn(patch, column.propertyName) || (increment && Object.hasOwn(increment, column.propertyName))) {
+            fields.add(column.propertyName);
+        }
+    }
+    return [...fields];
 }
 
 function createMutationResult(affectedRows: number, primaryKeys: Record<string, unknown>[]): QueryMutationResult {

@@ -17,7 +17,7 @@ await withContextData({ userId: '123' }, async () => {
 });
 ```
 
-`withContextData()` restores overwritten values when the callback completes.
+`withContextData()` runs with an isolated child store, inherits the current values, and restores the parent context when the callback completes. Concurrent child scopes cannot overwrite each other's values. Async work that outlives the callback sees no completed child context; establish a new explicit context for intentionally detached work.
 
 ## Promises And Processes
 

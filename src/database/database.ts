@@ -3,7 +3,16 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { deserialize, isReflectedType, type ReceiveType, type Type } from '../reflection';
 
 import { createSqlQuery, renderSql, RenderedSql, SqlInput, sql, type Dialect } from './sql';
-import { BaseEntity, bindEntityDatabase, getDirtyDetails, getEntityFields, hasEntitySnapshot, markEntityClean } from './entity';
+import {
+    BaseEntity,
+    bindEntityDatabase,
+    getDirtyDetails,
+    getEntityFields,
+    getEntityOriginal,
+    getEntitySnapshot,
+    hasEntitySnapshot,
+    markEntityClean
+} from './entity';
 import type { DatabaseDriver, DriverConnection, ExecuteResult } from './driver';
 import { Env } from '../env';
 import { normalizeDatabaseError } from './errors';
@@ -12,7 +21,9 @@ import { QueryBuilder } from './query';
 import { DatabaseSchemaBuilder } from './schema';
 import { DatabaseSession } from './session';
 import { serializeColumnValue } from './values';
+import type { DatabaseMutationCommitContext, DatabaseMutationInterceptor } from './mutation';
 
+// oxlint-disable-next-line typescript/no-explicit-any -- lock keys intentionally accept every value supported by flattenMutexKey
 export type MutexKey = any;
 
 export interface BaseDatabaseOptions {
@@ -50,6 +61,7 @@ export class BaseDatabase {
     readonly entityRegistry: EntityClass[];
     readonly options: Required<BaseDatabaseOptions>;
     readonly schema: DatabaseSchemaBuilder;
+    private readonly mutationInterceptors = new Set<DatabaseMutationInterceptor>();
 
     constructor(
         readonly driver: DatabaseDriver,
@@ -84,6 +96,9 @@ export class BaseDatabase {
             await session.runPreCommitHooks();
             await session.waitForPendingOperations();
             await session.flush();
+            await this.runMutationInterceptors(session);
+            await session.waitForPendingOperations();
+            await session.flush();
             await connection.commit();
             committed = true;
             await session.runPostCommitHooks();
@@ -99,6 +114,36 @@ export class BaseDatabase {
 
     async withTransaction<T>(session: DatabaseSession | undefined, worker: (session: DatabaseSession) => Promise<T>): Promise<T> {
         return session ? worker(session) : this.transaction(worker);
+    }
+
+    registerMutationInterceptor(interceptor: DatabaseMutationInterceptor): () => void {
+        this.mutationInterceptors.add(interceptor);
+        return () => this.mutationInterceptors.delete(interceptor);
+    }
+
+    hasMutationInterceptorFor(metadata: EntityMetadata): boolean {
+        return [...this.mutationInterceptors].some(interceptor => interceptor.observes?.(metadata) ?? true);
+    }
+
+    getMutationQuerySnapshotFields(metadata: EntityMetadata): string[] {
+        const fields = new Set<string>();
+        for (const interceptor of this.mutationInterceptors) {
+            if (!(interceptor.observes?.(metadata) ?? true)) continue;
+            for (const field of interceptor.querySnapshotFields?.(metadata) ?? []) fields.add(field);
+        }
+        return [...fields];
+    }
+
+    private async runMutationInterceptors(session: DatabaseSession): Promise<void> {
+        const mutations = session.getMutations();
+        if (!mutations.length) return;
+
+        for (const interceptor of this.mutationInterceptors) {
+            const observed = interceptor.observes ? mutations.filter(mutation => interceptor.observes!(mutation.metadata)) : mutations;
+            if (!observed.length) continue;
+            const context: DatabaseMutationCommitContext = { database: this, session, mutations: observed };
+            await interceptor.beforeCommit(context);
+        }
     }
 
     async withConnection<T>(worker: (db: this) => Promise<T> | T): Promise<T> {
@@ -247,10 +292,22 @@ export class BaseDatabase {
 
     async saveEntity(entity: object, session?: DatabaseSession): Promise<void> {
         const metadata = getEntityMetadata(entity.constructor as EntityClass);
+        const observed = this.hasMutationInterceptorFor(metadata);
+        if (session && session.db !== this) throw new Error(`Cannot save ${metadata.classType.name} through a session owned by another database`);
+        if (session && observed && !session.isTransactional) {
+            throw new Error(`Observed entity ${metadata.classType.name} requires a transactional database session`);
+        }
+        if (!session && observed) {
+            await this.transaction(async txn => txn.add(entity));
+            return;
+        }
+
         const fields = getEntityFields(entity);
         const pk = metadata.primaryKey.propertyName;
         const pkValue = fields[pk];
         const isNewEntity = !hasEntitySnapshot(entity);
+        let before: Record<string, unknown> | null | undefined;
+        let wrote = false;
 
         if (isNewEntity && (!metadata.primaryKey.autoIncrement || isAutoIncrementSentinel(pkValue))) {
             for (const primaryKey of metadata.primaryKeys) {
@@ -284,13 +341,24 @@ export class BaseDatabase {
                 if (metadata.primaryKey.autoIncrement && result.insertId !== undefined)
                     (entity as unknown as Record<string, unknown>)[pk] = result.insertId;
             }
+            wrote = true;
+            before = null;
+            session?.recordEntityInsert(entity, metadata, metadata.primaryKey.autoIncrement ? pk : undefined, pkValue);
         } else {
             assertPrimaryKeyValues(metadata, fields, 'update');
 
             const dirtyDetails = getDirtyDetails(entity);
             const dirty = metadata.columns.filter(column => !column.primaryKey && Object.hasOwn(dirtyDetails, column.propertyName));
             if (dirty.length) {
-                await this.rawExecute(
+                before = observed
+                    ? await this.loadEntitySnapshotForUpdate(metadata, fields, session)
+                    : (getEntityOriginal(entity) as Record<string, unknown>);
+                if (!before) {
+                    markEntityClean(entity);
+                    session?.removeQueued(entity);
+                    return;
+                }
+                const result = await this.rawExecute(
                     sql`UPDATE ${sql.identifier(metadata.tableName)} SET ${sql.join(
                         dirty.map(
                             column =>
@@ -300,21 +368,74 @@ export class BaseDatabase {
                     )} WHERE ${renderPrimaryKeyWhere(metadata.primaryKeys, fields, this.driver.dialect)}`,
                     session
                 );
+                wrote = result.affectedRows > 0;
+                if (observed) {
+                    Object.assign(
+                        entity,
+                        before,
+                        Object.fromEntries(dirty.map(column => [column.propertyName, dirtyDetails[column.propertyName].current]))
+                    );
+                }
             }
         }
 
+        if (wrote && session) {
+            session.recordEntityMutation(entity, metadata, before ?? null, getEntitySnapshot(entity));
+        }
         markEntityClean(entity);
         session?.removeQueued(entity);
     }
 
     async deleteEntity(entity: object, session?: DatabaseSession): Promise<void> {
         const metadata = getEntityMetadata(entity.constructor as EntityClass);
+        const observed = this.hasMutationInterceptorFor(metadata);
+        if (session && session.db !== this) throw new Error(`Cannot delete ${metadata.classType.name} through a session owned by another database`);
+        if (session && observed && !session.isTransactional) {
+            throw new Error(`Observed entity ${metadata.classType.name} requires a transactional database session`);
+        }
+        if (!session && observed) {
+            await this.transaction(async txn => txn.remove(entity));
+            return;
+        }
+
         const fields = entity as unknown as Record<string, unknown>;
         assertPrimaryKeyValues(metadata, fields, 'delete');
-        await this.rawExecute(
+
+        const before = observed
+            ? await this.loadEntitySnapshotForUpdate(metadata, fields, session)
+            : hasEntitySnapshot(entity)
+              ? (getEntityOriginal(entity) as Record<string, unknown>)
+              : getEntitySnapshot(entity);
+        if (!before) return;
+
+        const result = await this.rawExecute(
             sql`DELETE FROM ${sql.identifier(metadata.tableName)} WHERE ${renderPrimaryKeyWhere(metadata.primaryKeys, fields, this.driver.dialect)}`,
             session
         );
+        if (session && result.affectedRows > 0) session.recordEntityMutation(entity, metadata, before, null);
+    }
+
+    private async loadEntitySnapshotForUpdate(
+        metadata: EntityMetadata,
+        fields: Readonly<Record<string, unknown>>,
+        session: DatabaseSession | undefined
+    ): Promise<Record<string, unknown> | undefined> {
+        if (!session?.isTransactional) throw new Error(`Observed entity ${metadata.classType.name} requires a transactional database session`);
+        const pending = session
+            .getMutations()
+            .find(
+                mutation =>
+                    mutation.kind === 'entity' &&
+                    mutation.metadata.classType === metadata.classType &&
+                    mutation.after !== null &&
+                    metadata.primaryKeys.every(primaryKey => mutation.after?.[primaryKey.propertyName] === fields[primaryKey.propertyName])
+            );
+        if (pending?.kind === 'entity' && pending.after) return { ...pending.after };
+        const filter = Object.fromEntries(metadata.primaryKeys.map(primaryKey => [primaryKey.propertyName, fields[primaryKey.propertyName]]));
+        const persisted = await this.query(metadata.classType, session).filter(filter).forUpdate().findOneOrUndefined();
+        if (!persisted) return undefined;
+        session.unmanage(persisted);
+        return getEntitySnapshot(persisted);
     }
 }
 

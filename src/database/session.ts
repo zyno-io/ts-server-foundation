@@ -1,4 +1,5 @@
 import type { ReceiveType } from '../reflection';
+import { isDeepStrictEqual } from 'node:util';
 
 import type { BaseDatabase } from './database';
 import type { DriverConnection, ExecuteResult } from './driver';
@@ -6,10 +7,52 @@ import type { EntityClass } from './metadata';
 import type { QueryBuilder } from './query';
 import type { SqlInput } from './sql';
 import type { MutexKey } from './database';
-import { hasEntitySnapshot } from './entity';
+import { getEntitySnapshot, hasEntitySnapshot, markEntityClean, markEntityNew } from './entity';
+import type { EntityMetadata } from './metadata';
+import { DatabaseMutationAccumulator, type DatabaseEntitySnapshot, type DatabaseMutation, type DatabaseQueryMutation } from './mutation';
 
 export interface DatabaseSessionOptions {
     transactional?: boolean;
+}
+
+interface TransactionStateEntry {
+    value: unknown;
+    checkpoint(value: unknown): unknown;
+    restore(value: unknown, checkpoint: unknown): void;
+}
+
+interface DatabaseSessionCheckpoint {
+    sequence: number;
+    queued: Set<object>;
+    managed: Set<object>;
+    removed: Set<object>;
+    managedSnapshots: Map<object, Record<string, unknown>>;
+    touchedEntitySnapshots: Map<object, EntityInstanceCheckpointState>;
+    mutationEntitySnapshots: EntityMutationCheckpointState[];
+    insertedEntities: Map<object, InsertedEntityState>;
+    preCommitHookCount: number;
+    postCommitHookCount: number;
+    pendingOperationErrorCount: number;
+    mutations: ReturnType<DatabaseMutationAccumulator['checkpoint']>;
+    transactionStates: Map<object, { entry: TransactionStateEntry; checkpoint: unknown }>;
+}
+
+interface InsertedEntityState {
+    metadata: EntityMetadata;
+    autoIncrementField?: string;
+    previousAutoIncrementValue?: unknown;
+}
+
+interface EntityMutationCheckpointState {
+    entity: object;
+    metadata: EntityMetadata;
+    primaryKeys: readonly unknown[];
+    snapshot: DatabaseEntitySnapshot | null;
+}
+
+interface EntityInstanceCheckpointState {
+    persisted: boolean;
+    snapshot: DatabaseEntitySnapshot;
 }
 
 export class DatabaseSession {
@@ -22,6 +65,12 @@ export class DatabaseSession {
     private postCommitHooks: (() => Promise<void>)[] = [];
     private flushing = false;
     private autoFlushSuppressionDepth = 0;
+    private readonly mutationAccumulator = new DatabaseMutationAccumulator();
+    private insertedEntities = new Map<object, InsertedEntityState>();
+    private readonly touchedEntities = new Map<object, EntityMetadata>();
+    private readonly transactionStates = new Map<object, TransactionStateEntry>();
+    private readonly savepointCheckpoints = new Map<string, DatabaseSessionCheckpoint>();
+    private nextSavepointSequence = 1;
 
     constructor(
         readonly db: BaseDatabase,
@@ -102,9 +151,7 @@ export class DatabaseSession {
     }
 
     async waitForPendingOperations(): Promise<void> {
-        while (this.pendingOperations.size) {
-            await Promise.allSettled(this.pendingOperations);
-        }
+        await this.settlePendingOperations();
         if (this.pendingOperationErrors.length) {
             const [error] = this.pendingOperationErrors;
             this.pendingOperationErrors = [];
@@ -172,40 +219,57 @@ export class DatabaseSession {
 
     async savepoint(name: string): Promise<void> {
         this.assertTransactional('savepoints');
+        await this.waitForPendingOperations();
         await this.flush();
         await this.connection!.savepoint(name);
+        this.savepointCheckpoints.set(name, this.createCheckpoint());
     }
 
     async rollbackToSavepoint(name: string): Promise<void> {
         this.assertTransactional('savepoints');
+        const checkpoint = this.savepointCheckpoints.get(name);
+        if (!checkpoint) throw new Error(`Unknown database savepoint ${name}`);
+        await this.settlePendingOperations();
         await this.connection!.rollbackToSavepoint(name);
+        this.restoreCheckpoint(checkpoint);
+        for (const [savepointName, candidate] of this.savepointCheckpoints) {
+            if (candidate.sequence > checkpoint.sequence) this.savepointCheckpoints.delete(savepointName);
+        }
     }
 
     async withSavepoint<T>(name: string, worker: () => Promise<T>): Promise<T> {
         await this.savepoint(name);
-        const queuedBefore = new Set(this.queued);
-        const managedBefore = new Set(this.managed);
-        const removedBefore = new Set(this.removed);
-        const preCommitHookCount = this.preCommitHooks.length;
-        const postCommitHookCount = this.postCommitHooks.length;
         try {
             return await worker();
         } catch (error) {
             await this.rollbackToSavepoint(name);
-            this.queued = queuedBefore;
-            this.managed = managedBefore;
-            this.removed = removedBefore;
-            this.preCommitHooks.length = preCommitHookCount;
-            this.postCommitHooks.length = postCommitHookCount;
             throw error;
         }
+    }
+
+    /** Stores transaction-local policy state that participates in savepoint rollback. */
+    getTransactionState<T, TCheckpoint>(
+        key: object,
+        create: () => T,
+        checkpoint: (value: T) => TCheckpoint,
+        restore: (value: T, checkpoint: TCheckpoint) => void
+    ): T {
+        const existing = this.transactionStates.get(key);
+        if (existing) return existing.value as T;
+        const value = create();
+        this.transactionStates.set(key, {
+            value,
+            checkpoint: state => checkpoint(state as T),
+            restore: (state, saved) => restore(state as T, saved as TCheckpoint)
+        });
+        return value;
     }
 
     async flush(): Promise<void> {
         if (this.flushing) return;
         this.flushing = true;
         try {
-            for (const entity of [...this.queued]) {
+            for (const entity of this.queued) {
                 if (this.removed.has(entity)) {
                     this.queued.delete(entity);
                     continue;
@@ -214,12 +278,12 @@ export class DatabaseSession {
                 this.queued.delete(entity);
                 this.managed.add(entity);
             }
-            for (const entity of [...this.managed]) {
+            for (const entity of this.managed) {
                 if (this.queued.has(entity)) continue;
                 if (this.removed.has(entity)) continue;
                 await this.db.saveEntity(entity, this);
             }
-            for (const entity of [...this.removed]) {
+            for (const entity of this.removed) {
                 await this.db.deleteEntity(entity, this);
                 this.unmanage(entity);
             }
@@ -236,6 +300,32 @@ export class DatabaseSession {
         this.postCommitHooks.push(hook);
     }
 
+    recordEntityMutation(
+        entity: object,
+        metadata: EntityMetadata,
+        before: DatabaseEntitySnapshot | null,
+        after: DatabaseEntitySnapshot | null
+    ): void {
+        this.touchedEntities.set(entity, metadata);
+        this.mutationAccumulator.recordEntity(entity, metadata, before, after);
+    }
+
+    /** Tracks successful inserts so savepoint rollback can restore reusable entity instances. */
+    recordEntityInsert(entity: object, metadata: EntityMetadata, autoIncrementField?: string, previousAutoIncrementValue?: unknown): void {
+        this.touchedEntities.set(entity, metadata);
+        if (!this.insertedEntities.has(entity)) {
+            this.insertedEntities.set(entity, { metadata, autoIncrementField, previousAutoIncrementValue });
+        }
+    }
+
+    recordQueryMutation(mutation: DatabaseQueryMutation): void {
+        this.mutationAccumulator.recordQuery(mutation);
+    }
+
+    getMutations(): readonly DatabaseMutation[] {
+        return this.mutationAccumulator.getMutations();
+    }
+
     async runPreCommitHooks(): Promise<void> {
         for (const hook of this.preCommitHooks) await hook();
     }
@@ -244,9 +334,138 @@ export class DatabaseSession {
         for (const hook of this.postCommitHooks) await hook();
     }
 
+    private createCheckpoint(): DatabaseSessionCheckpoint {
+        const managedSnapshots = new Map<object, Record<string, unknown>>();
+        for (const entity of this.managed) managedSnapshots.set(entity, getEntitySnapshot(entity));
+        const mutationEntitySnapshots: EntityMutationCheckpointState[] = [];
+        for (const mutation of this.mutationAccumulator.getMutations()) {
+            if (mutation.kind !== 'entity') continue;
+            mutationEntitySnapshots.push({
+                entity: mutation.entity,
+                metadata: mutation.metadata,
+                primaryKeys: getLogicalPrimaryKeys(mutation.metadata, mutation.after ?? mutation.before),
+                snapshot: mutation.after
+            });
+        }
+        const touchedEntitySnapshots = new Map<object, EntityInstanceCheckpointState>();
+        for (const entity of this.touchedEntities.keys()) {
+            touchedEntitySnapshots.set(entity, {
+                persisted: hasEntitySnapshot(entity),
+                snapshot: getEntitySnapshot(entity)
+            });
+        }
+        return {
+            sequence: this.nextSavepointSequence++,
+            queued: new Set(this.queued),
+            managed: new Set(this.managed),
+            removed: new Set(this.removed),
+            managedSnapshots,
+            touchedEntitySnapshots,
+            mutationEntitySnapshots,
+            insertedEntities: new Map(this.insertedEntities),
+            preCommitHookCount: this.preCommitHooks.length,
+            postCommitHookCount: this.postCommitHooks.length,
+            pendingOperationErrorCount: this.pendingOperationErrors.length,
+            mutations: this.mutationAccumulator.checkpoint(),
+            transactionStates: new Map([...this.transactionStates].map(([key, entry]) => [key, { entry, checkpoint: entry.checkpoint(entry.value) }]))
+        };
+    }
+
+    private restoreCheckpoint(checkpoint: DatabaseSessionCheckpoint): void {
+        const currentMutations = this.mutationAccumulator.getMutations();
+        const restoreDirectives: EntityMutationCheckpointState[] = [];
+        for (const mutation of currentMutations) {
+            if (mutation.kind !== 'entity') continue;
+            const primaryKeys = getLogicalPrimaryKeys(mutation.metadata, mutation.after ?? mutation.before);
+            const saved = checkpoint.mutationEntitySnapshots.find(candidate =>
+                sameLogicalEntity(candidate, mutation.metadata, primaryKeys, mutation.entity)
+            );
+            restoreDirectives.push({
+                entity: mutation.entity,
+                metadata: mutation.metadata,
+                primaryKeys,
+                snapshot: saved ? saved.snapshot : mutation.before
+            });
+        }
+        for (const [entity, state] of this.insertedEntities) {
+            if (checkpoint.insertedEntities.has(entity)) continue;
+            const primaryKeys = getLogicalPrimaryKeys(state.metadata, getEntitySnapshot(entity));
+            if (!restoreDirectives.some(candidate => sameLogicalEntity(candidate, state.metadata, primaryKeys, entity))) {
+                restoreDirectives.push({ entity, metadata: state.metadata, primaryKeys, snapshot: null });
+            }
+        }
+        for (const [entity, metadata] of this.touchedEntities) {
+            const savedInstance = checkpoint.touchedEntitySnapshots.get(entity);
+            if (savedInstance) {
+                Object.assign(entity, savedInstance.snapshot);
+                if (savedInstance.persisted) markEntityClean(entity);
+                else markEntityNew(entity);
+                continue;
+            }
+            const primaryKeys = getLogicalPrimaryKeys(metadata, getEntitySnapshot(entity));
+            const directive = restoreDirectives.find(candidate => sameLogicalEntity(candidate, metadata, primaryKeys, entity));
+            if (!directive) continue;
+            if (directive.snapshot) {
+                Object.assign(entity, directive.snapshot);
+                markEntityClean(entity);
+                continue;
+            }
+            const insertedState = this.insertedEntities.get(entity);
+            if (metadata.primaryKey.autoIncrement) {
+                (entity as Record<string, unknown>)[metadata.primaryKey.propertyName] = insertedState?.previousAutoIncrementValue ?? 0;
+            }
+            markEntityNew(entity);
+        }
+        this.queued = new Set(checkpoint.queued);
+        this.managed = new Set(checkpoint.managed);
+        this.removed = new Set(checkpoint.removed);
+        this.insertedEntities = new Map(checkpoint.insertedEntities);
+        for (const [entity, snapshot] of checkpoint.managedSnapshots) {
+            Object.assign(entity, snapshot);
+            markEntityClean(entity);
+        }
+        this.preCommitHooks.length = checkpoint.preCommitHookCount;
+        this.postCommitHooks.length = checkpoint.postCommitHookCount;
+        this.pendingOperationErrors.length = checkpoint.pendingOperationErrorCount;
+        this.mutationAccumulator.restore(checkpoint.mutations);
+
+        for (const key of this.transactionStates.keys()) {
+            if (!checkpoint.transactionStates.has(key)) this.transactionStates.delete(key);
+        }
+        for (const [key, saved] of checkpoint.transactionStates) {
+            saved.entry.restore(saved.entry.value, saved.checkpoint);
+            this.transactionStates.set(key, saved.entry);
+        }
+    }
+
     private assertTransactional(feature: string): void {
         if (!this.isTransactional || !this.connection) throw new Error(`Database ${feature} require an active transaction`);
     }
+
+    private async settlePendingOperations(): Promise<void> {
+        while (this.pendingOperations.size) await Promise.allSettled(this.pendingOperations);
+    }
+}
+
+function getLogicalPrimaryKeys(metadata: EntityMetadata, snapshot: DatabaseEntitySnapshot | null): readonly unknown[] {
+    if (!snapshot) return [];
+    const values = metadata.primaryKeys.map(primaryKey => snapshot[primaryKey.propertyName]);
+    return values.every(value => value !== undefined && value !== null) ? values : [];
+}
+
+function sameLogicalEntity(
+    candidate: Pick<EntityMutationCheckpointState, 'entity' | 'metadata' | 'primaryKeys'>,
+    metadata: EntityMetadata,
+    primaryKeys: readonly unknown[],
+    entity: object
+): boolean {
+    if (candidate.entity === entity) return true;
+    return (
+        candidate.metadata.classType === metadata.classType &&
+        candidate.primaryKeys.length > 0 &&
+        primaryKeys.length > 0 &&
+        isDeepStrictEqual(candidate.primaryKeys, primaryKeys)
+    );
 }
 
 export type DbSession = DatabaseSession;

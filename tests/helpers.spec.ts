@@ -156,6 +156,44 @@ describe('helper utilities', () => {
         });
     });
 
+    it('isolates concurrent nested async contexts', async () => {
+        await withContext(async () => {
+            setContextProp('name', 'outer');
+            const firstEntered = createSemaphore();
+            const releaseFirst = createSemaphore();
+
+            const first = withContextData({ name: 'first' }, async () => {
+                firstEntered.release();
+                await releaseFirst.promise;
+                assert.equal(getContextProp('name'), 'first');
+            });
+            await firstEntered.promise;
+            const second = withContextData({ name: 'second' }, async () => {
+                assert.equal(getContextProp('name'), 'second');
+                releaseFirst.release();
+            });
+
+            await Promise.all([first, second]);
+            assert.equal(getContextProp('name'), 'outer');
+        });
+    });
+
+    it('does not leak a completed context into detached async work', async () => {
+        const releaseDetached = createSemaphore();
+        let detached!: Promise<string | undefined>;
+
+        await withContextData({ name: 'request' }, async () => {
+            detached = (async () => {
+                await releaseDetached.promise;
+                return getContextProp<string>('name');
+            })();
+            assert.equal(getContextProp('name'), 'request');
+        });
+
+        releaseDetached.release();
+        assert.equal(await detached, undefined);
+    });
+
     it('supports local mutex helpers', async () => {
         const firstEntered = createSemaphore();
         const releaseFirst = createSemaphore();

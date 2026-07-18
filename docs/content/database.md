@@ -242,6 +242,7 @@ Query methods:
 | `patchOne(patch)`                              | Directly updates the row identified by an exact primary-key filter.  |
 | `deleteMany()`                                 | Deletes rows matched by the query and returns affected primary keys. |
 | `deleteOne()`                                  | Directly deletes the row identified by an exact primary-key filter.  |
+| `forUpdate()`                                  | Locks selected rows for the active transaction.                      |
 | `toSelectSql()` / `toCountSql()`               | Returns a SQL fragment for inspection or composition.                |
 
 `patchOne()` and `deleteOne()` require top-level exact equality filters for every primary-key component. Additional filters can be used for conditional mutations, such as transitioning a row only when it has an expected status.
@@ -294,9 +295,10 @@ Session methods:
 | `rawFindUnsafe()`, `rawFindOneUnsafe()`, `rawExecuteUnsafe()` | Flushes, then executes string SQL with manual bindings.                                 |
 | `trackOperation(fn)` / `waitForPendingOperations()`           | Tracks query mutations so transaction commit waits for them and propagates rejection.   |
 | `withoutAutoFlush(fn)`                                        | Temporarily suppresses database-method auto-flush behavior for internal/composed reads. |
-| `savepoint(name)`                                             | Flushes and creates a transaction savepoint.                                            |
-| `rollbackToSavepoint(name)`                                   | Rolls back to a savepoint.                                                              |
-| `withSavepoint(name, fn)`                                     | Runs a block and restores queued/managed/removal and hook state if the block throws.    |
+| `savepoint(name)`                                             | Flushes and checkpoints the complete session/policy state at a database savepoint.      |
+| `rollbackToSavepoint(name)`                                   | Rolls back the database and restores the matching complete session checkpoint.          |
+| `withSavepoint(name, fn)`                                     | Runs a block and performs the same complete rollback if the block throws.               |
+| `getTransactionState(key, create, checkpoint, restore)`       | Stores interceptor policy state that participates in savepoint rollback.                |
 | `addPreCommitHook(fn)`                                        | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
 | `addPostCommitHook(fn)`                                       | Runs serially after successful commit; it is skipped on rollback.                       |
 | `acquireSessionLock(key)`                                     | Acquires a transaction-scoped database lock.                                            |
@@ -304,6 +306,45 @@ Session methods:
 Use `db.withTransaction(existingSession, fn)` when helper functions should reuse a caller-provided session if one exists, or open a transaction otherwise.
 
 `db.withConnection(fn)` scopes one acquired connection to all raw operations for that database inside the callback. Nested calls reuse the same connection, and the outer call releases it when the callback settles. It does not start a transaction; use `transaction()` when atomicity is required.
+
+### Mutation interceptors
+
+Database-level mutation interceptors enforce cross-cutting persistence policies without coupling TSF to a particular domain. They receive the net successful ORM changes once per transaction, after ordinary pre-commit hooks and before the final flush:
+
+```ts
+const unregister = db.registerMutationInterceptor({
+    observes: metadata => metadata.classType === User,
+    querySnapshotFields: metadata => (metadata.columns.some(column => column.propertyName === 'tenantId') ? ['tenantId'] : []),
+    async beforeCommit({ session, mutations }) {
+        for (const mutation of mutations) {
+            if (mutation.kind === 'entity') {
+                mutation.before;
+                mutation.after;
+                mutation.changedFields;
+            }
+        }
+
+        // Derived commit artifacts use the same transaction.
+        session.add(createEntity(ChangeIndex, { count: mutations.length }));
+    }
+});
+```
+
+Entity mutations are consolidated by entity identity: repeated flushes retain the earliest `before` snapshot and final `after` snapshot, separate instances of the same database row are combined, and net-zero changes are omitted. An update followed by deletion becomes one delete; an insert followed by deletion disappears from the mutation set.
+
+`QueryBuilder.patchOne()`, `patchMany()`, `deleteOne()`, and `deleteMany()` produce `kind: 'query'` mutations with the entity metadata, affected primary keys, expanded changed-field names (including fields nested under `$inc`), and the patch expression for updates. Interceptors can request persisted pre-mutation policy fields with `querySnapshotFields()`. Those values are aligned with `primaryKeys` in `before`; query mutations deliberately do not claim to contain arbitrary before/after entity snapshots, so policy layers can handle them explicitly or reject them.
+
+When a query mutation is observed, TSF selects and locks its target rows with `FOR UPDATE` in the same transaction before applying the write. The mutation therefore reports the stable primary-key set selected for that write rather than a stale preselection that another transaction can delete or change concurrently.
+
+Observed query mutations cannot patch primary-key fields because interceptor records use the stable pre-mutation key as their durable row identity. Load and explicitly replace the entity when an identity change is genuinely required. QueryBuilder primary-key patches remain available when no mutation interceptor observes the entity.
+
+Once an interceptor observes an entity class, direct entity writes and query-builder mutations for that class automatically run in a transaction. Explicit non-transactional sessions and sessions owned by another database are rejected. Interceptor failure vetoes the commit and rolls the transaction back. Entities queued by an interceptor are flushed atomically before commit and are not recursively passed through the interceptor chain.
+
+Both the public `savepoint()`/`rollbackToSavepoint()` pair and `withSavepoint()` restore queued, managed, removed, hook, mutation-accumulator, and transaction-local policy state. Entity state is restored across every touched instance by object identity and, for instances first encountered after the checkpoint, by entity class plus complete primary key. An entity inserted after the checkpoint is restored to an unpersisted state, including its prior auto-increment sentinel, so any instance representing that rolled-back row can be queued and inserted again. Policies should store mutable transaction state through `getTransactionState()` so a rolled-back claim or marker cannot affect later work.
+
+Observed existing-entity updates and deletes lock and load the persisted row immediately before writing, so interceptors receive the real prior snapshot rather than a stale load or caller-supplied defaults. Updates merge only the caller's dirty fields into that authoritative row for the final snapshot and synchronize untouched concurrent values back to the entity instance. Entity update/delete and query mutations with zero affected rows are omitted. Raw SQL cannot be mapped reliably to ORM entities and is therefore outside mutation interception; applications that enforce entity-level policies should constrain or wrap raw writes separately.
+
+Mutation interceptors should only validate changes or write transaction-local derived artifacts. External side effects belong in a post-commit hook.
 
 ## Session Locks
 

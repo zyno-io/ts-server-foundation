@@ -32,7 +32,11 @@ export interface PostgresDatabaseConfig extends PoolConfig, BaseDatabaseOptions 
     enableLocksTable?: boolean;
 }
 
-export function createDatabaseClass(driverFactory: () => DatabaseDriver, entities: EntityClass[] = [], options: BaseDatabaseOptions = {}) {
+export function createDatabaseClass(
+    driverFactory: () => DatabaseDriver,
+    entities: EntityClass[] = [],
+    options: BaseDatabaseOptions = {}
+): ClassType<BaseDatabase> {
     return class extends BaseDatabase {
         constructor() {
             super(driverFactory(), entities, options);

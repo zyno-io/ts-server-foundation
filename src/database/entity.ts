@@ -11,6 +11,7 @@ import type { FilterQuery, FilterRecord } from './query';
 
 const EntityDatabase = new WeakMap<EntityClass, BaseDatabase>();
 const OriginalSnapshot = new WeakMap<object, Record<string, unknown>>();
+const EntityReferences = new WeakSet<object>();
 
 export type EntityFilterInput<T extends object> = Partial<T> | FilterRecord | string | number;
 
@@ -38,6 +39,7 @@ export class BaseEntity {
         const data = typeof value === 'object' ? value : ({ [getPKFieldForEntity(this)]: value } as Partial<T>);
         const entity = createEntity(this, data);
         markEntityClean(entity);
+        EntityReferences.add(entity);
         return entity;
     }
 
@@ -56,6 +58,7 @@ export class BaseEntity {
 
 export type BaseEntityClassType<T extends BaseEntity = BaseEntity> = EntityClass<T> & typeof BaseEntity;
 type FieldsMatching<T, V> = {
+    // oxlint-disable-next-line typescript/no-explicit-any -- any callable property must be excluded regardless of its parameter and return types
     [K in StringKeyOf<T>]: T[K] extends V ? (T[K] extends (...args: any[]) => any ? never : K) : never;
 }[StringKeyOf<T>];
 export type DataTypes = string | number | boolean | Date | object | null;
@@ -159,12 +162,22 @@ export function markEntityClean(entity: object): void {
     OriginalSnapshot.set(entity, cloneRecord(getEntityFields(entity)));
 }
 
+/** Restores an entity instance to an unpersisted state. */
+export function markEntityNew(entity: object): void {
+    OriginalSnapshot.delete(entity);
+}
+
 export function getEntityOriginal<T extends object>(entity: T): Partial<T> {
     return cloneRecord((OriginalSnapshot.get(entity) as Record<string, unknown> | undefined) ?? {}) as Partial<T>;
 }
 
 export function hasEntitySnapshot(entity: object): boolean {
     return OriginalSnapshot.has(entity);
+}
+
+/** True only for the deliberately partial instance returned by `Entity.reference()`. */
+export function isEntityReference(entity: object): boolean {
+    return EntityReferences.has(entity);
 }
 
 export function getDirtyDetails<T extends object>(entity: T): Record<string, { original: unknown; current: unknown }> {
@@ -200,6 +213,11 @@ export function revertDirtyEntity(entity: object): void {
 export function getEntityFields<T extends object>(entity: T): Record<string, unknown> {
     const metadata = getEntityMetadata(entity.constructor as EntityClass);
     return Object.fromEntries(metadata.columns.map(column => [column.propertyName, (entity as Record<string, unknown>)[column.propertyName]]));
+}
+
+/** Returns a detached copy of every persisted entity field. */
+export function getEntitySnapshot<T extends object>(entity: T): Record<string, unknown> {
+    return cloneRecord(getEntityFields(entity));
 }
 
 export function getPKFieldForEntity(Entity: EntityClass): string {

@@ -23,6 +23,7 @@ import {
     getEntitiesById,
     getEntityMetadata,
     getFieldOriginal,
+    hasEntitySnapshot,
     getKeyedEntities,
     getKeyedGroupedEntities,
     flattenMutexKey,
@@ -1140,6 +1141,31 @@ describe('database query builder and persistence', () => {
         });
     });
 
+    it('rejects primary-key patches when a mutation interceptor observes the entity', async () => {
+        const driver = new FakeDriver();
+        const db = new BaseDatabase(driver, [ApiToken]);
+        db.registerMutationInterceptor({ beforeCommit: () => {} });
+
+        await assert.rejects(
+            () =>
+                db
+                    .query(ApiToken)
+                    .filter({ token: 'old-token' })
+                    .patchMany({ token: 'new-token' } as Partial<ApiToken>),
+            /Observed entity ApiToken cannot patch primary key token/
+        );
+        await assert.rejects(
+            () =>
+                db
+                    .query(ApiToken)
+                    .filter({ token: 'old-token' })
+                    .patchOne({ token: 'new-token' } as Partial<ApiToken>),
+            /Observed entity ApiToken cannot patch primary key token/
+        );
+        assert.equal(driver.queries.length, 0);
+        assert.equal(driver.executes.length, 0);
+    });
+
     it('renders mysql offset-only primary-key paging with an unbounded limit', async () => {
         const driver = new FakeDriver('mysql');
         driver.rows = [{ id: 9 }, { id: 10 }];
@@ -1394,6 +1420,898 @@ describe('database query builder and persistence', () => {
         assert.equal(driver.executes.length, 1);
         assert.equal(driver.connections.length, 1);
         assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'pre', 'commit', 'post', 'release']);
+    });
+
+    it('delivers consolidated entity mutations to database interceptors before commit', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const batches: Parameters<Parameters<typeof db.registerMutationInterceptor>[0]['beforeCommit']>[0][] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                batches.push(context);
+                driver.connections[0].commands.push('intercept');
+            }
+        });
+
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Initial', email: null });
+            session.add(user);
+            await session.rawFindUnsafe('SELECT 1');
+            user.name = 'Final';
+            user.email = 'final@example.com';
+        });
+
+        assert.equal(batches.length, 1);
+        assert.equal(batches[0].database, db);
+        assert.equal(batches[0].mutations.length, 1);
+        assert.deepStrictEqual(batches[0].mutations[0], {
+            kind: 'entity',
+            operation: 'create',
+            entity: batches[0].mutations[0].kind === 'entity' ? batches[0].mutations[0].entity : undefined,
+            metadata: getEntityMetadata(User),
+            before: null,
+            after: { id: 10, name: 'Final', email: 'final@example.com' },
+            changedFields: ['id', 'name', 'email']
+        });
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'query', 'execute', 'intercept', 'commit', 'release']);
+    });
+
+    it('collapses updates to their earliest before and final after state', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], []];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            user.name = 'Middle';
+            await session.rawFindUnsafe('SELECT 1');
+            user.name = 'After';
+            user.email = 'after@example.com';
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'update',
+                entity: user,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Before', email: null },
+                after: { id: 7, name: 'After', email: 'after@example.com' },
+                changedFields: ['name', 'email']
+            }
+        ]);
+    });
+
+    it('consolidates separate instances representing the same database row', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], []];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const first = createEntity(User, { id: 7, name: 'Before', email: null });
+        const second = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(first);
+        markEntityClean(second);
+
+        await db.transaction(async session => {
+            session.manage(first, second);
+            first.name = 'Middle';
+            await session.rawFindUnsafe('SELECT 1');
+            second.name = 'After';
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'update',
+                entity: second,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Before', email: null },
+                after: { id: 7, name: 'After', email: null },
+                changedFields: ['name']
+            }
+        ]);
+    });
+
+    it('drops net-zero entity mutations from the commit batch', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], []];
+        const db = new BaseDatabase(driver, [User]);
+        let interceptorCalls = 0;
+        db.registerMutationInterceptor({
+            beforeCommit: () => {
+                interceptorCalls++;
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            user.name = 'Temporary';
+            await session.rawFindUnsafe('SELECT 1');
+            user.name = 'Before';
+        });
+
+        assert.equal(driver.executes.length, 2);
+        assert.equal(interceptorCalls, 0);
+    });
+
+    it('collapses an update followed by deletion into one delete mutation', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], []];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            user.name = 'Updated';
+            await session.rawFindUnsafe('SELECT 1');
+            session.remove(user);
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'delete',
+                entity: user,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Before', email: null },
+                after: null,
+                changedFields: ['id', 'name', 'email']
+            }
+        ]);
+    });
+
+    it('drops an entity inserted and deleted within the same transaction', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        let interceptorCalls = 0;
+        db.registerMutationInterceptor({
+            beforeCommit: () => {
+                interceptorCalls++;
+            }
+        });
+
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Temporary', email: null });
+            session.add(user);
+            await session.rawFindUnsafe('SELECT 1');
+            session.remove(user);
+        });
+
+        assert.equal(driver.executes.length, 2);
+        assert.equal(interceptorCalls, 0);
+    });
+
+    it('includes mutations produced by ordinary pre-commit hooks', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Initial', email: null });
+            session.add(user);
+            session.addPreCommitHook(async () => {
+                user.name = 'From hook';
+            });
+        });
+
+        assert.equal(mutations.length, 1);
+        assert.deepStrictEqual((mutations[0] as { after: unknown }).after, { id: 10, name: 'From hook', email: null });
+    });
+
+    it('flushes interceptor commit artifacts without recursively invoking interceptors', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User, ApiToken]);
+        let interceptorCalls = 0;
+        db.registerMutationInterceptor({
+            observes: metadata => metadata.classType === User,
+            beforeCommit: context => {
+                interceptorCalls++;
+                context.session.add(createEntity(ApiToken, { token: 'audit', label: context.mutations[0].operation }));
+            }
+        });
+
+        await db.transaction(async session => session.add(createEntity(User, { name: 'Alice', email: null })));
+
+        assert.equal(interceptorCalls, 1);
+        assert.equal(driver.executes.length, 2);
+        assert.match(driver.executes[1].sql, /^INSERT INTO `api_tokens`/);
+    });
+
+    it('rolls back when a mutation interceptor rejects the commit', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        db.registerMutationInterceptor({ beforeCommit: () => Promise.reject(new Error('mutation rejected')) });
+
+        await assert.rejects(
+            db.transaction(async session => session.add(createEntity(User, { name: 'Alice', email: null }))),
+            /mutation rejected/
+        );
+
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'rollback', 'release']);
+    });
+
+    it('restores accumulated mutations when a savepoint is rolled back', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], [], [{ id: 7, name: 'Before', email: null }]];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            await assert.rejects(
+                session.withSavepoint('mutation', async () => {
+                    user.name = 'Rolled back';
+                    await session.rawFindUnsafe('SELECT 1');
+                    throw new Error('rollback mutation');
+                }),
+                /rollback mutation/
+            );
+            assert.equal(user.name, 'Before');
+            user.name = 'After rollback';
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'update',
+                entity: user,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Before', email: null },
+                after: { id: 7, name: 'After rollback', email: null },
+                changedFields: ['name']
+            }
+        ]);
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:mutation',
+            'query',
+            'execute',
+            'query',
+            'rollbackToSavepoint:mutation',
+            'query',
+            'execute',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('restores an entity inserted after a savepoint so the same instance can be retried', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { name: 'Retry', email: null });
+
+        await db.transaction(async session => {
+            await assert.rejects(
+                session.withSavepoint('insert', async () => {
+                    session.add(user);
+                    await session.flush();
+                    assert.equal(user.id, 10);
+                    assert.equal(hasEntitySnapshot(user), true);
+                    throw new Error('retry insert');
+                }),
+                /retry insert/
+            );
+
+            assert.equal(user.id, 0);
+            assert.equal(hasEntitySnapshot(user), false);
+            session.add(user);
+        });
+
+        assert.equal(driver.executes.length, 2);
+        assert.equal(mutations.length, 1);
+        assert.equal((mutations[0] as { operation: string }).operation, 'create');
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:insert',
+            'execute',
+            'rollbackToSavepoint:insert',
+            'execute',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('restores a persisted entity first managed after the savepoint checkpoint', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, name: 'Before', email: null }];
+        const db = new BaseDatabase(driver, [User]);
+        db.registerMutationInterceptor({ beforeCommit: () => {} });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            await assert.rejects(
+                session.withSavepoint('late-managed', async () => {
+                    user.name = 'Rolled back';
+                    await user.save(session);
+                    assert.equal(isEntityDirty(user), false);
+                    throw new Error('rollback late entity');
+                }),
+                /rollback late entity/
+            );
+
+            assert.equal(user.name, 'Before');
+            assert.equal(isEntityDirty(user), false);
+        });
+
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:late-managed',
+            'query',
+            'execute',
+            'rollbackToSavepoint:late-managed',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('restores duplicate instances of one logical row to the savepoint snapshot', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, name: 'Before', email: null }];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const first = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(first);
+
+        await db.transaction(async session => {
+            first.name = 'Outer';
+            await first.save(session);
+            await session.savepoint('logical-row');
+
+            const second = createEntity(User, { id: 7, name: 'Outer', email: null });
+            markEntityClean(second);
+            second.name = 'Inner';
+            await second.save(session);
+            await session.rollbackToSavepoint('logical-row');
+
+            assert.equal(first.name, 'Outer');
+            assert.equal(second.name, 'Outer');
+            assert.equal(isEntityDirty(second), false);
+            second.name = 'Final';
+            await second.save(session);
+        });
+
+        assert.equal(mutations.length, 1);
+        assert.deepStrictEqual((mutations[0] as { before: unknown }).before, { id: 7, name: 'Before', email: null });
+        assert.deepStrictEqual((mutations[0] as { after: unknown }).after, { id: 7, name: 'Final', email: null });
+    });
+
+    it('restores every instance of a nested rolled-back insert to new state', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const inserted = createEntity(User, { name: 'Inserted', email: null });
+        let duplicate!: User;
+
+        await db.transaction(async session => {
+            await session.savepoint('outer-insert');
+            session.add(inserted);
+            await session.flush();
+
+            await assert.rejects(
+                session.withSavepoint('inner-update', async () => {
+                    duplicate = createEntity(User, { id: inserted.id, name: 'Inserted', email: null });
+                    markEntityClean(duplicate);
+                    duplicate.name = 'Inner';
+                    await duplicate.save(session);
+                    throw new Error('rollback duplicate');
+                }),
+                /rollback duplicate/
+            );
+            assert.equal(duplicate.name, 'Inserted');
+            assert.equal(hasEntitySnapshot(duplicate), true);
+
+            await session.rollbackToSavepoint('outer-insert');
+            assert.equal(inserted.id, 0);
+            assert.equal(duplicate.id, 0);
+            assert.equal(hasEntitySnapshot(inserted), false);
+            assert.equal(hasEntitySnapshot(duplicate), false);
+            session.add(duplicate);
+        });
+
+        assert.equal(driver.executes.length, 3);
+        assert.equal(mutations.length, 1);
+        assert.equal((mutations[0] as { entity: object }).entity, duplicate);
+        assert.equal((mutations[0] as { operation: string }).operation, 'create');
+    });
+
+    it('preserves entity work flushed before a rolled-back savepoint', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], []];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            user.name = 'Outer change';
+            await assert.rejects(
+                session.withSavepoint('mutation', async () => {
+                    user.name = 'Inner change';
+                    await session.rawFindUnsafe('SELECT 1');
+                    throw new Error('rollback mutation');
+                }),
+                /rollback mutation/
+            );
+
+            assert.equal(user.name, 'Outer change');
+            assert.equal(isEntityDirty(user), false);
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'update',
+                entity: user,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Before', email: null },
+                after: { id: 7, name: 'Outer change', email: null },
+                changedFields: ['name']
+            }
+        ]);
+    });
+
+    it('automatically transacts direct writes observed by an interceptor', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User, ApiToken]);
+        const operations: string[] = [];
+        const unregister = db.registerMutationInterceptor({
+            observes: metadata => metadata.classType === User,
+            beforeCommit: context => {
+                operations.push(context.mutations[0].operation);
+            }
+        });
+
+        const user = createEntity(User, { name: 'Alice', email: null });
+        await user.save();
+        await createEntity(ApiToken, { token: 'direct', label: 'Direct' }).save();
+        unregister();
+        user.name = 'After unregister';
+        await user.save();
+
+        assert.deepStrictEqual(operations, ['create']);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'commit', 'release']);
+        assert.deepStrictEqual(driver.connections[1].commands, ['execute', 'release']);
+        assert.deepStrictEqual(driver.connections[2].commands, ['execute', 'release']);
+    });
+
+    it('locks and refreshes observed existing entities before updating', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, name: 'Persisted before', email: 'concurrent@example.com' }];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Stale before', email: 'stale@example.com' });
+        markEntityClean(user);
+        user.name = 'Caller after';
+
+        await user.save();
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'update',
+                entity: user,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Persisted before', email: 'concurrent@example.com' },
+                after: { id: 7, name: 'Caller after', email: 'concurrent@example.com' },
+                changedFields: ['name']
+            }
+        ]);
+        assert.equal(user.email, 'concurrent@example.com');
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(driver.queries[0].sql, / FOR UPDATE$/);
+    });
+
+    it('refreshes untouched observed fields even when an update changes no persisted value', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, name: 'Caller after', email: 'concurrent@example.com' }];
+        driver.executeResult = { affectedRows: 0 };
+        const db = new BaseDatabase(driver, [User]);
+        let interceptorCalls = 0;
+        db.registerMutationInterceptor({
+            beforeCommit: () => {
+                interceptorCalls++;
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Stale before', email: 'stale@example.com' });
+        markEntityClean(user);
+        user.name = 'Caller after';
+
+        await user.save();
+
+        assert.equal(interceptorCalls, 0);
+        assert.equal(user.name, 'Caller after');
+        assert.equal(user.email, 'concurrent@example.com');
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(driver.queries[0].sql, / FOR UPDATE$/);
+    });
+
+    it('rejects observed writes through non-transactional or foreign sessions', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        db.registerMutationInterceptor({ beforeCommit: () => {} });
+        const session = new DatabaseSession(db);
+        const user = createEntity(User, { name: 'Alice', email: null });
+
+        await assert.rejects(user.save(session), /requires a transactional database session/);
+        await assert.rejects(
+            session.query(User).filter({ id: 7 }).patchOne({ email: 'unsafe@example.com' }),
+            /requires a transactional database session/
+        );
+
+        const otherDb = new BaseDatabase(new FakeDriver('mysql'), [ApiToken]);
+        const foreignSession = new DatabaseSession(otherDb);
+        await assert.rejects(db.saveEntity(user, foreignSession), /session owned by another database/);
+        assert.equal(driver.executes.length, 0);
+    });
+
+    it('reports query-builder mutations distinctly and automatically transacts them', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+
+        await db.query(User).filter({ id: 7 }).patchOne({ email: 'patched@example.com' });
+        await db.query(User).filter({ id: 8 }).deleteOne();
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'query',
+                operation: 'update',
+                metadata: getEntityMetadata(User),
+                primaryKeys: [{ id: 7 }],
+                before: [{ id: 7 }],
+                changedFields: ['email'],
+                patch: { email: 'patched@example.com' }
+            },
+            {
+                kind: 'query',
+                operation: 'delete',
+                metadata: getEntityMetadata(User),
+                primaryKeys: [{ id: 8 }],
+                before: [{ id: 8 }],
+                changedFields: []
+            }
+        ]);
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [
+                ['begin', 'execute', 'commit', 'release'],
+                ['begin', 'execute', 'commit', 'release']
+            ]
+        );
+    });
+
+    it('snapshots query patches and removes query mutations rolled back to a savepoint', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+
+        await db.transaction(async session => {
+            const patch = { email: 'captured@example.com' };
+            await session.query(User).filter({ id: 7 }).patchOne(patch);
+            patch.email = 'mutated-after-write@example.com';
+
+            await assert.rejects(
+                session.withSavepoint('query-mutation', async () => {
+                    await session.query(User).filter({ id: 8 }).deleteOne();
+                    throw new Error('rollback query mutation');
+                }),
+                /rollback query mutation/
+            );
+        });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'query',
+                operation: 'update',
+                metadata: getEntityMetadata(User),
+                primaryKeys: [{ id: 7 }],
+                before: [{ id: 7 }],
+                changedFields: ['email'],
+                patch: { email: 'captured@example.com' }
+            }
+        ]);
+    });
+
+    it('captures interceptor-requested query values and expands increment field names', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, balance: 20 }];
+        const db = new BaseDatabase(driver, [AccountBalance]);
+        const mutations: unknown[] = [];
+        db.registerMutationInterceptor({
+            querySnapshotFields: () => ['balance'],
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+
+        await db
+            .query(AccountBalance)
+            .filter({ id: 7 })
+            .patchOne({ $inc: { balance: 5 } });
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'query',
+                operation: 'update',
+                metadata: getEntityMetadata(AccountBalance),
+                primaryKeys: [{ id: 7 }],
+                before: [{ id: 7, balance: 20 }],
+                changedFields: ['balance'],
+                patch: { $inc: { balance: 5 } }
+            }
+        ]);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(driver.queries[0].sql, / FOR UPDATE$/);
+    });
+
+    it('locks observed bulk mutation targets before writing the selected primary keys', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [
+            { id: 7, email: null },
+            { id: 8, email: null }
+        ];
+        const db = new BaseDatabase(driver, [User]);
+        db.registerMutationInterceptor({ beforeCommit: () => {} });
+
+        const result = await db.query(User).filter({ email: null }).patchMany({ email: 'locked@example.com' });
+
+        assert.deepStrictEqual(result.primaryKeys, [{ id: 7 }, { id: 8 }]);
+        assert.match(driver.queries[0].sql, / FOR UPDATE$/);
+        assert.match(driver.executes[0].sql, /WHERE `id` IN \(\?, \?\)$/);
+    });
+
+    it('restores mutation and transaction-local policy state through the public savepoint pair', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rowSets = [[{ id: 7, name: 'Before', email: null }], [], [{ id: 7, name: 'Before', email: null }]];
+        const db = new BaseDatabase(driver, [User]);
+        const mutations: unknown[] = [];
+        const stateKey = {};
+        const state = (session: DatabaseSession) =>
+            session.getTransactionState(
+                stateKey,
+                () => new Set<string>(),
+                value => new Set(value),
+                (value, checkpoint) => {
+                    value.clear();
+                    for (const item of checkpoint) value.add(item);
+                }
+            );
+        db.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+
+        await db.transaction(async session => {
+            session.manage(user);
+            state(session).add('outer');
+            await session.savepoint('manual');
+            user.name = 'Rolled back';
+            state(session).add('inner');
+            await session.rawFindUnsafe('SELECT 1');
+            await session.rollbackToSavepoint('manual');
+
+            assert.equal(user.name, 'Before');
+            assert.deepStrictEqual([...state(session)], ['outer']);
+            user.name = 'Committed';
+        });
+
+        assert.equal((mutations[0] as { after: { name: string } }).after.name, 'Committed');
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:manual',
+            'query',
+            'execute',
+            'query',
+            'rollbackToSavepoint:manual',
+            'query',
+            'execute',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('discards tracked-operation failures rolled back with a savepoint', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+
+        await db.transaction(async session => {
+            await assert.rejects(
+                session.withSavepoint('failed-operation', async () => {
+                    await assert.rejects(
+                        session.trackOperation(() => Promise.reject(new Error('query failed'))),
+                        /query failed/
+                    );
+                    throw new Error('roll back block');
+                }),
+                /roll back block/
+            );
+
+            session.add(createEntity(User, { name: 'Still commits', email: null }));
+        });
+
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:failed-operation',
+            'rollbackToSavepoint:failed-operation',
+            'execute',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('loads observed unsnapshotted entities before deletion and skips zero-row entity mutations', async () => {
+        const deleteDriver = new FakeDriver('mysql');
+        deleteDriver.rows = [{ id: 7, name: 'Persisted', email: 'persisted@example.com' }];
+        const deleteDb = new BaseDatabase(deleteDriver, [User]);
+        const mutations: unknown[] = [];
+        deleteDb.registerMutationInterceptor({
+            beforeCommit: context => {
+                mutations.push(...context.mutations);
+            }
+        });
+
+        const reference = User.reference(7);
+        await reference.delete();
+
+        assert.deepStrictEqual(mutations, [
+            {
+                kind: 'entity',
+                operation: 'delete',
+                entity: reference,
+                metadata: getEntityMetadata(User),
+                before: { id: 7, name: 'Persisted', email: 'persisted@example.com' },
+                after: null,
+                changedFields: ['id', 'name', 'email']
+            }
+        ]);
+        assert.deepStrictEqual(deleteDriver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(deleteDriver.queries[0].sql, / FOR UPDATE$/);
+
+        const detachedDriver = new FakeDriver('mysql');
+        detachedDriver.rows = [{ id: 9, name: 'Authoritative', email: 'authoritative@example.com' }];
+        const detachedDb = new BaseDatabase(detachedDriver, [User]);
+        const detachedMutations: unknown[] = [];
+        detachedDb.registerMutationInterceptor({
+            beforeCommit: context => {
+                detachedMutations.push(...context.mutations);
+            }
+        });
+
+        const detached = createEntity(User, { id: 9, name: 'Caller supplied', email: null });
+        await detached.delete();
+
+        assert.deepStrictEqual(detachedMutations, [
+            {
+                kind: 'entity',
+                operation: 'delete',
+                entity: detached,
+                metadata: getEntityMetadata(User),
+                before: { id: 9, name: 'Authoritative', email: 'authoritative@example.com' },
+                after: null,
+                changedFields: ['id', 'name', 'email']
+            }
+        ]);
+        assert.deepStrictEqual(detachedDriver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(detachedDriver.queries[0].sql, / FOR UPDATE$/);
+
+        const loadedDriver = new FakeDriver('mysql');
+        loadedDriver.rows = [{ id: 10, name: 'Concurrent before', email: 'concurrent@example.com' }];
+        const loadedDb = new BaseDatabase(loadedDriver, [User]);
+        const loadedMutations: unknown[] = [];
+        loadedDb.registerMutationInterceptor({
+            beforeCommit: context => {
+                loadedMutations.push(...context.mutations);
+            }
+        });
+        const loaded = createEntity(User, { id: 10, name: 'Stale before', email: 'stale@example.com' });
+        markEntityClean(loaded);
+
+        await loaded.delete();
+
+        assert.deepStrictEqual(loadedMutations, [
+            {
+                kind: 'entity',
+                operation: 'delete',
+                entity: loaded,
+                metadata: getEntityMetadata(User),
+                before: { id: 10, name: 'Concurrent before', email: 'concurrent@example.com' },
+                after: null,
+                changedFields: ['id', 'name', 'email']
+            }
+        ]);
+        assert.deepStrictEqual(loadedDriver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+        assert.match(loadedDriver.queries[0].sql, / FOR UPDATE$/);
+
+        const staleDriver = new FakeDriver('mysql');
+        staleDriver.executeResult = { affectedRows: 0 };
+        const staleDb = new BaseDatabase(staleDriver, [User]);
+        let interceptorCalls = 0;
+        staleDb.registerMutationInterceptor({
+            beforeCommit: () => {
+                interceptorCalls++;
+            }
+        });
+        const stale = createEntity(User, { id: 8, name: 'Before', email: null });
+        markEntityClean(stale);
+        stale.name = 'After';
+        await stale.save();
+        await stale.delete();
+        assert.equal(interceptorCalls, 0);
     });
 
     it('rolls back and releases failed transactions', async () => {

@@ -11,3 +11,13 @@ export * from './factory';
 export * from './drivers';
 export * from './migration';
 export * from './sql';
+export type {
+    DatabaseEntityMutation,
+    DatabaseEntityMutationOperation,
+    DatabaseEntitySnapshot,
+    DatabaseMutation,
+    DatabaseMutationCommitContext,
+    DatabaseMutationInterceptor,
+    DatabaseQueryMutation,
+    DatabaseQueryMutationOperation
+} from './mutation';
