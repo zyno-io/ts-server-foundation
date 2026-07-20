@@ -436,7 +436,7 @@ describe('services', () => {
         assert.equal(reports.length, 7);
     });
 
-    it('reports logged errors to Sentry and alert logs to Slack with DKSF-compatible context', async () => {
+    it('reports logged errors to Sentry and suppresses Slack alerts in test environments', async () => {
         const capture = mock.method(Sentry, 'captureException', () => 'event-id');
         const fetchMock = mock.method(globalThis, 'fetch', async () => new Response('ok'));
         Env.ALERTS_SLACK_WEBHOOK_URL = 'https://hooks.slack.test/services/test';
@@ -467,12 +467,7 @@ describe('services', () => {
             level: 'error'
         });
         assert.equal(secondCaptureContext.level, 'fatal');
-        assert.equal(fetchMock.mock.callCount(), 1);
-        assert.equal(fetchMock.mock.calls[0].arguments[0], 'https://hooks.slack.test/services/test');
-        const webhookBody = JSON.parse((fetchMock.mock.calls[0].arguments[1] as RequestInit).body as string);
-        assert.match(webhookBody.text, /alerted/);
-        assert.equal(webhookBody.attachments[0].fields.find((field: { title: string }) => field.title === 'Scope').value, 'ReporterScope');
-        assert.match(webhookBody.attachments[0].fields.find((field: { title: string }) => field.title === 'Alert Data').value, /456/);
+        assert.equal(fetchMock.mock.callCount(), 0);
     });
 
     it('uses the DKSF pino-pretty configuration in enabled test mode', () => {

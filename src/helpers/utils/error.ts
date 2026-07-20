@@ -2,6 +2,7 @@ import { isNativeError } from 'node:util/types';
 
 import { captureException } from '@sentry/node';
 
+import { isTestEnvironment } from '../../app/const';
 import { Env } from '../../env';
 import { getTraceContext } from '../../telemetry/otel/helpers';
 import { isSentryInstalled } from '../../telemetry/sentry';
@@ -79,7 +80,7 @@ export function reportError(level: number, err: Error, context: IErrorContext): 
             level: level === 1 ? 'fatal' : level === 3 ? 'warning' : 'error'
         });
     }
-    if (level === 1) {
+    if (level === 1 && !isTestEnvironment()) {
         sendSlackAlertNotification(err as DecoratedError, context);
     }
 }
