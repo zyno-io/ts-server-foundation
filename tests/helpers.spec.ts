@@ -353,6 +353,83 @@ describe('helper utilities', () => {
         assert.equal(client.listenerCount('ready'), 0);
     });
 
+    it('suppresses warning and recovery logs for outages shorter than the warning delay', t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        const entries: Array<{ level: 'info' | 'warning' | 'error'; messages: unknown[] }> = [];
+        const logger = {
+            info: (...messages: unknown[]) => entries.push({ level: 'info', messages }),
+            warning: (...messages: unknown[]) => entries.push({ level: 'warning', messages }),
+            error: (...messages: unknown[]) => entries.push({ level: 'error', messages })
+        };
+        const monitor = createAvailabilityMonitor(logger, {
+            alertAfterMs: 10_000,
+            name: 'Transient dependency',
+            warningAfterMs: 2_000
+        });
+
+        monitor.unavailable(new Error('brief reconnect'));
+        t.mock.timers.tick(1_000);
+        monitor.available();
+        t.mock.timers.tick(10_000);
+        assert.deepEqual(entries, []);
+
+        monitor.unavailable(new Error('stopped reconnect'));
+        monitor.stop();
+        t.mock.timers.tick(10_000);
+        assert.deepEqual(entries, []);
+    });
+
+    it('delays availability warnings without shifting the sustained outage alert deadline', t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
+        const entries: Array<{ level: 'info' | 'warning' | 'error'; messages: unknown[] }> = [];
+        const logger = {
+            info: (...messages: unknown[]) => entries.push({ level: 'info', messages }),
+            warning: (...messages: unknown[]) => entries.push({ level: 'warning', messages }),
+            error: (...messages: unknown[]) => entries.push({ level: 'error', messages })
+        };
+        const monitor = createAvailabilityMonitor(logger, {
+            alertAfterMs: 5_000,
+            name: 'Delayed dependency',
+            warningAfterMs: 2_000
+        });
+        const latestError = new Error('latest outage error');
+
+        monitor.unavailable(new Error('initial outage error'));
+        monitor.unavailable(latestError);
+        t.mock.timers.tick(1_999);
+        assert.equal(entries.length, 0);
+
+        t.mock.timers.tick(1);
+        assert.deepEqual(
+            [...entries],
+            [
+                {
+                    level: 'warning',
+                    messages: [
+                        'Delayed dependency is temporarily unavailable',
+                        {
+                            alertAfterMs: 5_000,
+                            warningAfterMs: 2_000,
+                            unavailableForMs: 2_000,
+                            errorMessage: 'latest outage error'
+                        }
+                    ]
+                }
+            ]
+        );
+
+        t.mock.timers.tick(2_999);
+        assert.equal(entries.filter(entry => entry.level === 'error').length, 0);
+        t.mock.timers.tick(1);
+        const errorEntry = entries.find(entry => entry.level === 'error');
+        assert.deepEqual(errorEntry?.messages, ['Delayed dependency remains unavailable', latestError, { unavailableForMs: 5_000 }]);
+
+        monitor.available();
+        const recoveryEntry = entries.find(entry => entry.level === 'info');
+        assert.deepEqual(recoveryEntry?.messages, ['Delayed dependency recovered', { unavailableForMs: 5_000, alerted: true }]);
+        monitor.stop();
+    });
+
     it('reports one availability error per sustained outage and rearms after recovery', () => {
         const entries: Array<{ level: 'info' | 'warning' | 'error'; messages: unknown[] }> = [];
         const logger = {

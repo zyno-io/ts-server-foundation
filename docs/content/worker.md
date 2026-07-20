@@ -105,6 +105,8 @@ The default queue comes from `BaseAppConfig.BULL_QUEUE`. If unset, it is `defaul
 
 Outside `APP_ENV=test`, BullMQ requires a `BULL_REDIS_HOST`/`BULL_REDIS_SENTINEL_HOST` connection or the corresponding generic `REDIS_HOST`/`REDIS_SENTINEL_HOST` fallback.
 
+The runner suppresses Redis availability logs for BullMQ reconnects shorter than two seconds. This filters BullMQ's defensive blocking-connection recycling without shifting the sustained-outage deadline configured by `REDIS_UNAVAILABLE_ALERT_AFTER_MS`. `Worker ready` is logged only for each worker's initial connection; longer outage recovery is reported by the availability monitor.
+
 ## Cron Jobs
 
 Use `cronSchedule` or `cron` on `@WorkerJob()`.

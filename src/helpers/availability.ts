@@ -9,6 +9,7 @@ export interface AvailabilityLogger {
 export interface AvailabilityMonitorOptions {
     alertAfterMs?: number;
     name?: string;
+    warningAfterMs?: number;
 }
 
 export interface AvailabilityMonitor {
@@ -22,12 +23,18 @@ export function createAvailabilityMonitor(logger: AvailabilityLogger, options: A
     if (!Number.isFinite(alertAfterMs) || alertAfterMs < 0) {
         throw new Error('Availability alert delay must be a non-negative number');
     }
+    const warningAfterMs = Number(options.warningAfterMs ?? 0);
+    if (!Number.isFinite(warningAfterMs) || warningAfterMs < 0) {
+        throw new Error('Availability warning delay must be a non-negative number');
+    }
 
     const name = options.name ?? 'Dependency';
     let unavailableAt: number | undefined;
     let lastError: unknown;
     let alertTimer: NodeJS.Timeout | undefined;
+    let warningTimer: NodeJS.Timeout | undefined;
     let alerted = false;
+    let warned = false;
     let stopped = false;
 
     const clearAlertTimer = () => {
@@ -35,9 +42,27 @@ export function createAvailabilityMonitor(logger: AvailabilityLogger, options: A
         alertTimer = undefined;
     };
 
+    const clearWarningTimer = () => {
+        if (warningTimer) clearTimeout(warningTimer);
+        warningTimer = undefined;
+    };
+
+    const reportWarning = () => {
+        clearWarningTimer();
+        if (stopped || unavailableAt === undefined || warned) return;
+        warned = true;
+        logger.warning(`${name} is temporarily unavailable`, {
+            alertAfterMs,
+            warningAfterMs,
+            unavailableForMs: Date.now() - unavailableAt,
+            errorMessage: getErrorMessage(lastError)
+        });
+    };
+
     const reportUnavailable = () => {
-        alertTimer = undefined;
+        clearAlertTimer();
         if (stopped || unavailableAt === undefined || alerted) return;
+        reportWarning();
         alerted = true;
         const unavailableForMs = Date.now() - unavailableAt;
         if (lastError === undefined) {
@@ -53,10 +78,12 @@ export function createAvailabilityMonitor(logger: AvailabilityLogger, options: A
         if (unavailableAt !== undefined) return;
 
         unavailableAt = Date.now();
-        logger.warning(`${name} is temporarily unavailable`, {
-            alertAfterMs,
-            errorMessage: getErrorMessage(error)
-        });
+        if (warningAfterMs === 0) {
+            reportWarning();
+        } else {
+            warningTimer = setTimeout(reportWarning, warningAfterMs);
+            warningTimer.unref?.();
+        }
 
         if (alertAfterMs === 0) {
             reportUnavailable();
@@ -71,10 +98,15 @@ export function createAvailabilityMonitor(logger: AvailabilityLogger, options: A
         const unavailableForMs = Date.now() - unavailableAt;
         const reported = alerted;
         clearAlertTimer();
+        clearWarningTimer();
         unavailableAt = undefined;
         lastError = undefined;
         alerted = false;
-        logger.info(`${name} recovered`, { unavailableForMs, alerted: reported });
+        const shouldLogRecovery = warned;
+        warned = false;
+        if (shouldLogRecovery) {
+            logger.info(`${name} recovered`, { unavailableForMs, alerted: reported });
+        }
     };
 
     return {
@@ -84,6 +116,7 @@ export function createAvailabilityMonitor(logger: AvailabilityLogger, options: A
             if (stopped) return;
             stopped = true;
             clearAlertTimer();
+            clearWarningTimer();
         }
     };
 }

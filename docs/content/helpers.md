@@ -277,14 +277,15 @@ import { createAvailabilityMonitor } from '@zyno-io/ts-server-foundation';
 
 const monitor = createAvailabilityMonitor(logger, {
     name: 'Search service',
-    alertAfterMs: 60_000
+    alertAfterMs: 60_000,
+    warningAfterMs: 2_000
 });
 
 dependency.on('error', error => monitor.unavailable(error));
 dependency.on('ready', () => monitor.available());
 ```
 
-The first `unavailable()` call logs a warning and starts the grace period. Repeated failures update the retained error without producing duplicate warnings or alerts. If the dependency remains unavailable, one error is reported after `alertAfterMs`; `available()` cancels a pending alert, logs recovery, and rearms the monitor. `stop()` permanently cancels the monitor and its timer.
+The first `unavailable()` call records the outage and starts the alert grace period. `warningAfterMs` optionally delays the initial warning; recovery before that delay is silent, which filters short reconnects. Its default is `0`, preserving immediate warnings. Repeated failures update the retained error without producing duplicate warnings or alerts. If the dependency remains unavailable, one error is reported after `alertAfterMs`, measured from the first failure rather than from the delayed warning. `available()` cancels pending timers, logs recovery only when the outage was previously reported, and rearms the monitor. `stop()` permanently cancels the monitor and its timers.
 
 The default grace period is 60 seconds. Dependency-specific adapters can translate their native lifecycle events to `unavailable()` and `available()`; `monitorRedisAvailability()` is the built-in ioredis adapter.
 

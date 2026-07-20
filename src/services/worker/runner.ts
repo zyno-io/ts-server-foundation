@@ -7,6 +7,8 @@ import { BaseJob, getRegisteredWorkerJobs, type IJobOptions, type JobClass, type
 import { notifyWorkerObservers } from './observer';
 import { Worker as BullWorker, type Job as BullJob } from 'bullmq';
 
+const BULLMQ_REDIS_WARNING_AFTER_MS = 2_000;
+
 export interface WorkerExecutionResult<I = unknown, O = unknown> {
     job: QueuedWorkerJob<I>;
     result: O;
@@ -232,7 +234,8 @@ export class WorkerRunnerService {
     private async startBullMqWorkers(): Promise<void> {
         this.bullWorkerRedisMonitor ??= createAvailabilityMonitor(this.logger, {
             alertAfterMs: this.app.config.REDIS_UNAVAILABLE_ALERT_AFTER_MS,
-            name: 'BullMQ worker Redis'
+            name: 'BullMQ worker Redis',
+            warningAfterMs: BULLMQ_REDIS_WARNING_AFTER_MS
         });
         for (const queueName of this.getRegisteredQueueNames()) {
             if (this.bullWorkers.has(queueName)) continue;
@@ -267,7 +270,7 @@ export class WorkerRunnerService {
                 }, 0);
                 timer.unref?.();
             });
-            worker.on('ready', () => {
+            worker.once('ready', () => {
                 this.logger.info('Worker ready', { queue: queueName });
             });
             this.bullWorkers.set(queueName, worker);

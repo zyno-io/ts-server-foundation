@@ -27,11 +27,12 @@ import { monitorRedisAvailability } from '@zyno-io/ts-server-foundation';
 
 const monitor = monitorRedisAvailability(client, logger, {
     alertAfterMs: config.REDIS_UNAVAILABLE_ALERT_AFTER_MS,
-    name: 'SSE Redis'
+    name: 'SSE Redis',
+    warningAfterMs: 2_000
 });
 ```
 
-The default delay is 60 seconds. This changes alert timing only; it does not slow or limit ioredis reconnection attempts.
+The default alert delay is 60 seconds. `warningAfterMs` is optional and defaults to `0`; when set, reconnects that recover before that delay do not produce warning or recovery logs. The sustained-outage alert deadline is still measured from the first failure. These settings affect reporting only and do not slow or limit ioredis reconnection attempts.
 
 Sentinel connections keep one subscription to Sentinel's `+switch-master` notifications so they reconnect as soon as a failover is announced without opening a detector connection to every discovered Sentinel. A `READONLY` response also forces master resolution and retries the rejected command, covering promotions where the old master socket remains open after becoming a replica.
 
