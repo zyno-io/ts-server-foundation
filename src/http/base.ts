@@ -50,13 +50,17 @@ export interface HttpRequestObservation {
 
 export type HttpRequestObserver = (entry: HttpRequestObservation) => void;
 
+export interface HttpRequestObserverOptions {
+    captureRequestBodyBytes?: number;
+}
+
 export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
     private readonly corsOptions: HttpCorsOptions[];
     private readonly staticFiles?: ResolvedStaticFilesOptions;
     private readonly appLogger: ScopedLogger;
     private readonly requestLogger: HttpRequestLogger;
     private readonly upgradeHandlers = new Set<HttpUpgradeHandler>();
-    private readonly observers = new Set<HttpRequestObserver>();
+    private readonly observers = new Map<HttpRequestObserver, HttpRequestObserverOptions>();
     private server?: Server;
 
     constructor(private readonly options: HttpServerRuntimeOptions<C>) {
@@ -76,6 +80,8 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
             maxFormDepth: this.options.config.HTTP_MAX_FORM_DEPTH,
             maxFormArrayIndex: this.options.config.HTTP_MAX_FORM_ARRAY_INDEX
         });
+        const captureRequestBodyBytes = Math.max(0, ...[...this.observers.values()].map(options => options.captureRequestBodyBytes ?? 0));
+        if (captureRequestBodyBytes > 0) request.enableBodyCapture(captureRequestBodyBytes);
         const activeHttpContext = getActiveHttpContext();
         const hasActiveRequestContext = activeHttpContext === request.context;
         const context = hasActiveRequestContext ? (activeHttpContext as Record<string, string>) : applyHttpContext(request);
@@ -185,8 +191,8 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
         };
     }
 
-    registerObserver(observer: HttpRequestObserver): () => void {
-        this.observers.add(observer);
+    registerObserver(observer: HttpRequestObserver, options: HttpRequestObserverOptions = {}): () => void {
+        this.observers.set(observer, options);
         return () => this.observers.delete(observer);
     }
 
@@ -198,7 +204,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     private notifyObservers(entry: HttpRequestObservation): void {
-        for (const observer of this.observers) {
+        for (const observer of this.observers.keys()) {
             try {
                 observer(entry);
             } catch {

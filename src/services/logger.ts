@@ -361,6 +361,7 @@ function stripColors(message: string): string {
 
 function transformLogError(error: unknown): unknown {
     if (!isLogObject(error)) return error;
+    if (Array.isArray(error.errors) && error.errors.includes(error)) return withoutSelfReferentialErrors(error);
     if (error.constructor?.name === 'DatabaseError') {
         delete error.entity;
         delete error.classSchema;
@@ -368,6 +369,12 @@ function transformLogError(error: unknown): unknown {
     }
     if (error.isAxiosError === true) return transformAxiosError(error);
     return error;
+}
+
+function withoutSelfReferentialErrors(error: LogData): LogData {
+    const normalized = Object.create(Object.getPrototypeOf(error), Object.getOwnPropertyDescriptors(error)) as LogData;
+    delete normalized.errors;
+    return normalized;
 }
 
 function transformAxiosError(error: LogData): LogData {

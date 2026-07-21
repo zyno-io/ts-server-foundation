@@ -24,6 +24,11 @@ export interface HttpRequestBodyLimits extends FormBodyLimits {
     maxCompressedBodyBytes: number;
 }
 
+export interface HttpRequestBodyCapture {
+    body: Buffer;
+    totalBytes: number;
+}
+
 export const defaultHttpRequestBodyLimits: HttpRequestBodyLimits = {
     maxBodyBytes: 100 * 1024 * 1024,
     maxCompressedBodyBytes: 25 * 1024 * 1024,
@@ -51,6 +56,10 @@ export class HttpRequest extends Readable {
     private bodyGuardBypass = false;
     private attachedStream?: Readable;
     private cachedBodyDecoded = false;
+    private bodyCaptureLimit?: number;
+    private bodyCaptureChunks: Buffer[] = [];
+    private bodyCaptureBytes = 0;
+    private bodyCaptureTotalBytes = 0;
 
     constructor(
         readonly method: HttpMethod,
@@ -207,6 +216,26 @@ export class HttpRequest extends Readable {
         this.bodyGuardBypass = true;
     }
 
+    enableBodyCapture(maxBytes: number): void {
+        if (!Number.isFinite(maxBytes) || maxBytes <= 0) return;
+        this.bodyCaptureLimit = Math.max(this.bodyCaptureLimit ?? 0, Math.floor(maxBytes));
+    }
+
+    getBodyCapture(): HttpRequestBodyCapture | undefined {
+        if (this.bodyCaptureLimit === undefined) return undefined;
+        if (this.body !== undefined) {
+            return {
+                body: this.body.subarray(0, this.bodyCaptureLimit),
+                totalBytes: this.body.length
+            };
+        }
+        if (this.bodyCaptureTotalBytes === 0) return undefined;
+        return {
+            body: Buffer.concat(this.bodyCaptureChunks, this.bodyCaptureBytes),
+            totalBytes: this.bodyCaptureTotalBytes
+        };
+    }
+
     override _read(): void {
         if (this.streamEnded) return;
         if (this.body !== undefined && !this.bodyGuardBypass && !this.cachedBodyDecoded) {
@@ -260,8 +289,23 @@ export class HttpRequest extends Readable {
         if (this.streamAttached) throw new Error('Request body stream is already being consumed');
         this.streamAttached = true;
         if (!this.bodyStream) return Readable.from([]);
-        if (this.bodyGuardBypass) return this.bodyStream;
-        return createGuardedRequestBodyStream(this.bodyStream, this.headers, this.bodyLimits);
+        const stream = this.bodyGuardBypass ? this.bodyStream : createGuardedRequestBodyStream(this.bodyStream, this.headers, this.bodyLimits);
+        const captureLimit = this.bodyCaptureLimit;
+        if (captureLimit === undefined) return stream;
+        return pipelineToReadable(
+            [
+                stream,
+                new BodyCaptureTransform(chunk => {
+                    this.bodyCaptureTotalBytes += chunk.length;
+                    const remaining = captureLimit - this.bodyCaptureBytes;
+                    if (remaining <= 0) return;
+                    const captured = Buffer.from(chunk.subarray(0, remaining));
+                    this.bodyCaptureChunks.push(captured);
+                    this.bodyCaptureBytes += captured.length;
+                })
+            ],
+            'identity'
+        );
     }
 }
 
@@ -363,6 +407,18 @@ class ByteLimitTransform extends Transform {
             callback(new HttpPayloadTooLargeError(this.message));
             return;
         }
+        callback(null, buffer);
+    }
+}
+
+class BodyCaptureTransform extends Transform {
+    constructor(private readonly capture: (chunk: Buffer) => void) {
+        super();
+    }
+
+    override _transform(chunk: Buffer | string, encoding: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void): void {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+        this.capture(buffer);
         callback(null, buffer);
     }
 }

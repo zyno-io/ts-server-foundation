@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, it } from 'node:test';
 
-import { BaseAppConfig, BaseJob, createApp, HttpRequest, SrpcClient, WorkerJob, WorkerService } from '../src';
+import { BaseAppConfig, BaseJob, createApp, http, HttpRequest, SrpcClient, WorkerJob, WorkerService } from '../src';
 import {
     DevConsoleClientMessage,
     DevConsoleServerMessage,
@@ -36,6 +36,16 @@ class DevConsoleTestConfig extends BaseAppConfig {
 class DevConsoleWorkerTestConfig extends BaseAppConfig {
     APP_ENV = 'test';
     DEVCONSOLE_ENABLED = true;
+}
+
+@http.controller('/devconsole-capture')
+class DevConsoleCaptureController {
+    @http.POST()
+    async post(request: HttpRequest) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        return { body: Buffer.concat(chunks).toString() };
+    }
 }
 
 @WorkerJob({ queueName: 'devconsole-history' })
@@ -171,11 +181,18 @@ describe('devconsole', () => {
 
     it('serves the DevConsole SRPC surface over WebSocket', async () => {
         process.env.APP_ENV = 'development';
-        const app = createApp({ config: DevConsoleTestConfig });
+        const app = createApp({ config: DevConsoleTestConfig, controllers: [DevConsoleCaptureController] });
         const server = await app.http.listen(0, '127.0.0.1');
         const address = server.address() as AddressInfo;
         const largeBody = Buffer.alloc(64 * 1024 + 17, 'x');
         await app.request(HttpRequest.POST('/devconsole-large-body', largeBody));
+        const streamedBody = 'captured streamed request body';
+        const streamedResponse = await fetch(`http://127.0.0.1:${address.port}/devconsole-capture`, {
+            method: 'POST',
+            headers: { 'content-type': 'text/plain', 'x-devconsole-test': 'captured' },
+            body: streamedBody
+        });
+        assert.equal(streamedResponse.status, 200);
         const client = new SrpcClient<DCClientMsg, DCServerMsg>(
             { info() {}, warn() {}, error() {}, debug() {} },
             `ws://127.0.0.1:${address.port}/_devconsole/ws`,
@@ -211,8 +228,12 @@ describe('devconsole', () => {
 
             const requests = JSON.parse((await client.invoke('uGetRequests', {})).jsonData) as Array<{
                 url: string;
+                requestHeaders: Record<string, string>;
                 requestBody: string | null;
             }>;
+            const streamed = requests.find(request => request.url === '/devconsole-capture');
+            assert.equal(streamed?.requestHeaders['x-devconsole-test'], 'captured');
+            assert.equal(streamed?.requestBody, streamedBody);
             const captured = requests.find(request => request.url === '/devconsole-large-body');
             assert.ok(captured?.requestBody);
             assert.equal(Buffer.byteLength(captured.requestBody.split('\n... truncated ')[0]), 64 * 1024);

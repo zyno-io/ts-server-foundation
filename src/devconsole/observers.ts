@@ -9,9 +9,13 @@ import type { HttpRequestObservation } from '../http';
 import type { DevConsoleStore } from './store';
 import { serializeErrorInfo } from './store';
 
+const MAX_CAPTURED_HTTP_BODY_BYTES = 64 * 1024;
+
 export function installDevConsoleObservers(app: App<any>, store: DevConsoleStore): () => void {
     const cleanup = [
-        app.http.registerObserver(entry => recordHttpObservation(store, entry)),
+        app.http.registerObserver(entry => recordHttpObservation(store, entry), {
+            captureRequestBodyBytes: MAX_CAPTURED_HTTP_BODY_BYTES
+        }),
         registerDatabaseQueryObserver(entry => {
             const query = {
                 id: entry.id,
@@ -43,8 +47,8 @@ function recordHttpObservation(store: DevConsoleStore, entry: HttpRequestObserva
         method: entry.request.method,
         url: entry.request.url,
         remoteAddress: entry.request.getRemoteAddress(),
-        requestHeaders: entry.request.headers,
-        requestBody: bufferToBoundedText(entry.request.body),
+        requestHeaders: { ...entry.request.headers },
+        requestBody: requestBodyToBoundedText(entry.request),
         statusCode: entry.response.statusCode,
         responseHeaders: entry.response.headers,
         responseBody: bufferToBoundedText(entry.response.body),
@@ -164,7 +168,13 @@ function toRecord(value: unknown): Record<string, unknown> {
 
 function bufferToBoundedText(body: Buffer | undefined): string | null {
     if (!body?.length) return null;
-    const maxBytes = 64 * 1024;
-    const prefix = body.subarray(0, maxBytes).toString('utf8');
-    return body.length > maxBytes ? `${prefix}\n... truncated ${body.length - maxBytes} byte(s)` : prefix;
+    const prefix = body.subarray(0, MAX_CAPTURED_HTTP_BODY_BYTES).toString('utf8');
+    return body.length > MAX_CAPTURED_HTTP_BODY_BYTES ? `${prefix}\n... truncated ${body.length - MAX_CAPTURED_HTTP_BODY_BYTES} byte(s)` : prefix;
+}
+
+function requestBodyToBoundedText(request: HttpRequestObservation['request']): string | null {
+    const capture = request.getBodyCapture();
+    if (!capture) return bufferToBoundedText(request.body);
+    const prefix = capture.body.toString('utf8');
+    return capture.totalBytes > capture.body.length ? `${prefix}\n... truncated ${capture.totalBytes - capture.body.length} byte(s)` : prefix;
 }

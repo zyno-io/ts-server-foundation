@@ -565,6 +565,38 @@ describe('services', () => {
         assert.match(record.err.stack, /json failed/);
     });
 
+    it('serializes validation errors without recursing through their self-referential error list', () => {
+        const result = spawnSync(
+            process.execPath,
+            [
+                '-e',
+                `
+                const foundation = require(${JSON.stringify(join(process.cwd(), 'dist/src'))});
+                const error = new foundation.ValidatorError('required', 'The value cannot be null.', 'data.0.vanity_format');
+                foundation.createLogger('ValidationScope').error(error);
+                foundation.pinoLogger.flush?.();
+                `
+            ],
+            {
+                cwd: process.cwd(),
+                encoding: 'utf8',
+                env: {
+                    ...process.env,
+                    APP_ENV: 'production',
+                    ENABLE_PINO_PRETTY: 'false'
+                }
+            }
+        );
+
+        assert.equal(result.status, 0, result.stderr);
+        const record = JSON.parse(result.stdout.trim());
+        assert.equal(record.severity, 'ERROR');
+        assert.equal(record.err.type, 'ValidatorError');
+        assert.equal(record.err.code, 'required');
+        assert.equal(record.err.path, 'data.0.vanity_format');
+        assert.equal(record.err.message, 'The value cannot be null.');
+    });
+
     it('keeps non-request logs visible in test mode', () => {
         const env: NodeJS.ProcessEnv = {
             ...process.env,
