@@ -276,6 +276,50 @@ function createFixture(): string {
     return directory;
 }
 
+function createAliasFixture(source: string, emitMetadataRuntimeImport?: boolean): string {
+    const directory = join(tmpdir(), `tsf-alias-transform-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    mkdirSync(join(directory, 'node_modules'), { recursive: true });
+    symlinkSync(join(process.cwd(), 'node_modules', 'typescript'), join(directory, 'node_modules', 'typescript'), 'dir');
+
+    writeFileSync(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+    writeFileSync(join(directory, 'alias-source.mts'), `export type SourceUnion = 'keep-first' | 'remove' | 'keep-second';`);
+    writeFileSync(join(directory, 'alias-source.cts'), `export type SourceUnion = 'keep-first' | 'remove' | 'keep-second';`);
+    writeFileSync(join(directory, 'browser-safe-aliases.mts'), `import type { SourceUnion } from './alias-source.mjs';\n${source}`);
+    writeFileSync(join(directory, 'browser-safe-aliases.cts'), `import type { SourceUnion } from './alias-source.cjs';\n${source}`);
+    const plugin: Record<string, unknown> = {
+        transform: join(process.cwd(), 'src', 'type-compiler', 'index.cjs')
+    };
+    if (emitMetadataRuntimeImport !== undefined) plugin.emitMetadataRuntimeImport = emitMetadataRuntimeImport;
+    writeFileSync(
+        join(directory, 'tsconfig.json'),
+        JSON.stringify(
+            {
+                compilerOptions: {
+                    target: 'ES2019',
+                    module: 'NodeNext',
+                    moduleResolution: 'NodeNext',
+                    outDir: './dist',
+                    strict: true,
+                    plugins: [plugin]
+                },
+                include: ['./*.mts', './*.cts'],
+                reflection: true
+            },
+            null,
+            4
+        )
+    );
+    return directory;
+}
+
+function compileFixture(directory: string) {
+    return spawnSync(join(process.cwd(), 'node_modules', '.bin', 'ttsc'), ['-p', 'tsconfig.json'], {
+        cwd: directory,
+        encoding: 'utf8',
+        env: { ...process.env, NO_COLOR: '1' }
+    });
+}
+
 describe('AST metadata compiler integration', () => {
     it('emits executable NodeNext ESM and CommonJS with declarations and source maps', async () => {
         const directory = createFixture();
@@ -359,6 +403,66 @@ describe('AST metadata compiler integration', () => {
             }
         } finally {
             delete (globalThis as typeof globalThis & { __tsfOrder?: string[] }).__tsfOrder;
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    it('keeps conditional and mapped alias metadata browser-safe in ESM and CommonJS', async () => {
+        const directory = createAliasFixture(
+            `
+                export type ConditionalAlias = Exclude<SourceUnion, 'remove'>;
+                export type MappedAlias = Readonly<{ id: string; enabled: boolean }>;
+                type Optionalize<T> = { [K in keyof T]?: T[K] };
+                export type InstantiatedMappedAlias = Optionalize<{ label: string; count: number }>;
+            `,
+            false
+        );
+        try {
+            const result = compileFixture(directory);
+            assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+            const esmOutputPath = join(directory, 'dist', 'browser-safe-aliases.mjs');
+            const commonOutputPath = join(directory, 'dist', 'browser-safe-aliases.cjs');
+            for (const path of [esmOutputPath, commonOutputPath]) {
+                const output = readFileSync(path, 'utf8');
+                assert.match(output, /__tsfTypeAliases/);
+                assert.doesNotMatch(output, /type-metadata-runtime|ts-server-foundation/);
+                assert.doesNotMatch(output, /classType\s*:\s*\(\)\s*=>\s*(?:Exclude|Readonly|Optionalize)/);
+            }
+
+            const importModule = Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<Record<string, any>>;
+            const esm = await importModule(`${pathToFileURL(esmOutputPath).href}?test=${Date.now()}`);
+            const common = await importModule(`${pathToFileURL(commonOutputPath).href}?test=${Date.now()}`);
+            for (const compiled of [esm, common]) {
+                assert.deepStrictEqual(
+                    compiled.__tsfTypeAliases.ConditionalAlias.types.map((type: { literal: string }) => type.literal),
+                    ['keep-first', 'keep-second']
+                );
+                assert.deepStrictEqual(
+                    compiled.__tsfTypeAliases.MappedAlias.types.map((property: { name: string }) => property.name),
+                    ['id', 'enabled']
+                );
+                assert.deepStrictEqual(
+                    compiled.__tsfTypeAliases.InstantiatedMappedAlias.types.map((property: { name: string; optional: boolean }) => [
+                        property.name,
+                        property.optional
+                    ]),
+                    [
+                        ['label', true],
+                        ['count', true]
+                    ]
+                );
+            }
+
+            writeFileSync(join(directory, 'runtime-value.cts'), `export type RuntimeValueAlias = { createdAt: Date };`);
+            const rejected = compileFixture(directory);
+            assert.notEqual(rejected.status, 0, `${rejected.stdout}\n${rejected.stderr}`);
+            assert.match(
+                rejected.stderr,
+                /reflected alias metadata for RuntimeValueAlias requires @zyno-io\/ts-server-foundation\/type-metadata-runtime/
+            );
+            assert.match(rejected.stderr, /emitMetadataRuntimeImport is false/);
+        } finally {
             rmSync(directory, { recursive: true, force: true });
         }
     });

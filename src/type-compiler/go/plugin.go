@@ -179,8 +179,9 @@ type pluginManifestEntry struct {
 }
 
 type typeCompilerPluginConfig struct {
-	EmitTypeAliases        *bool `json:"emitTypeAliases"`
-	EmitUndecoratedMethods *bool `json:"emitUndecoratedMethods"`
+	EmitMetadataRuntimeImport *bool `json:"emitMetadataRuntimeImport"`
+	EmitTypeAliases           *bool `json:"emitTypeAliases"`
+	EmitUndecoratedMethods    *bool `json:"emitUndecoratedMethods"`
 }
 
 func main() {
@@ -247,10 +248,11 @@ func runBuild(command string, args []string) int {
 		return 2
 	}
 	pluginConfig := readTypeCompilerPluginConfig(opts.pluginsJSON)
+	emitMetadataRuntimeImport := pluginConfig.EmitMetadataRuntimeImport == nil || *pluginConfig.EmitMetadataRuntimeImport
 	emitTypeAliases := pluginConfig.EmitTypeAliases == nil || *pluginConfig.EmitTypeAliases
 	emitUndecoratedMethods := pluginConfig.EmitUndecoratedMethods == nil || *pluginConfig.EmitUndecoratedMethods
 	reg := collectRegistry(prog, opts.cwd, emitTypeAliases, emitUndecoratedMethods)
-	plans, err := buildEmissionPlans(reg, prog, emitTypeAliases)
+	plans, err := buildEmissionPlans(reg, prog, emitTypeAliases, emitMetadataRuntimeImport)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tssf metadata host: build emission plans: %v\n", err)
 		return 2

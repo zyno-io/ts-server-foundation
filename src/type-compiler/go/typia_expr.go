@@ -19,6 +19,7 @@ func typeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.No
 
 func typeExprForNodePreferred(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int, preferTypia bool) string {
 	raw = strings.TrimSpace(stripTypeComments(raw))
+	checkerAlgebra := shouldResolveTypeAlgebraWithChecker(reg, raw, node)
 	if preferTypia {
 		if expr, ok := preferredWrapperTypeExprForNode(info, reg, raw, node, pos); ok {
 			return expr
@@ -41,11 +42,30 @@ func typeExprForNodePreferred(info *fileInfo, reg *registry, raw string, node *s
 		if expr, ok := preferredNamedInterfaceTypeExpr(info, reg, raw, pos); ok {
 			return expr
 		}
-		if canPreferTypiaTypeOnPreferredSurfaceAt(info, reg, raw, pos) {
+		canUseTypia := canPreferTypiaTypeOnPreferredSurfaceAt(info, reg, raw, pos)
+		if checkerAlgebra {
+			// Conditional and mapped aliases are already resolved by the checker.
+			// Their source arguments can contain literal unions whose ordering makes
+			// the general preferred-surface policy conservative, but that should not
+			// force a type-only helper such as Exclude into the runtime-value fallback.
+			canUseTypia = canResolveTypeAlgebraWithChecker(info, reg, raw)
+		}
+		if canUseTypia {
 			if expr, ok := typiaTypeExprForNode(info, reg, raw, node, pos); ok {
 				return typiaSourceNamedExpr(info, reg, expr, raw)
 			}
 		}
+		if checkerAlgebra {
+			return unresolvedTypeAlgebraExpr(info, reg, raw)
+		}
+	}
+	if checkerAlgebra {
+		if canResolveTypeAlgebraWithChecker(info, reg, raw) {
+			if expr, ok := typiaTypeExprForNode(info, reg, raw, node, pos); ok {
+				return typiaSourceNamedExpr(info, reg, expr, raw)
+			}
+		}
+		return unresolvedTypeAlgebraExpr(info, reg, raw)
 	}
 	if shouldUseTextTypeExpr(raw) {
 		return internalTypeExprForNode(info, reg, raw, node, pos)
@@ -666,8 +686,11 @@ func canPreferTypiaTypeOnPreferredSurfaceAt(info *fileInfo, reg *registry, raw s
 	return !hasPreferredTypiaBlockerSyntaxDeep(info, reg, raw, true, pos, map[string]bool{})
 }
 
-func shouldPreferTypiaAliasMetadata(info *fileInfo, reg *registry, raw string, pos int) bool {
+func shouldPreferTypiaAliasMetadata(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) bool {
 	raw = strings.TrimSpace(trimParens(raw))
+	if shouldResolveTypeAlgebraWithChecker(reg, raw, node) {
+		return canResolveTypeAlgebraWithChecker(info, reg, raw)
+	}
 	if sourceTypeContainsIndexedAccessSyntax(raw, map[string]bool{}) {
 		return canPreferTypiaTypeOnPreferredSurfaceAt(info, reg, raw, pos)
 	}
@@ -677,6 +700,88 @@ func shouldPreferTypiaAliasMetadata(info *fileInfo, reg *registry, raw string, p
 	}
 	ref, ok := info.imports[name]
 	return ok && isFoundationImportRef(ref) && !isRootInternalMetadataName(name) && canPreferTypiaTypeOnPreferredSurfaceAt(info, reg, raw, pos)
+}
+
+func canResolveTypeAlgebraWithChecker(info *fileInfo, reg *registry, raw string) bool {
+	// Imported package aliases are runtime package boundaries and must retain
+	// their emitted alias registry lookup. Local and standard-library type
+	// algebra is safe to resolve structurally; Typia preserves supported TSF
+	// tags and native runtime values in the resulting metadata.
+	return !typeContainsExternalImportReference(info, reg, raw, map[string]bool{})
+}
+
+// shouldResolveTypeAlgebraWithChecker recognizes type-only algebra that the
+// internal encoder must not mistake for a JavaScript constructor. Project
+// aliases expose their bodies through the registry and are already handled by
+// shouldUseTypiaType. This extra checker lookup is for direct conditional or
+// mapped syntax and standard-library helpers such as Exclude and Readonly,
+// whose declarations are intentionally excluded from the project registry.
+func shouldResolveTypeAlgebraWithChecker(reg *registry, raw string, node *shimast.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case shimast.KindConditionalType, shimast.KindMappedType:
+		return true
+	case shimast.KindTypeReference:
+	default:
+		return false
+	}
+	name, _, ok := generic(strings.TrimSpace(trimParens(raw)))
+	if !ok || isInternallyEncodedTypeScriptAlias(name) || reg == nil || reg.checker == nil {
+		return false
+	}
+	typeName := node.AsTypeReferenceNode().TypeName
+	if typeName == nil {
+		return false
+	}
+	symbol := reg.checker.GetSymbolAtLocation(typeName)
+	if symbol == nil {
+		return false
+	}
+	if symbol.Flags&shimast.SymbolFlagsAlias != 0 {
+		symbol = shimchecker.Checker_getAliasedSymbol(reg.checker, symbol)
+		if symbol == nil {
+			return false
+		}
+	}
+	for _, declaration := range symbol.Declarations {
+		if declaration == nil || declaration.Kind != shimast.KindTypeAliasDeclaration {
+			continue
+		}
+		file := shimast.GetSourceFileOfNode(declaration)
+		if file == nil || !isTypeScriptLibDeclaration(file.FileName()) {
+			continue
+		}
+		body := declaration.AsTypeAliasDeclaration().Type
+		if body != nil && (body.Kind == shimast.KindConditionalType || body.Kind == shimast.KindMappedType) {
+			return true
+		}
+	}
+	return false
+}
+
+func isInternallyEncodedTypeScriptAlias(name string) bool {
+	switch name {
+	case "Extract", "NoInfer", "NonNullable", "Omit", "Partial", "Pick", "Record", "Required":
+		return true
+	default:
+		return false
+	}
+}
+
+// unresolvedTypeAlgebraExpr is a last-resort guard for a checker-recognized
+// type alias that Typia could not serialize. Type aliases have no runtime value,
+// so returning conservative metadata is safer than emitting classType: () =>
+// Alias, which would both load the compact runtime and throw if evaluated.
+func unresolvedTypeAlgebraExpr(info *fileInfo, reg *registry, raw string) string {
+	name, args, ok := generic(strings.TrimSpace(trimParens(raw)))
+	if !ok {
+		return "{kind: 2, typeName: " + quote(raw) + "}"
+	}
+	return "{kind: 2, typeName: " + quote(name) + ", typeArguments: [" + mapJoin(args, func(arg string) string {
+		return typeExprCtx(info, reg, arg, &typeContext{seen: map[string]bool{}})
+	}) + "]}"
 }
 
 func hasPreferredTypiaBlockerSyntaxDeep(info *fileInfo, reg *registry, raw string, root bool, pos int, seen map[string]bool) bool {

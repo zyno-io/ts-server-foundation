@@ -41,7 +41,7 @@ func precomputeAliasMetadata(info *fileInfo, reg *registry, name string, alias a
 	if info == nil || len(alias.params) != 0 || alias.metadataText != "" || alias.metadataTooLarge {
 		return
 	}
-	metadata := typeExprForNodePreferred(info, reg, alias.body, alias.typeNode, alias.pos, shouldPreferTypiaAliasMetadata(info, reg, alias.body, alias.pos))
+	metadata := typeExprForNodePreferred(info, reg, alias.body, alias.typeNode, alias.pos, shouldPreferTypiaAliasMetadata(info, reg, alias.body, alias.typeNode, alias.pos))
 	if metadataExprTooLarge(metadata) {
 		alias.metadataTooLarge = true
 		info.aliases[name] = alias

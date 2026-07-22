@@ -88,7 +88,7 @@ func isShareableMetadataType(expression *shimast.Node) bool {
 	return true
 }
 
-func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases bool) (emissionPlans, error) {
+func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases bool, emitMetadataRuntimeImport bool) (emissionPlans, error) {
 	plans := emissionPlans{}
 	for _, info := range reg.files {
 		if info == nil || info.file == nil || info.file.IsDeclarationFile {
@@ -145,11 +145,74 @@ func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases 
 				plan.aliases = &template
 			}
 		}
+		if !emitMetadataRuntimeImport {
+			if requirement := metadataRuntimeRequirement(plan); requirement != "" {
+				return nil, fmt.Errorf(
+					"%s: %s requires %s, but emitMetadataRuntimeImport is false",
+					info.file.FileName(),
+					requirement,
+					compactMetadataRuntimeSpec,
+				)
+			}
+		}
 		if len(plan.calls) != 0 || len(plan.classes) != 0 || plan.aliases != nil {
 			plans[info.file.FileName()] = plan
 		}
 	}
 	return plans, nil
+}
+
+// metadataRuntimeRequirement reports the first generated construct that cannot
+// be emitted without TSF's compact metadata runtime. Alias registries made only
+// of JSON stay self-contained; all other current metadata surfaces use runtime
+// decoding or a shared runtime registry by design.
+func metadataRuntimeRequirement(plan *fileEmissionPlan) string {
+	if plan == nil {
+		return ""
+	}
+	if plan.aliases != nil && !compactMetadataIsPureJSON(plan.aliases.parsed) {
+		if names := runtimeAliasMetadataNames(plan.aliases.parsed); len(names) != 0 {
+			return "reflected alias metadata for " + strings.Join(names, ", ")
+		}
+		return "reflected alias metadata"
+	}
+	if len(plan.classes) != 0 {
+		return "reflected class metadata"
+	}
+	if len(plan.calls) != 0 {
+		return "reflected call metadata"
+	}
+	if len(plan.metadataTypes) != 0 {
+		return "the reflected metadata registry"
+	}
+	return ""
+}
+
+func runtimeAliasMetadataNames(metadata *shimast.Node) []string {
+	for metadata != nil && metadata.Kind == shimast.KindParenthesizedExpression {
+		metadata = metadata.AsParenthesizedExpression().Expression
+	}
+	if metadata == nil || metadata.Kind != shimast.KindObjectLiteralExpression {
+		return nil
+	}
+	names := []string{}
+	for _, property := range metadata.AsObjectLiteralExpression().Properties.Nodes {
+		name, ok := compactMetadataPropertyName(property)
+		if !ok {
+			continue
+		}
+		assignment := property.AsPropertyAssignment()
+		if assignment == nil || compactMetadataIsPureJSON(assignment.Initializer) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+func compactMetadataIsPureJSON(metadata *shimast.Node) bool {
+	encoding := encodeCompactMetadata(metadata)
+	return len(encoding.references) == 0 && !strings.Contains(encoding.serialized, `"$tsf`)
 }
 
 func aliasMetadataExpression(info *fileInfo, reg *registry) string {

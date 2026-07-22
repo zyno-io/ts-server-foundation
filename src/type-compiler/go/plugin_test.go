@@ -1,10 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/samchon/ttsc/packages/ttsc/driver"
 	schemametadata "github.com/samchon/typia/packages/typia/native/core/schemas/metadata"
 )
 
@@ -26,6 +29,68 @@ func testTypeInfo() (*fileInfo, *registry) {
 		external: map[string]map[string][]functionInfo{},
 	}
 	return info, reg
+}
+
+func TestExportedTypeAlgebraAliasesUseCheckerMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tsconfig.json"), []byte(`{
+		"compilerOptions": {"strict": true, "target": "ESNext"},
+		"include": ["*.ts"],
+		"reflection": true
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source.ts"), []byte(`
+		export type SourceUnion = 'keep-first' | 'remove' | 'keep-second';
+	`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "aliases.ts"), []byte(`
+		import type { SourceUnion } from './source';
+		export type ConditionalAlias = Exclude<SourceUnion, 'remove'>;
+		export type MappedAlias = Readonly<{ id: string; enabled: boolean }>;
+	`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	program, diagnostics, err := driver.LoadProgram(root, "tsconfig.json", driver.LoadProgramOptions{SingleThreaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diagnostics)
+	}
+	defer func() { _ = program.Close() }()
+
+	reg := collectRegistry(program, root, true, true)
+	var info *fileInfo
+	for _, candidate := range reg.files {
+		if candidate != nil && candidate.file != nil && filepath.Base(candidate.file.FileName()) == "aliases.ts" {
+			info = candidate
+			break
+		}
+	}
+	if info == nil {
+		t.Fatal("aliases.ts was not collected")
+	}
+	conditionalAlias := info.aliases["ConditionalAlias"]
+	if !shouldResolveTypeAlgebraWithChecker(reg, conditionalAlias.body, conditionalAlias.typeNode) {
+		t.Fatal("checker did not recognize Exclude as type algebra")
+	}
+	if !shouldPreferTypiaAliasMetadata(info, reg, conditionalAlias.body, conditionalAlias.typeNode, conditionalAlias.pos) {
+		t.Fatal("checker-recognized Exclude alias did not prefer checker metadata")
+	}
+	conditional := info.aliases["ConditionalAlias"].metadataText
+	assertContainsAll(t, conditional, `literal: "keep-first"`, `literal: "keep-second"`)
+	assertNotContains(t, conditional, `literal: "remove"`)
+	assertNotContains(t, conditional, "classType")
+	nonPreferredConditional := typeExprForNode(info, reg, conditionalAlias.body, conditionalAlias.typeNode, conditionalAlias.pos)
+	assertContainsAll(t, nonPreferredConditional, `literal: "keep-first"`, `literal: "keep-second"`)
+	assertNotContains(t, nonPreferredConditional, `literal: "remove"`)
+	assertNotContains(t, nonPreferredConditional, "classType")
+	mapped := info.aliases["MappedAlias"].metadataText
+	assertContainsAll(t, mapped, `name: "id"`, `name: "enabled"`)
+	assertNotContains(t, mapped, "classType")
 }
 
 func TestTypiaObjectTypeNameKeepsGenericDisplayName(t *testing.T) {
@@ -206,7 +271,7 @@ func TestTypeExprForNodeUsesAstIntersectionMemberOrder(t *testing.T) {
 func TestIndexedAccessAliasPrefersCheckerMetadata(t *testing.T) {
 	info, reg := testTypeInfo()
 
-	if !shouldPreferTypiaAliasMetadata(info, reg, "(typeof PublishableKeyFeatures)[number]", 1) {
+	if !shouldPreferTypiaAliasMetadata(info, reg, "(typeof PublishableKeyFeatures)[number]", nil, 1) {
 		t.Fatal("indexed-access aliases should be resolved by checker-backed metadata")
 	}
 }
@@ -875,6 +940,23 @@ func TestTypeAliasEmissionDefaultsOnAndCanBeDisabled(t *testing.T) {
 	}
 	if !shouldEmitTypeAliases(`[{"name":"tsf-type-metadata","config":{"emitTypeAliases":true}}]`) {
 		t.Fatal("emitTypeAliases=true should enable alias metadata")
+	}
+}
+
+func TestMetadataRuntimeImportDefaultsOnAndCanBeDisabled(t *testing.T) {
+	defaultConfig := readTypeCompilerPluginConfig("")
+	if defaultConfig.EmitMetadataRuntimeImport != nil {
+		t.Fatal("metadata runtime imports should default to enabled")
+	}
+
+	disabled := readTypeCompilerPluginConfig(`[{"name":"tsf-type-metadata","config":{"emitMetadataRuntimeImport":false}}]`)
+	if disabled.EmitMetadataRuntimeImport == nil || *disabled.EmitMetadataRuntimeImport {
+		t.Fatal("emitMetadataRuntimeImport=false should disable metadata runtime imports")
+	}
+
+	enabled := readTypeCompilerPluginConfig(`[{"name":"tsf-type-metadata","config":{"emitMetadataRuntimeImport":true}}]`)
+	if enabled.EmitMetadataRuntimeImport == nil || !*enabled.EmitMetadataRuntimeImport {
+		t.Fatal("emitMetadataRuntimeImport=true should enable metadata runtime imports")
 	}
 }
 

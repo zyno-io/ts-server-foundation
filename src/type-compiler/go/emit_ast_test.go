@@ -219,6 +219,72 @@ func TestAliasMetadataWithRuntimeValuesStillLoadsTheRuntimeDecoder(t *testing.T)
 	}
 }
 
+func TestMetadataRuntimeRequirementAllowsPureJSONAliases(t *testing.T) {
+	template, err := parseExpressionTemplate(`{Status: {kind: 12, types: [{kind: 10, literal: "ready"}, {kind: 10, literal: "busy"}]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &fileEmissionPlan{
+		calls:    map[int]callEmissionPlan{},
+		classes:  map[int]classEmissionPlan{},
+		aliases:  &template,
+		commonJS: true,
+	}
+	if got := metadataRuntimeRequirement(plan); got != "" {
+		t.Fatalf("pure JSON aliases require metadata runtime: %s", got)
+	}
+}
+
+func TestMetadataRuntimeRequirementRejectsRuntimeAliasValues(t *testing.T) {
+	template, err := parseExpressionTemplate(`{RuntimeValue: {kind: 16, classType: () => Date}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &fileEmissionPlan{
+		calls:   map[int]callEmissionPlan{},
+		classes: map[int]classEmissionPlan{},
+		aliases: &template,
+	}
+	if got := metadataRuntimeRequirement(plan); got != "reflected alias metadata for RuntimeValue" {
+		t.Fatalf("runtime alias requirement = %q", got)
+	}
+}
+
+func TestMetadataRuntimeRequirementRejectsRuntimeMetadataSurfaces(t *testing.T) {
+	template, err := parseExpressionTemplate(`{kind: 6}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		plan *fileEmissionPlan
+		want string
+	}{
+		{
+			name: "class",
+			plan: &fileEmissionPlan{classes: map[int]classEmissionPlan{1: {name: "Model", metadata: template}}},
+			want: "reflected class metadata",
+		},
+		{
+			name: "call",
+			plan: &fileEmissionPlan{calls: map[int]callEmissionPlan{1: {name: "typeOf", metadata: template}}},
+			want: "reflected call metadata",
+		},
+		{
+			name: "registry",
+			plan: &fileEmissionPlan{metadataTypes: []expressionTemplate{template}},
+			want: "the reflected metadata registry",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := metadataRuntimeRequirement(test.plan); got != test.want {
+				t.Fatalf("metadata runtime requirement = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompactMetadataHidesGeneratedObjectFromBuiltinTransforms(t *testing.T) {
 	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
 	template, err := parseExpressionTemplate(`{kind: 16, classType: () => Model}`)
