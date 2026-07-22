@@ -583,7 +583,14 @@ function collectObjectLiteralProperties(type: TypeObjectLiteral, seen = new Set<
             }))
         );
     }
-    return [...implemented, ...own];
+    const order: string[] = [];
+    const byName = new Map<string, TypePropertySignature | TypeProperty>();
+    for (const property of [...implemented, ...own]) {
+        const name = String(property.name);
+        if (!byName.has(name)) order.push(name);
+        byName.set(name, property);
+    }
+    return order.map(name => byName.get(name)!);
 }
 
 function getObjectLiteralIndexType(type: TypeObjectLiteral, seen = new Set<Type>()): Type | undefined {

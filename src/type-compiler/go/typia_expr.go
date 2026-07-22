@@ -668,6 +668,9 @@ func canPreferTypiaTypeOnPreferredSurfaceAt(info *fileInfo, reg *registry, raw s
 
 func shouldPreferTypiaAliasMetadata(info *fileInfo, reg *registry, raw string, pos int) bool {
 	raw = strings.TrimSpace(trimParens(raw))
+	if sourceTypeContainsIndexedAccessSyntax(raw, map[string]bool{}) {
+		return canPreferTypiaTypeOnPreferredSurfaceAt(info, reg, raw, pos)
+	}
 	name, _, ok := generic(raw)
 	if !ok {
 		return false

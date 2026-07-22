@@ -1152,6 +1152,7 @@ describe('openapi', () => {
         assert.equal(schemaObject(doc.components?.schemas?.OpenApiInterfaceExtendsAlias?.properties?.id).type, 'string');
         assert.equal(schemaObject(doc.components?.schemas?.OpenApiInterfaceExtendsAlias?.properties?.enabled).type, 'boolean');
         assert.equal(doc.components?.schemas?.OpenApiInterfaceExtendsAlias?.properties?.email, undefined);
+        assert.deepStrictEqual(schemaObject(doc.components?.schemas?.OpenApiInterfaceExtendsAlias).required, ['id', 'enabled']);
         const extendsIntersection = schemaObject(doc.components?.schemas?.OpenApiInterfaceExtendsIntersectionAlias);
         assert.equal(schemaObject(extendsIntersection.properties?.id).type, 'string');
         assert.equal(schemaObject(extendsIntersection.properties?.email).type, 'string');

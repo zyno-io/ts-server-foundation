@@ -192,6 +192,8 @@ function createFixture(): string {
             declare namespace AmbientScope { class Nested { dependency: AmbientDependency; } }
             export declare const __tsfTypeAliases: Record<string, unknown>;
             export type RuntimeAlias = { active: boolean };
+            export const RuntimeFeatureValues = ['sales.ecomm', 'sales.portal'] as const;
+            export type RuntimeFeature = (typeof RuntimeFeatureValues)[number];
             export class EsmModel { dependency!: EsmDependency; }
             export const objectMetadata = typeOf<{ label: string }>();
             type ContactRows = ({ id: string; hasAlerts: boolean; marketingOptOut: boolean | null; tagIds: string[] })[];
@@ -318,6 +320,11 @@ describe('AST metadata compiler integration', () => {
             assert.equal(esm.objectMetadata.types[0].name, 'label');
             assert.equal(esm.EsmModel.__tsfType.properties[0].name, 'dependency');
             assert.equal(esm.__tsfTypeAliases.RuntimeAlias.types[0].name, 'active');
+            assert.equal(esm.__tsfTypeAliases.RuntimeFeature.kind, 12);
+            assert.deepStrictEqual(
+                esm.__tsfTypeAliases.RuntimeFeature.types.map((type: { literal: string }) => type.literal),
+                ['sales.ecomm', 'sales.portal']
+            );
             assert.equal(common.objectMetadata.types[0].name, 'count');
             assert.equal(common.importedDistributionMetadata.index.kind, 13);
             assert.equal(common.importedDistributionMetadata.index.types[1].kind, 12);

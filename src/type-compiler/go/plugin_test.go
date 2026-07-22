@@ -203,6 +203,14 @@ func TestTypeExprForNodeUsesAstIntersectionMemberOrder(t *testing.T) {
 	}
 }
 
+func TestIndexedAccessAliasPrefersCheckerMetadata(t *testing.T) {
+	info, reg := testTypeInfo()
+
+	if !shouldPreferTypiaAliasMetadata(info, reg, "(typeof PublishableKeyFeatures)[number]", 1) {
+		t.Fatal("indexed-access aliases should be resolved by checker-backed metadata")
+	}
+}
+
 func TestRenderUtilityPropertyUsesAstUnionMembers(t *testing.T) {
 	file := parseTestSourceFile(t, "/project/utility-union.ts", `
 		type Status =
