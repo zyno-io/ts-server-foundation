@@ -33,9 +33,14 @@ class FakeConnection implements DriverConnection {
 class FakeDriver implements DatabaseDriver {
     readonly dialect = 'postgres' as const;
     connects = 0;
+    failuresRemaining = 0;
 
     async connect(): Promise<void> {
         this.connects++;
+        if (this.failuresRemaining > 0) {
+            this.failuresRemaining--;
+            throw new Error('database unavailable');
+        }
     }
 
     async close(): Promise<void> {}
@@ -82,7 +87,8 @@ describe('health checks', () => {
         }
     });
 
-    it('registers configured database as provider and health check', async () => {
+    it('caches a successful database health check for 30 seconds', async t => {
+        t.mock.timers.enable({ apis: ['Date'], now: 1_000 });
         const driver = new FakeDriver();
 
         class AppDB extends BaseDatabase {
@@ -95,11 +101,44 @@ describe('health checks', () => {
         const app = createApp({ db: AppDB });
 
         try {
-            const response = await app.request(HttpRequest.GET('/healthz'));
+            const first = await app.request(HttpRequest.GET('/healthz'));
+            const cached = await app.request(HttpRequest.GET('/healthz'));
 
-            assert.equal(response.statusCode, 200);
+            t.mock.timers.tick(29_999);
+            const stillCached = await app.request(HttpRequest.GET('/healthz'));
+
+            t.mock.timers.tick(1);
+            const refreshed = await app.request(HttpRequest.GET('/healthz'));
+
+            assert.equal(first.statusCode, 200);
+            assert.equal(cached.statusCode, 200);
+            assert.equal(stillCached.statusCode, 200);
+            assert.equal(refreshed.statusCode, 200);
             assert.ok(app.get(AppDB) instanceof AppDB);
-            assert.equal(driver.connects, 1);
+            assert.equal(driver.connects, 2);
+        } finally {
+            await app.stop();
+        }
+    });
+
+    it('retries a database health check immediately after failure', async () => {
+        const driver = new FakeDriver();
+        driver.failuresRemaining = 1;
+
+        class AppDB extends BaseDatabase {
+            constructor() {
+                super(driver);
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ db: AppDB });
+        const healthcheck = app.get(HealthcheckService);
+
+        try {
+            await assert.rejects(() => healthcheck.check(), /database unavailable/);
+            await healthcheck.check();
+            assert.equal(driver.connects, 2);
         } finally {
             await app.stop();
         }

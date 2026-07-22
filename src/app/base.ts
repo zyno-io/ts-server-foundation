@@ -78,6 +78,8 @@ interface RegisteredAppCleanup {
     cleanup?: AppCleanup;
 }
 
+const DATABASE_HEALTHCHECK_SUCCESS_TTL_MS = 30_000;
+
 export class App<C extends BaseAppConfig = BaseAppConfig> {
     readonly container: Container;
     readonly events = new EventBus();
@@ -460,11 +462,15 @@ Examples:
 
     private registerDatabaseHealthcheck(dbClass: ClassType): void {
         const healthcheck = this.container.get(HealthcheckService);
+        let lastSuccessfulCheckAt: number | undefined;
         healthcheck.register('database', async () => {
+            if (lastSuccessfulCheckAt !== undefined && Date.now() - lastSuccessfulCheckAt < DATABASE_HEALTHCHECK_SUCCESS_TTL_MS) return;
+
             const db = this.container.get<any>(dbClass);
             if (!db?.driver || typeof db.driver.connect !== 'function') throw new Error('Configured db provider is not a BaseDatabase instance');
             await db.driver.connect();
             await db.rawFind(sql`SELECT 1`);
+            lastSuccessfulCheckAt = Date.now();
         });
     }
 
