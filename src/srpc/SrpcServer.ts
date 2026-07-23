@@ -28,6 +28,8 @@ import {
 import { createWebSocketUpgradeHandler, installWebSocketUpgradeHandler, removeWebSocketUpgradeHandler } from '../http';
 
 const StreamInfoSymbol = Symbol('srpc-info');
+const DefaultLateReplyTombstoneTtlMs = 60_000;
+const MaxLateReplyTombstonesPerStream = 256;
 
 interface StreamInfo {
     clientStreamId: string;
@@ -65,6 +67,7 @@ export class SrpcServer<
     >();
     private readonly blockedClientRequests = new WeakSet<SrpcStream<TMeta>>();
     private readonly pendingClientRequests = new WeakMap<SrpcStream<TMeta>, TClientOutput[]>();
+    private readonly lateReplyTombstonesByStream = new WeakMap<SrpcStream<TMeta>, Map<string, number>>();
     private readonly cleanupUpgradeHandler?: () => void;
     private readonly inactivityCheckInterval: ReturnType<typeof setInterval>;
     private clientAuthorizer?: (metadata: any, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>;
@@ -287,6 +290,10 @@ export class SrpcServer<
         if (data.reply) {
             const queueItem = stream.$queue.get(data.requestId);
             if (!queueItem) {
+                if (this.isLateReply(stream, data.requestId)) {
+                    this.logger.debug('Ignoring reply for an expired request', { requestId: data.requestId });
+                    return;
+                }
                 this.closeStreamWithError(stream, 'badArg', 'Unknown request ID');
                 return;
             }
@@ -374,6 +381,7 @@ export class SrpcServer<
         stream.lastPingAt = -1;
         for (const queueItem of stream.$queue.values()) queueItem.reject(new Error('Stream disconnected'));
         stream.$queue.clear();
+        this.lateReplyTombstonesByStream.delete(stream);
         this.blockedClientRequests.delete(stream);
         this.pendingClientRequests.delete(stream);
         this.streamsById.delete(stream.id);
@@ -513,11 +521,13 @@ export class SrpcServer<
 
         return new Promise<ResponseData<TClientOutput, P>>((resolve, reject) => {
             const timeout = setTimeout(() => {
+                if (!stream.$queue.has(requestId)) return;
                 stream.$queue.delete(requestId);
+                this.addLateReplyTombstone(stream, requestId);
                 reject(new Error(`Request timeout after ${timeoutMs}ms`));
             }, timeoutMs);
 
-            stream.$queue.set(requestId, {
+            const queueItem: IQueuedRequest = {
                 exp: Date.now() + timeoutMs,
                 resolve: response => {
                     clearTimeout(timeout);
@@ -529,18 +539,60 @@ export class SrpcServer<
                     clearTimeout(timeout);
                     reject(error);
                 }
-            });
+            };
+            stream.$queue.set(requestId, queueItem);
 
-            const sent = this.writeToStream(stream, {
-                requestId,
-                [requestType]: data
-            } as unknown as TServerOutput);
+            let sent: boolean;
+            try {
+                sent = this.writeToStream(stream, {
+                    requestId,
+                    [requestType]: data
+                } as unknown as TServerOutput);
+            } catch (error) {
+                if (stream.$queue.get(requestId) === queueItem) stream.$queue.delete(requestId);
+                clearTimeout(timeout);
+                reject(error);
+                return;
+            }
             if (!sent) {
                 stream.$queue.delete(requestId);
                 clearTimeout(timeout);
                 reject(new Error('Failed to send request: not connected'));
             }
         });
+    }
+
+    private addLateReplyTombstone(stream: SrpcStream<TMeta>, requestId: string): void {
+        const now = Date.now();
+        const tombstones = this.lateReplyTombstonesByStream.get(stream) ?? new Map<string, number>();
+        this.pruneLateReplyTombstones(tombstones, now);
+        tombstones.set(requestId, now + this.lateReplyTombstoneTtlMs);
+        while (tombstones.size > MaxLateReplyTombstonesPerStream) {
+            const oldestRequestId = tombstones.keys().next().value;
+            if (oldestRequestId === undefined) break;
+            tombstones.delete(oldestRequestId);
+        }
+        this.lateReplyTombstonesByStream.set(stream, tombstones);
+    }
+
+    private isLateReply(stream: SrpcStream<TMeta>, requestId: string): boolean {
+        const tombstones = this.lateReplyTombstonesByStream.get(stream);
+        if (!tombstones) return false;
+        const now = Date.now();
+        this.pruneLateReplyTombstones(tombstones, now);
+        if (!tombstones.size) this.lateReplyTombstonesByStream.delete(stream);
+        return (tombstones.get(requestId) ?? 0) > now;
+    }
+
+    private pruneLateReplyTombstones(tombstones: Map<string, number>, now: number): void {
+        for (const [requestId, expiresAt] of tombstones) {
+            if (expiresAt <= now) tombstones.delete(requestId);
+        }
+    }
+
+    private get lateReplyTombstoneTtlMs(): number {
+        const configured = this.options.lateReplyTombstoneTtlMs;
+        return configured != null && Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DefaultLateReplyTombstoneTtlMs;
     }
 
     close(): void {

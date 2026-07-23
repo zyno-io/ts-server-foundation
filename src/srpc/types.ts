@@ -73,6 +73,12 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     debug?: boolean;
     logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;
+    /**
+     * How long to ignore a reply for a request that timed out locally. This
+     * prevents a valid late reply from being treated as an unknown request and
+     * disconnecting an otherwise healthy stream. Defaults to 60 seconds.
+     */
+    lateReplyTombstoneTtlMs?: number;
 }
 
 export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {

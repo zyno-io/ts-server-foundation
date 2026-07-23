@@ -78,6 +78,43 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    it('ignores late replies only within the configured tombstone window and cleans up failed sends', async () => {
+        const server = Object.create(SrpcServer.prototype) as any;
+        const sent: Record<string, unknown>[] = [];
+        const closed: [number, string][] = [];
+        server.options = { lateReplyTombstoneTtlMs: 5 };
+        server.logger = createLogger('SrpcLateReplyTest');
+        server.lateReplyTombstonesByStream = new WeakMap();
+        server.writeToStream = (_stream: unknown, message: Record<string, unknown>) => {
+            sent.push(message);
+            return true;
+        };
+
+        const stream = {
+            $queue: new Map(),
+            $ws: { close: (code: number, reason: string) => closed.push([code, reason]) },
+            isActivated: true
+        };
+        const request = server.invoke(stream as any, 'dNotify', { message: 'late reply' }, 1);
+        await assert.rejects(request, /Request timeout after 1ms/);
+        const requestId = sent[0]?.requestId;
+        assert.equal(typeof requestId, 'string');
+
+        server.handleStreamDataReceived(stream, { requestId, reply: true, dNotifyResponse: { received: 1 } });
+        assert.deepEqual(closed, []);
+
+        await delay(15);
+        server.handleStreamDataReceived(stream, { requestId, reply: true, dNotifyResponse: { received: 1 } });
+        assert.deepEqual(closed, [[4000, 'Unknown request ID']]);
+
+        server.writeToStream = () => {
+            throw new Error('encode failed');
+        };
+        const sendFailureStream = { $queue: new Map() };
+        await assert.rejects(server.invoke(sendFailureStream as any, 'dNotify', { message: 'fail' }), /encode failed/);
+        assert.equal(sendFailureStream.$queue.size, 0);
+    });
+
     it('connects with HMAC auth and invokes in both directions', async () => {
         const harness = await createHarness();
         const connected = deferred<SrpcStream<SrpcMeta>>();
