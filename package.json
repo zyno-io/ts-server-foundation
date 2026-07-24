@@ -83,6 +83,7 @@
         "@opentelemetry/sdk-trace-base": "^2.10.0",
         "@opentelemetry/sdk-trace-node": "^2.10.0",
         "@sentry/node": "^10.67.0",
+        "@ttsc/graph": "^0.21.0",
         "@types/ws": "^8.18.1",
         "@zyno-io/config": "^1.14.0",
         "bcrypt": "^6.0.0",
@@ -109,7 +110,6 @@
         "yaml": "^2.9.0"
     },
     "devDependencies": {
-        "@ttsc/graph": "^0.21.0",
         "@types/bcrypt": "^6.0.0",
         "@types/busboy": "^1.5.4",
         "@types/debug": "^4.1.13",

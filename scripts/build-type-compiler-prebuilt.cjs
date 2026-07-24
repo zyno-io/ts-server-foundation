@@ -7,13 +7,21 @@ const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
 
-const { PREBUILT_SCHEMA_VERSION, hashPluginSource, isPublishedReleaseVersion, prebuiltAssetNames } = require('../src/type-compiler/prebuilt.cjs');
+const {
+    PREBUILT_SCHEMA_VERSION,
+    hashPluginSource,
+    isPublishedReleaseVersion,
+    prebuiltAssetNames,
+    resolveToolchainVersions
+} = require('../src/type-compiler/prebuilt.cjs');
 
 function main(args) {
     const options = parseArgs(args);
     if (process.env.CGO_ENABLED !== '0') throw new Error('type compiler prebuilds must be created with CGO_ENABLED=0');
 
-    const packageJson = readJson(path.join(process.cwd(), 'package.json'));
+    // Consumers validate the manifest against their resolved ttsc/typescript
+    // versions, so these must be the installed versions, not dependency ranges.
+    const toolchain = resolveToolchainVersions(process.cwd());
     const packageVersion = options.version;
     if (!isPublishedReleaseVersion(packageVersion)) throw new Error(`invalid published package version ${packageVersion}`);
     const target = `${process.platform}-${process.arch}`;
@@ -27,8 +35,8 @@ function main(args) {
         platform: process.platform,
         arch: process.arch,
         pluginSourceSha256: hashPluginSource(path.join(process.cwd(), 'src', 'type-compiler', 'go')),
-        ttscVersion: packageJson.devDependencies.ttsc,
-        typescriptVersion: packageJson.devDependencies.typescript,
+        ttscVersion: toolchain.ttscVersion,
+        typescriptVersion: toolchain.typescriptVersion,
         cgoEnabled: false,
         binaryAsset: assets.binary,
         binarySha256: crypto.createHash('sha256').update(binaryContent).digest('hex'),
@@ -107,10 +115,6 @@ function resolveGoInspector() {
     } catch {
         return 'go';
     }
-}
-
-function readJson(file) {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
 if (require.main === module) main(process.argv.slice(2));

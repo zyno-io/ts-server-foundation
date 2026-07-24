@@ -143,8 +143,7 @@ function resolveTtscBuild(projectRoot, source) {
         throw new Error('installed ttsc does not expose compatible cache helpers');
     }
 
-    const ttscVersion = readJson(ttscPackageJson).version;
-    const typescriptVersion = readJson(projectRequire.resolve('typescript/package.json')).version;
+    const { ttscVersion, typescriptVersion } = resolveToolchainVersions(projectRoot);
     const goBinary = resolveGoBinary(ttscRoot, internalsPath);
     const cacheKey = internals.computeCacheKey({
         dir: source,
@@ -159,6 +158,19 @@ function resolveTtscBuild(projectRoot, source) {
         cachePaths: internals.resolveSourceBuildCachePaths(projectRoot),
         ttscVersion,
         typescriptVersion
+    };
+}
+
+/**
+ * Resolves the *installed* toolchain versions, never the package.json dependency
+ * ranges. Prebuilt manifests are validated against these exact versions, so the
+ * release builder and the consumer-side check must both read them from here.
+ */
+function resolveToolchainVersions(projectRoot) {
+    const projectRequire = createRequire(path.join(projectRoot, 'package.json'));
+    return {
+        ttscVersion: readJson(projectRequire.resolve('ttsc/package.json')).version,
+        typescriptVersion: readJson(projectRequire.resolve('typescript/package.json')).version
     };
 }
 
@@ -305,6 +317,7 @@ module.exports = {
     hashPluginSource,
     isPublishedReleaseVersion,
     prebuiltAssetNames,
+    resolveToolchainVersions,
     resolveTtscBuild,
     tryInstallPrebuiltTypeCompiler
 };

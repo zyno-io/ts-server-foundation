@@ -12,14 +12,13 @@ const prebuilt = require('../src/type-compiler/prebuilt.cjs') as {
     hashPluginSource(root: string): string;
     isPublishedReleaseVersion(version: unknown): boolean;
     prebuiltAssetNames(target: string): { binary: string; manifest: string };
+    resolveToolchainVersions(projectRoot: string): { ttscVersion: string; typescriptVersion: string };
 };
 // oxlint-disable-next-line typescript/no-require-imports
 const buildPrebuilt = require(join(process.cwd(), 'scripts', 'build-type-compiler-prebuilt.cjs')) as {
     goArchForNodeArch(arch: string): string;
 };
-const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
-    devDependencies: { ttsc: string; typescript: string };
-};
+const toolchain = prebuilt.resolveToolchainVersions(process.cwd());
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -35,6 +34,10 @@ afterEach(async () => {
     );
     for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { force: true, recursive: true });
 });
+
+function readInstalledVersion(name: string): string {
+    return (JSON.parse(readFileSync(require.resolve(`${name}/package.json`), 'utf8')) as { version: string }).version;
+}
 
 function temporaryDirectory(): string {
     const directory = mkdtempSync(join(tmpdir(), 'tsf-type-compiler-prebuilt-'));
@@ -106,8 +109,8 @@ function fixture(directory: string) {
         platform: process.platform,
         arch: process.arch,
         pluginSourceSha256: 'a'.repeat(64),
-        ttscVersion: packageJson.devDependencies.ttsc,
-        typescriptVersion: packageJson.devDependencies.typescript,
+        ttscVersion: toolchain.ttscVersion,
+        typescriptVersion: toolchain.typescriptVersion,
         binaryAsset: `tsf-type-compiler-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`
     };
     const manifest = {
@@ -143,6 +146,22 @@ describe('type compiler prebuilds', () => {
             binary: 'tsf-type-compiler-win32-arm64.exe',
             manifest: 'tsf-type-compiler-win32-arm64.json'
         });
+    });
+
+    it('resolves exact installed toolchain versions rather than dependency ranges', () => {
+        // Manifests are validated against these values, so a range like `^0.21.0`
+        // would make every published prebuilt fail its consumer-side check.
+        const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+            devDependencies: { ttsc: string; typescript: string };
+        };
+        assert.match(toolchain.ttscVersion, /^\d+\.\d+\.\d+/);
+        assert.match(toolchain.typescriptVersion, /^\d+\.\d+\.\d+/);
+        assert.equal(toolchain.ttscVersion, readInstalledVersion('ttsc'));
+        assert.equal(toolchain.typescriptVersion, readInstalledVersion('typescript'));
+        assert.ok(
+            !/^[\^~]/.test(toolchain.ttscVersion) && !/^[\^~]/.test(toolchain.typescriptVersion),
+            `toolchain versions must not be ranges (devDependencies declare ${packageJson.devDependencies.ttsc} / ${packageJson.devDependencies.typescript})`
+        );
     });
 
     it('hashes the complete plugin source deterministically', () => {
