@@ -13,6 +13,7 @@ import {
 } from './cors';
 import { applyHttpContext } from './context';
 import { HttpRequest, type HttpMethod } from './request';
+import { getHttpRequestErrorState } from './request-error-state';
 import { MemoryHttpResponse, NodeHttpResponse, type HttpResponse } from './response';
 import { HttpRouter } from './router';
 import { HttpRequestLogger, type HttpRequestLoggingOptions } from './request-logging';
@@ -112,7 +113,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
             observedError = error;
             throw error;
         } finally {
-            const error = observedError ?? request.store['$ControllerError'];
+            const error = observedError ?? getHttpRequestErrorState(request)?.error;
             if (error && !(observedResponse instanceof NodeHttpResponse))
                 this.requestLogger.errorForRequest(request, observedResponse, startedAt, error);
             this.notifyObservers({
@@ -243,7 +244,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
             try {
                 await this.request(request, response);
                 response.flush();
-                this.requestLogger.error(logging, request.store['$ControllerError'], response);
+                this.requestLogger.error(logging, getHttpRequestErrorState(request)?.error, response);
                 this.requestLogger.finish(logging, response);
             } catch (error) {
                 writeUnhandledNodeError(outgoing, error);

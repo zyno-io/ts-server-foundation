@@ -29,6 +29,7 @@ import { assertTopLevelFormFieldName, defaultFormBodyLimits, parseFormUrlEncoded
 import type { HttpMiddleware, HttpMiddlewareInput } from './middleware';
 import { HttpRequest, HttpRequestStream } from './request';
 import type { HttpMethod } from './request';
+import { clearHttpRequestErrorState, setHttpRequestErrorState } from './request-error-state';
 import { HttpResponse, isHttpResponseResult, MemoryHttpResponse } from './response';
 import { clearCachedValue, getCachedValue, setCachedValue } from './store';
 import {
@@ -158,8 +159,13 @@ export class HttpRouter {
     }
 
     async handle(request: HttpRequest, response: HttpResponse = new MemoryHttpResponse()): Promise<HttpResponse> {
+        let route: HttpRoutePlan | undefined;
+        let matchedRoute = false;
+        clearHttpRequestErrorState(request);
         try {
-            const route = this.match(request);
+            route = this.match(request, () => {
+                matchedRoute = true;
+            });
             if (!route) {
                 await this.dispatchWorkflow(httpWorkflow.onRouteNotFound, request, response);
                 if (response.writableEnded) return response;
@@ -195,7 +201,7 @@ export class HttpRouter {
 
             if (!response.writableEnded && !response.headersSent) this.writeResult(response, result, route);
         } catch (error) {
-            request.store['$ControllerError'] = error;
+            setHttpRequestErrorState(request, error, matchedRoute);
             this.writeError(response, error);
         } finally {
             try {
@@ -208,12 +214,13 @@ export class HttpRouter {
         return response;
     }
 
-    private match(request: HttpRequest): HttpRoutePlan | undefined {
+    private match(request: HttpRequest, onMatchedRoute: () => void): HttpRoutePlan | undefined {
         for (const route of this.routes) {
             if (route.method !== request.method) continue;
             const match = matchRoutePath(route, request.path);
             if (!match) continue;
 
+            onMatchedRoute();
             request.pathParams = {};
             route.paramNames.forEach((name, index) => {
                 try {

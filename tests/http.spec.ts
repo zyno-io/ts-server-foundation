@@ -2596,10 +2596,164 @@ describe('http router', () => {
             );
             assert.strictEqual(entries[0].error, controllerError);
             assert.equal(entries[0].scope, 'http');
+            assert.equal(entries[0].levelName, 'error');
             assert.equal(entries[0].data?.statusCode, 500);
         } finally {
             await app.stop();
             resetLogSink();
+        }
+    });
+
+    it('logs routed HttpErrors as warnings, including client errors', async () => {
+        const entries: LogEntry[] = [];
+
+        @http.controller('/request-http-error-logging')
+        class RequestHttpErrorLoggingController {
+            @http.GET()
+            get() {
+                throw new HttpNotFoundError('Requested resource is unavailable');
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            controllers: [RequestHttpErrorLoggingController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'errors' }
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+
+        try {
+            const response = await requestNodeHttp(address.port, 'GET', '/request-http-error-logging');
+
+            assert.equal(response.statusCode, 404);
+            assert.deepStrictEqual(
+                entries.map(entry => entry.message),
+                ['Request processing error']
+            );
+            assert.equal(entries[0].levelName, 'warning');
+            assert.equal(entries[0].scope, 'http');
+            assert.deepStrictEqual(entries[0].data, { 'error.message': 'Requested resource is unavailable' });
+            assert.equal(entries[0].error, undefined);
+        } finally {
+            await app.stop();
+            resetLogSink();
+        }
+    });
+
+    it('logs middleware HttpErrors as warnings for matched routes', async () => {
+        const entries: LogEntry[] = [];
+        const middleware: HttpMiddlewareFunction = () => {
+            throw new HttpNotFoundError('Middleware rejected the request');
+        };
+
+        @http.middleware(middleware)
+        @http.controller('/middleware-http-error-logging')
+        class MiddlewareHttpErrorLoggingController {
+            @http.GET()
+            get() {
+                return { ok: true };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            controllers: [MiddlewareHttpErrorLoggingController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'errors' }
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+
+        try {
+            const response = await requestNodeHttp(address.port, 'GET', '/middleware-http-error-logging');
+
+            assert.equal(response.statusCode, 404);
+            assert.deepStrictEqual(
+                entries.map(entry => entry.message),
+                ['Request processing error']
+            );
+            assert.equal(entries[0].levelName, 'warning');
+            assert.deepStrictEqual(entries[0].data, { 'error.message': 'Middleware rejected the request' });
+        } finally {
+            await app.stop();
+            resetLogSink();
+        }
+    });
+
+    it('logs malformed path parameter HttpErrors as warnings for matched routes', async () => {
+        const entries: LogEntry[] = [];
+
+        @http.controller('/malformed-path-error-logging')
+        class MalformedPathErrorLoggingController {
+            @http.GET('/:id')
+            get() {
+                return { ok: true };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            controllers: [MalformedPathErrorLoggingController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'errors' }
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+
+        try {
+            const response = await requestNodeHttp(address.port, 'GET', '/malformed-path-error-logging/%E0%A4%A');
+
+            assert.equal(response.statusCode, 400);
+            assert.deepStrictEqual(
+                entries.map(entry => entry.message),
+                ['Request processing error']
+            );
+            assert.equal(entries[0].levelName, 'warning');
+            assert.deepStrictEqual(entries[0].data, {
+                'error.message': 'Invalid URL encoding for path parameter "id"'
+            });
+        } finally {
+            await app.stop();
+            resetLogSink();
+        }
+    });
+
+    it('does not log controller HttpErrors when request logging is disabled or excluded', async () => {
+        @http.controller('/request-http-error-logging-independent')
+        class RequestHttpErrorLoggingIndependentController {
+            @http.GET()
+            get() {
+                throw new HttpNotFoundError('Requested resource is unavailable');
+            }
+        }
+
+        const cases = [
+            { defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'none' as const } },
+            { requestLogging: { excludePaths: ['/request-http-error-logging-independent'] } }
+        ];
+
+        process.env.APP_ENV = 'test';
+        for (const options of cases) {
+            const entries: LogEntry[] = [];
+            setLogSink(entry => entries.push(entry));
+            const app = createApp({
+                controllers: [RequestHttpErrorLoggingIndependentController],
+                ...options
+            });
+            const server = await app.http.listen(0, '127.0.0.1');
+            const address = server.address() as AddressInfo;
+
+            try {
+                const response = await requestNodeHttp(address.port, 'GET', '/request-http-error-logging-independent');
+
+                assert.equal(response.statusCode, 404);
+                assert.deepStrictEqual(entries, []);
+            } finally {
+                await app.stop();
+                resetLogSink();
+            }
         }
     });
 

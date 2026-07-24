@@ -3,6 +3,8 @@ import type { ServerResponse } from 'node:http';
 import type { BaseAppConfig } from '../app/config';
 import { isTestEnvironment } from '../app/const';
 import type { ScopedLogger } from '../services';
+import { HttpError } from './errors';
+import { getHttpRequestErrorState } from './request-error-state';
 import type { HttpRequest } from './request';
 
 type RequestLoggingMode = BaseAppConfig['HTTP_REQUEST_LOGGING_MODE'];
@@ -82,7 +84,15 @@ export class HttpRequestLogger {
     }
 
     error(state: RequestLoggingState, error: unknown, response: ResponseLoggingTarget): void {
-        if (!error || state.skipped || state.mode === 'none' || response.statusCode < 500) return;
+        if (!error || state.skipped || state.mode === 'none') return;
+        if (error instanceof HttpError) {
+            const requestError = getHttpRequestErrorState(state.request);
+            if (requestError?.error === error && requestError.matchedRoute) {
+                this.logger.warn('Request processing error', { 'error.message': error.message });
+            }
+            return;
+        }
+        if (response.statusCode < 500) return;
         this.logger.error('Request processing error', error, {
             method: state.request.method,
             url: state.request.url,
