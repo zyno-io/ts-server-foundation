@@ -2616,6 +2616,7 @@ describe('http router', () => {
         }
 
         process.env.APP_ENV = 'test';
+        setHttpContextResolver(() => ({ reqId: 'test-req' }));
         setLogSink(entry => entries.push(entry));
         const app = createApp({
             controllers: [RequestHttpErrorLoggingController],
@@ -2634,11 +2635,15 @@ describe('http router', () => {
             );
             assert.equal(entries[0].levelName, 'warning');
             assert.equal(entries[0].scope, 'http');
-            assert.deepStrictEqual(entries[0].data, { 'error.message': 'Requested resource is unavailable' });
+            assert.deepStrictEqual(entries[0].data, {
+                http: { reqId: 'test-req' },
+                'error.message': 'Requested resource is unavailable'
+            });
             assert.equal(entries[0].error, undefined);
         } finally {
             await app.stop();
             resetLogSink();
+            setHttpContextResolver(() => ({ reqId: 'test-req' }));
         }
     });
 
@@ -2658,6 +2663,7 @@ describe('http router', () => {
         }
 
         process.env.APP_ENV = 'test';
+        setHttpContextResolver(() => ({ reqId: 'test-req' }));
         setLogSink(entry => entries.push(entry));
         const app = createApp({
             controllers: [MiddlewareHttpErrorLoggingController],
@@ -2675,10 +2681,14 @@ describe('http router', () => {
                 ['Request processing error']
             );
             assert.equal(entries[0].levelName, 'warning');
-            assert.deepStrictEqual(entries[0].data, { 'error.message': 'Middleware rejected the request' });
+            assert.deepStrictEqual(entries[0].data, {
+                http: { reqId: 'test-req' },
+                'error.message': 'Middleware rejected the request'
+            });
         } finally {
             await app.stop();
             resetLogSink();
+            setHttpContextResolver(() => ({ reqId: 'test-req' }));
         }
     });
 
@@ -2694,6 +2704,7 @@ describe('http router', () => {
         }
 
         process.env.APP_ENV = 'test';
+        setHttpContextResolver(() => ({ reqId: 'test-req' }));
         setLogSink(entry => entries.push(entry));
         const app = createApp({
             controllers: [MalformedPathErrorLoggingController],
@@ -2712,11 +2723,13 @@ describe('http router', () => {
             );
             assert.equal(entries[0].levelName, 'warning');
             assert.deepStrictEqual(entries[0].data, {
+                http: { reqId: 'test-req' },
                 'error.message': 'Invalid URL encoding for path parameter "id"'
             });
         } finally {
             await app.stop();
             resetLogSink();
+            setHttpContextResolver(() => ({ reqId: 'test-req' }));
         }
     });
 
