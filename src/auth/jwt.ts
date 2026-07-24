@@ -4,6 +4,7 @@ import { createDecoder, createSigner, createVerifier, TokenError } from 'fast-jw
 import type { Algorithm } from 'fast-jwt';
 
 import { BaseAppConfig, getAppConfig } from '../app';
+import { getRequestHeader } from '../http/headers';
 import type { HttpRequest } from '../http/request';
 import type { HttpResponse } from '../http/response';
 
@@ -209,13 +210,13 @@ export class JWT {
     }
 
     static async processWithRequest<T extends JwtExtras = JwtExtras>(request: HttpRequest): Promise<JwtValidationResult<T> | null> {
-        const authorization = getHeader(request, 'authorization');
+        const authorization = getRequestHeader(request, 'authorization');
         if (typeof authorization === 'string') {
             const match = /^bearer\s+(\S+)$/i.exec(authorization.trim());
             if (match) return this.process<T>(match[1]);
         }
 
-        const cookie = getHeader(request, 'cookie');
+        const cookie = getRequestHeader(request, 'cookie');
         if (typeof cookie === 'string') {
             const token = readCookie(cookie, getCookieName());
             if (token) return this.process<T>(token);
@@ -437,10 +438,6 @@ function isAudienceAccepted(claim: string | string[] | undefined, expected: stri
     const claimValues = Array.isArray(claim) ? claim : [claim];
     const expectedValues = Array.isArray(expected) ? expected : [expected];
     return expectedValues.some(value => claimValues.includes(value));
-}
-
-function getHeader(request: HttpRequest, name: string): string | string[] | undefined {
-    return request.headers[name] ?? request.headers[name.toLowerCase()];
 }
 
 function readCookie(cookieHeader: string, name: string): string | undefined {

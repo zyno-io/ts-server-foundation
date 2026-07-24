@@ -4,6 +4,7 @@ import { createGunzip } from 'node:zlib';
 
 import { HttpBadRequestError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
 import { defaultFormBodyLimits, type FormBodyLimits } from './form-body';
+import { getHeaderValue } from './headers';
 import type { UploadedFiles } from './uploads';
 
 export type KnownHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD';
@@ -164,9 +165,9 @@ export class HttpRequest extends Readable {
 
     getRemoteAddress(): string {
         if (!this.trustProxyHeaders) return this.remoteAddress;
-        const realIp = getHeader(this.headers, 'x-real-ip');
+        const realIp = getHeaderValue(this.headers, 'x-real-ip');
         if (typeof realIp === 'string') return realIp;
-        const forwarded = getHeader(this.headers, 'x-forwarded-for');
+        const forwarded = getHeaderValue(this.headers, 'x-forwarded-for');
         if (typeof forwarded === 'string') return forwarded.split(',')[0]?.trim() || this.remoteAddress;
         return this.remoteAddress;
     }
@@ -311,10 +312,6 @@ export class HttpRequest extends Readable {
 
 export class HttpRequestStream extends HttpRequest {}
 
-function getHeader(headers: Record<string, string>, name: string): string | undefined {
-    return headers[name] ?? headers[name.toLowerCase()];
-}
-
 function createHeaderStore(headers: HttpHeaderInput, request: HttpRequest): HttpRequestHeaders {
     const store = ((nextHeaders: HttpHeaderInput) => {
         Object.assign(store, normalizeHeaders(nextHeaders));
@@ -378,15 +375,14 @@ function normalizeBodyStreamError(error: Error, encoding: string): Error {
 }
 
 function getContentEncoding(headers: Record<string, string>): string {
-    const value = headers['content-encoding'] ?? headers['Content-Encoding'];
-    const encoding = (Array.isArray(value) ? value[0] : value)?.trim().toLowerCase();
+    const encoding = getHeaderValue(headers, 'content-encoding')?.trim().toLowerCase();
     return encoding || 'identity';
 }
 
 function throwIfContentLengthExceeds(headers: Record<string, string>, maxBytes: number, message: string): void {
-    const value = headers['content-length'] ?? headers['Content-Length'];
+    const value = getHeaderValue(headers, 'content-length');
     if (value === undefined) return;
-    const size = Number.parseInt(Array.isArray(value) ? (value[0] ?? '') : value, 10);
+    const size = Number.parseInt(value, 10);
     if (Number.isFinite(size) && size > maxBytes) throw new HttpPayloadTooLargeError(message);
 }
 

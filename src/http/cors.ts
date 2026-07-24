@@ -1,4 +1,5 @@
 import type { BaseAppConfig } from '../app/config';
+import { getRequestHeader } from './headers';
 import type { HttpRequest } from './request';
 import type { HttpResponse } from './response';
 
@@ -65,7 +66,7 @@ export function applyCorsResponseHeaders(request: HttpRequest, response: HttpRes
 }
 
 function findMatchingCors(request: HttpRequest, options: readonly HttpCorsOptions[]): HttpCorsOptions | undefined {
-    const origin = getHeader(request, 'origin');
+    const origin = getRequestHeader(request, 'origin');
     if (typeof origin !== 'string') return undefined;
 
     return options.find(option => {
@@ -93,7 +94,7 @@ function getCorsPreflightHeaders(request: HttpRequest, options: HttpCorsOptions)
         'Content-Length': '0'
     };
 
-    const requestedHeaders = getHeader(request, 'access-control-request-headers');
+    const requestedHeaders = getRequestHeader(request, 'access-control-request-headers');
     if (options.allowHeaders) headers['Access-Control-Allow-Headers'] = options.allowHeaders.join(', ');
     else if (typeof requestedHeaders === 'string') headers['Access-Control-Allow-Headers'] = requestedHeaders;
 
@@ -101,7 +102,7 @@ function getCorsPreflightHeaders(request: HttpRequest, options: HttpCorsOptions)
 }
 
 function getCorsResponseHeaders(request: HttpRequest, options: HttpCorsOptions): Record<string, string> {
-    const origin = getHeader(request, 'origin');
+    const origin = getRequestHeader(request, 'origin');
     const headers: Record<string, string> = {
         'Access-Control-Allow-Origin': typeof origin === 'string' ? origin : '*'
     };
@@ -109,8 +110,4 @@ function getCorsResponseHeaders(request: HttpRequest, options: HttpCorsOptions):
     if (options.credentials) headers['Access-Control-Allow-Credentials'] = 'true';
     if (options.exposeHeaders) headers['Access-Control-Expose-Headers'] = options.exposeHeaders.join(', ');
     return headers;
-}
-
-function getHeader(request: HttpRequest, name: string): string | string[] | undefined {
-    return request.headers[name] ?? request.headers[name.toLowerCase()];
 }

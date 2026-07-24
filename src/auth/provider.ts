@@ -6,6 +6,7 @@ import bcrypt from 'bcrypt';
 import { BaseAppConfig, getAppConfig } from '../app';
 import { randomBytes } from '../helpers';
 import { HttpUnauthorizedError } from '../http/errors';
+import { getRequestHeader } from '../http/headers';
 import type { HttpMiddleware } from '../http/middleware';
 import type { HttpRequest } from '../http/request';
 
@@ -80,7 +81,7 @@ export function createBasicAuthMiddleware(expectedUsername?: string) {
         readonly config: BaseAppConfig = getAppConfig();
 
         async handle(request: HttpRequest): Promise<void> {
-            const authHeader = getHeader(request, 'authorization');
+            const authHeader = getRequestHeader(request, 'authorization');
             if (typeof authHeader !== 'string') throw new HttpUnauthorizedError();
 
             const match = /^basic\s+(\S+)$/i.exec(authHeader.trim());
@@ -151,8 +152,4 @@ function timingSafeStringEqual(actual: string, expected: string): boolean {
 
 function isBase64Url(value: string): boolean {
     return /^[A-Za-z0-9_-]+={0,2}$/.test(value) && value.length % 4 !== 1;
-}
-
-function getHeader(request: HttpRequest, name: string): string | string[] | undefined {
-    return request.headers[name] ?? request.headers[name.toLowerCase()];
 }

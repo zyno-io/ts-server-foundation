@@ -112,7 +112,7 @@ function takeEvalArgument(args: string[]): string | undefined {
     return undefined;
 }
 
-function tryGet<C extends BaseAppConfig, T>(app: App<C>, token: Token<T>): T | undefined {
+export function tryGet<C extends BaseAppConfig, T>(app: App<C>, token: Token<T>): T | undefined {
     try {
         return app.get(token);
     } catch {

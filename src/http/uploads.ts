@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { uuid7 } from '../helpers';
 import { HttpBadRequestError, HttpError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
 import { assertTopLevelFormFieldName, FormBodyBuilder } from './form-body';
+import { getRequestHeader } from './headers';
 import type { HttpRequest } from './request';
 
 export type FileUploadAllowedTypes = readonly string[] | string;
@@ -331,8 +332,7 @@ export async function cleanupUploadedFiles(request: HttpRequest): Promise<void> 
 }
 
 function getContentType(request: HttpRequest): string {
-    const value = request.headers['content-type'] ?? request.headers['Content-Type'];
-    return Array.isArray(value) ? (value[0] ?? '') : (value ?? '');
+    return getRequestHeader(request, 'content-type') ?? '';
 }
 
 function assignMultiValue<T>(target: Record<string, T | T[]>, name: string, value: T): void {

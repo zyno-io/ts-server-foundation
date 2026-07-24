@@ -7,7 +7,6 @@ import { WorkerQueueRegistry, WorkerRecorderService, type WorkerJobRecord } from
 import type { ScopedLogger } from '../services';
 import { SrpcServer, type SrpcMeta } from '../srpc';
 import type { App } from '../app';
-import type { Token } from '../di';
 import {
     DevConsoleClientMessage,
     DevConsoleServerMessage,
@@ -16,7 +15,7 @@ import {
     type DevConsoleServerMessage as DCServerMsg
 } from './generated/devconsole';
 import { isLocalhostIncomingMessage } from './security';
-import { createReplContext, evaluateReplCode } from './repl';
+import { createReplContext, evaluateReplCode, tryGet } from './repl';
 import type { DevConsoleStore } from './store';
 
 const SECRET_MASK_PATTERNS = ['SECRET', 'PASSWORD', 'DSN', 'TOKEN', 'KEY'];
@@ -316,14 +315,6 @@ function maskSecrets(config: Record<string, unknown>): Record<string, unknown> {
         masked[key] = SECRET_MASK_PATTERNS.some(pattern => upper.includes(pattern)) ? '****' : value;
     }
     return masked;
-}
-
-function tryGet<T>(app: App<any>, token: Token<T>): T | undefined {
-    try {
-        return app.get(token);
-    } catch {
-        return undefined;
-    }
 }
 
 function completeTopLevel(context: Record<string, unknown>, prefix: string): UReplCompleteItem[] {

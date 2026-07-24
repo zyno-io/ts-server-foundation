@@ -14,6 +14,7 @@ import { ProviderNotFoundError, type Container, type RequestContext } from '../d
 import type { EventBus } from '../events';
 import type { ClassType } from '../types';
 import { getJwtFromRequest } from './auth';
+import { getRequestHeaderForParameter } from './headers';
 import {
     getControllerMetadata,
     getRouteMetadata,
@@ -388,7 +389,7 @@ export class HttpRouter {
         if (parameter.kind === 'path')
             return deserializeHttpValue(getPathParam(request, parameter.name), parameter.type, httpParameterPath('path', parameter.name));
         if (parameter.kind === 'header') {
-            const value = singleValue(getHeader(request, parameter.name));
+            const value = getRequestHeaderForParameter(request, parameter.name);
             if (value === undefined && parameter.optional) return undefined;
             return deserializeHttpValue(value, parameter.type, httpParameterPath('header', parameter.name));
         }
@@ -826,11 +827,6 @@ function getTypeArgument(type: Type, index: number): Type | undefined {
 
 function literalNumber(type: Type | undefined): number | undefined {
     return type?.kind === ReflectionKind.literal && typeof type.literal === 'number' ? type.literal : undefined;
-}
-
-function getHeader(request: HttpRequest, name: string): string | string[] | undefined {
-    const kebab = name.replace(/[A-Z]/g, match => `-${match.toLowerCase()}`).replace(/^-/, '');
-    return request.headers[name] ?? request.headers[name.toLowerCase()] ?? request.headers[kebab] ?? request.headers[`x-${kebab}`];
 }
 
 function getPathParam(request: HttpRequest, name: string): string | undefined {
