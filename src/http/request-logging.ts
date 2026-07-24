@@ -15,12 +15,15 @@ export interface HttpRequestLoggingOptions {
 
 interface RequestLoggingState {
     request: HttpRequest;
+    logger: ScopedLogger;
     mode: RequestLoggingMode;
     startedAt: number;
     skipped: boolean;
     aborted: boolean;
     finished: boolean;
+    hooked: boolean;
     onClose?: () => void;
+    onFinish?: () => void;
 }
 
 interface ResponseLoggingTarget {
@@ -38,32 +41,43 @@ export class HttpRequestLogger {
     createState(request: HttpRequest, outgoing: ServerResponse): RequestLoggingState {
         const state: RequestLoggingState = {
             request,
+            // Native response events run after the request async context has closed. Keep the
+            // mutable request context on this logger so terminal records retain request fields.
+            logger: this.logger.data({ http: request.context }),
             mode: this.config.HTTP_REQUEST_LOGGING_MODE ?? getDefaultRequestLoggingMode(),
             startedAt: Date.now(),
             skipped: this.shouldSkip(request),
             aborted: false,
-            finished: false
+            finished: false,
+            hooked: false
         };
         const onClose = () => {
             if (state.finished || state.aborted || outgoing.writableFinished) return;
             state.aborted = true;
             if (this.shouldLogAbort(state)) {
-                this.logger.warn('Request aborted during processing', {
+                state.logger.warn('Request aborted during processing', {
                     method: request.method,
                     url: request.url,
                     duration: Date.now() - state.startedAt
                 });
             }
+            this.dispose(state, outgoing);
+        };
+        const onFinish = () => {
+            this.finish(state, outgoing);
+            this.dispose(state, outgoing);
         };
         state.onClose = onClose;
+        state.onFinish = onFinish;
         outgoing.on('close', onClose);
+        outgoing.on('finish', onFinish);
         return state;
     }
 
     start(state: RequestLoggingState): void {
         state.request.store['$RequestTime'] = state.startedAt;
         if (state.mode !== 'e2e' || state.skipped) return;
-        this.logger.info('Request', {
+        state.logger.info('Request', {
             method: state.request.method,
             url: state.request.url,
             remoteAddress: state.request.getRemoteAddress(),
@@ -75,7 +89,19 @@ export class HttpRequestLogger {
         if (state.finished || state.aborted) return;
         state.finished = true;
         if (!this.shouldLogFinish(state, response.statusCode)) return;
-        this.logger.info('Response', {
+        state.logger.info('Response', {
+            method: state.request.method,
+            url: state.request.url,
+            statusCode: response.statusCode,
+            duration: Date.now() - state.startedAt
+        });
+    }
+
+    hook(state: RequestLoggingState, response: ResponseLoggingTarget): void {
+        if (state.finished || state.aborted || state.hooked || response.writableEnded) return;
+        state.hooked = true;
+        if (!this.shouldLogFinish(state, response.statusCode)) return;
+        state.logger.info('Response stream hooked by controller', {
             method: state.request.method,
             url: state.request.url,
             statusCode: response.statusCode,
@@ -93,7 +119,7 @@ export class HttpRequestLogger {
             return;
         }
         if (response.statusCode < 500) return;
-        this.logger.error('Request processing error', error, {
+        state.logger.error('Request processing error', error, {
             method: state.request.method,
             url: state.request.url,
             statusCode: response.statusCode,
@@ -105,11 +131,13 @@ export class HttpRequestLogger {
         this.error(
             {
                 request,
+                logger: this.logger.data({ http: request.context }),
                 mode: this.config.HTTP_REQUEST_LOGGING_MODE ?? getDefaultRequestLoggingMode(),
                 startedAt,
                 skipped: this.shouldSkip(request),
                 aborted: false,
-                finished: false
+                finished: false,
+                hooked: false
             },
             error,
             response
@@ -118,6 +146,7 @@ export class HttpRequestLogger {
 
     dispose(state: RequestLoggingState, outgoing: ServerResponse): void {
         if (state.onClose) outgoing.off('close', state.onClose);
+        if (state.onFinish) outgoing.off('finish', state.onFinish);
     }
 
     shouldSkip(request: HttpRequest): boolean {

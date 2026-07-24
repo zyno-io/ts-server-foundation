@@ -124,7 +124,17 @@ export class NodeHttpResponse extends HttpResponse {
     override writeHead(statusCode: number, statusMessage?: string, headers?: HttpWriteHeadHeaders): this;
     override writeHead(statusCode: number, statusMessageOrHeaders?: string | HttpWriteHeadHeaders, headers?: HttpWriteHeadHeaders): this {
         if (this.headersSent) return this;
-        return super.writeHead(statusCode, statusMessageOrHeaders as string, headers);
+        super.writeHead(statusCode, statusMessageOrHeaders as string, headers);
+
+        // writeHead() is the controller's explicit hand-off to Node's response. Commit it now so
+        // the router does not interpret an otherwise void result as an empty response and end it.
+        this.outgoing.statusCode = this.statusCode;
+        for (const [name, value] of Object.entries(this.rawHeaders)) this.outgoing.setHeader(name, value);
+        if (typeof statusMessageOrHeaders === 'string') this.outgoing.writeHead(statusCode, statusMessageOrHeaders);
+        else this.outgoing.writeHead(statusCode);
+        this.committed = true;
+        this.streaming = true;
+        return this;
     }
 
     override write(chunk: any, encoding?: BufferEncoding | ((error?: Error | null) => void), callback?: (error?: Error | null) => void): boolean {

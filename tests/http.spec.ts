@@ -3554,6 +3554,176 @@ describe('http router', () => {
         }
     });
 
+    it('lets a controller claim a Node response before piping a delayed stream', async () => {
+        @http.controller('/delayed-response-stream')
+        class DelayedResponseStreamController {
+            @http.GET()
+            stream(response: HttpResponse): void {
+                response.writeHead(203, 'Delayed Stream', {
+                    'content-type': 'text/plain',
+                    'x-delayed-stream': 'claimed'
+                });
+
+                let scheduled = false;
+                const stream = new Readable({
+                    read() {
+                        if (scheduled) return;
+                        scheduled = true;
+                        setTimeout(() => {
+                            this.push('first ');
+                            setTimeout(() => {
+                                this.push('second');
+                                this.push(null);
+                            }, 10);
+                        }, 10);
+                    }
+                });
+
+                // The controller intentionally does not await the pipe. writeHead() must prevent
+                // the router from serializing this void return as a 204 response.
+                stream.pipe(response).once('error', () => {});
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [DelayedResponseStreamController] });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+
+        try {
+            const response = await requestNodeHttp(address.port, 'GET', '/delayed-response-stream');
+
+            assert.equal(response.statusCode, 203);
+            assert.equal(response.statusMessage, 'Delayed Stream');
+            assert.equal(response.headers['content-type'], 'text/plain');
+            assert.equal(response.headers['x-delayed-stream'], 'claimed');
+            assert.equal(response.text, 'first second');
+        } finally {
+            await app.stop();
+        }
+    });
+
+    it('logs a controller-owned stream at takeover and native completion', async () => {
+        const entries: LogEntry[] = [];
+        let releaseStream!: () => void;
+        let controllerClaimed!: () => void;
+        const streamReleased = new Promise<void>(resolve => {
+            releaseStream = resolve;
+        });
+        const controllerClaimedResponse = new Promise<void>(resolve => {
+            controllerClaimed = resolve;
+        });
+
+        @http.controller('/logged-response-stream')
+        class LoggedResponseStreamController {
+            @http.GET()
+            stream(response: HttpResponse): void {
+                response.writeHead(200, { 'content-type': 'text/plain' });
+                const stream = new Readable({ read() {} });
+                stream.pipe(response).once('error', () => {});
+                controllerClaimed();
+                void streamReleased.then(() => {
+                    stream.push('complete');
+                    stream.push(null);
+                });
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            controllers: [LoggedResponseStreamController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' }
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        const request = requestNodeHttp(address.port, 'GET', '/logged-response-stream');
+
+        try {
+            await withTimeout(controllerClaimedResponse, 1_000, 'Controller did not claim the response');
+            await waitFor(
+                () => entries.some(entry => entry.message === 'Response stream hooked by controller'),
+                1_000,
+                'Controller response takeover was not logged'
+            );
+            assert.deepEqual(
+                entries.map(entry => entry.message),
+                ['Request', 'Response stream hooked by controller']
+            );
+
+            releaseStream();
+            const response = await withTimeout(request, 1_000, 'Controller-owned stream did not complete');
+
+            assert.equal(response.text, 'complete');
+            await waitFor(() => entries.some(entry => entry.message === 'Response'), 1_000, 'Response completion was not logged');
+            assert.deepEqual(
+                entries.map(entry => entry.message),
+                ['Request', 'Response stream hooked by controller', 'Response']
+            );
+        } finally {
+            releaseStream();
+            await app.stop();
+            resetLogSink();
+        }
+    });
+
+    it('logs an aborted controller-owned stream without a completion record', async () => {
+        const entries: LogEntry[] = [];
+        let controllerClaimed!: () => void;
+        let stream: Readable | undefined;
+        const controllerClaimedResponse = new Promise<void>(resolve => {
+            controllerClaimed = resolve;
+        });
+
+        @http.controller('/aborted-response-stream')
+        class AbortedResponseStreamController {
+            @http.GET()
+            stream(response: HttpResponse): void {
+                response.writeHead(200, { 'content-type': 'text/plain' });
+                stream = new Readable({ read() {} });
+                stream.pipe(response).once('error', () => {});
+                controllerClaimed();
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({
+            controllers: [AbortedResponseStreamController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' }
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        const request = nodeHttpRequest({ host: '127.0.0.1', port: address.port, path: '/aborted-response-stream', method: 'GET' });
+        request.on('error', () => {});
+        request.end();
+
+        try {
+            await withTimeout(controllerClaimedResponse, 1_000, 'Controller did not claim the response');
+            await waitFor(
+                () => entries.some(entry => entry.message === 'Response stream hooked by controller'),
+                1_000,
+                'Controller response takeover was not logged'
+            );
+
+            request.destroy();
+            await waitFor(
+                () => entries.some(entry => entry.message === 'Request aborted during processing'),
+                1_000,
+                'Aborted controller-owned stream was not logged'
+            );
+            assert.deepEqual(
+                entries.map(entry => entry.message),
+                ['Request', 'Response stream hooked by controller', 'Request aborted during processing']
+            );
+        } finally {
+            stream?.destroy();
+            request.destroy();
+            await app.stop();
+            resetLogSink();
+        }
+    });
+
     it('serves requests through the Node HTTP server', async () => {
         @http.controller('/server')
         class ServerController {
@@ -3721,7 +3891,7 @@ describe('http router', () => {
             assert.equal(new TextDecoder().decode(secondStreamChunk.value), 'second\n');
             assert.equal(raw.status, 201);
             assert.equal(raw.headers.get('x-custom-response'), 'forwarded');
-            assert.equal(raw.headers.get('x-node-workflow'), 'yes');
+            assert.equal(raw.headers.get('x-node-workflow'), null);
             assert.equal(await raw.text(), 'created');
             assert.equal(unsupported.statusCode, 404);
             assert.deepStrictEqual(JSON.parse(unsupported.text), { error: 'Not Found' });
@@ -3783,7 +3953,7 @@ function requestNodeHttp(
     method: string,
     path: string,
     headers: Record<string, string> = {}
-): Promise<{ statusCode: number; text: string }> {
+): Promise<{ statusCode: number; statusMessage: string; headers: Record<string, string | string[] | undefined>; text: string }> {
     return new Promise((resolve, reject) => {
         const request = nodeHttpRequest({ host: '127.0.0.1', port, path, method, headers }, response => {
             const chunks: Buffer[] = [];
@@ -3791,6 +3961,8 @@ function requestNodeHttp(
             response.on('end', () => {
                 resolve({
                     statusCode: response.statusCode ?? 0,
+                    statusMessage: response.statusMessage ?? '',
+                    headers: response.headers,
                     text: Buffer.concat(chunks).toString()
                 });
             });

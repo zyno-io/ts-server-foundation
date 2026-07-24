@@ -243,15 +243,13 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
             const response = new NodeHttpResponse(outgoing);
             try {
                 await this.request(request, response);
+                const controllerClaimedResponse = response.headersSent && !response.writableEnded && !outgoing.writableEnded;
                 response.flush();
                 this.requestLogger.error(logging, getHttpRequestErrorState(request)?.error, response);
-                this.requestLogger.finish(logging, response);
+                if (controllerClaimedResponse) this.requestLogger.hook(logging, response);
             } catch (error) {
                 writeUnhandledNodeError(outgoing, error);
                 this.requestLogger.error(logging, error, outgoing);
-                this.requestLogger.finish(logging, outgoing);
-            } finally {
-                this.requestLogger.dispose(logging, outgoing);
             }
         });
     }
