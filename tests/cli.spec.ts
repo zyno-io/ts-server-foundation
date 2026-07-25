@@ -1225,16 +1225,29 @@ describe('CLI', () => {
             interactive.stdout.on('data', data => (interactiveOutput += data.toString()));
             interactive.stderr.on('data', data => (interactiveOutput += data.toString()));
             const interactiveClosed = new Promise<number | null>(resolve => interactive.on('close', code => resolve(code)));
+            const waitForInteractiveOutput = async (needle: string, offset: number) => {
+                for (let attempt = 0; attempt < 200; attempt++) {
+                    if (interactiveOutput.slice(offset).includes(needle)) return;
+                    await sleep(25);
+                }
+                throw new Error(`timed out waiting for ${JSON.stringify(needle)}\\n${interactiveOutput}`);
+            };
+
+            let interactiveOutputOffset = interactiveOutput.length;
             interactive.stdin.write("'interactive repl probe'\n");
-            for (let attempt = 0; attempt < 200 && !interactiveOutput.includes("'interactive repl probe'"); attempt++) await sleep(25);
-            let previousOutputLength = interactiveOutput.length;
+            await waitForInteractiveOutput("'interactive repl probe'", interactiveOutputOffset);
+
+            interactiveOutputOffset = interactiveOutput.length;
             interactive.stdin.write('({\n');
-            for (let attempt = 0; attempt < 200 && interactiveOutput.length === previousOutputLength; attempt++) await sleep(25);
-            previousOutputLength = interactiveOutput.length;
+            await waitForInteractiveOutput('| ', interactiveOutputOffset);
+
+            interactiveOutputOffset = interactiveOutput.length;
             interactive.stdin.write("    probe: 'multiline repl probe'\n");
-            for (let attempt = 0; attempt < 200 && interactiveOutput.length === previousOutputLength; attempt++) await sleep(25);
+            await waitForInteractiveOutput('| ', interactiveOutputOffset);
+
+            interactiveOutputOffset = interactiveOutput.length;
             interactive.stdin.write('})\n');
-            for (let attempt = 0; attempt < 200 && !interactiveOutput.includes("probe: 'multiline repl probe'"); attempt++) await sleep(25);
+            await waitForInteractiveOutput("probe: 'multiline repl probe'", interactiveOutputOffset);
             interactive.stdin.end('.exit\n');
             assert.equal(await interactiveClosed, 0, interactiveOutput);
             assert.match(interactiveOutput, /Connected to repl-process-fixture \(development\), pid \d+/);

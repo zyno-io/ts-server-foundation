@@ -28,7 +28,11 @@ function createSharedBroadcastChannel() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const listeners = new Map<string, Set<(message: any) => void>>();
 
-    subscribeClient.subscribe(channel);
+    void subscribeClient.subscribe(channel).catch(err => {
+        // A shutdown can close the client while its initial subscription is still connecting.
+        // The channel state reset owns that normal lifecycle case; report only real startup failures.
+        if (subscribeClient.status !== 'end') logger.error('Failed to subscribe to broadcast channel', err, { channel });
+    });
     subscribeClient.on('message', (_, message) => {
         try {
             const { instanceKey, eventName, data } = JSON.parse(message);
