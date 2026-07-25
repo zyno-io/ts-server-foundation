@@ -863,7 +863,14 @@ describe('reflection utility type metadata', () => {
             { type: 'null' }
         ]);
         assert.deepStrictEqual(context.schemas.ContentConfigUpdateRequest, {
-            oneOf: [{ $ref: '#/components/schemas/CompactConfig' }, { $ref: '#/components/schemas/ExpandedConfig' }]
+            oneOf: [{ $ref: '#/components/schemas/CompactConfig' }, { $ref: '#/components/schemas/ExpandedConfig' }],
+            discriminator: {
+                propertyName: 'type',
+                mapping: {
+                    compact: '#/components/schemas/CompactConfig',
+                    expanded: '#/components/schemas/ExpandedConfig'
+                }
+            }
         });
     });
 
