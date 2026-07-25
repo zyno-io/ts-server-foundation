@@ -15,7 +15,7 @@ import { isMarkerType, normalizeTypeMetadata, tryResolveClassType } from '../ref
 
 import { FileUpload } from '../http';
 import { normalizeAllowedTypes, parseByteSize } from '../http/uploads';
-import type { OpenApiReferenceObject, OpenApiSchemaObject } from './types';
+import type { OpenApiDiscriminatorObject, OpenApiReferenceObject, OpenApiSchemaObject } from './types';
 
 export interface OpenApiSchemaContext {
     schemas: Record<string, OpenApiSchemaObject>;
@@ -30,6 +30,11 @@ export interface OpenApiTypeProperty {
     type: Type;
     required: boolean;
     description?: string;
+}
+
+interface TaggedObjectUnion {
+    propertyName: string;
+    valuesByBranch: string[][];
 }
 
 export function createOpenApiSchemaContext(): OpenApiSchemaContext {
@@ -47,7 +52,8 @@ export function typeToOpenApiSchema(
     context: OpenApiSchemaContext = createOpenApiSchemaContext()
 ): OpenApiSchemaObject | OpenApiReferenceObject {
     normalizeTypeMetadata(type);
-    const schema = typeToOpenApiSchemaInternal(type, context);
+    const schemaType = instantiateOpenApiGenericType(type);
+    const schema = typeToOpenApiSchemaInternal(schemaType, context);
     if (shouldApplyValidationAnnotations(type)) applyValidationAnnotations(type, schema);
     return schema;
 }
@@ -221,6 +227,112 @@ function resolveOpenApiClassType(type: TypeClass): TypeClass['classType'] | unde
 function isOpenApiClassType(type: TypeClass, classType: TypeClass['classType']): boolean {
     const resolved = resolveOpenApiClassType(type);
     return type.classType === classType || resolved === classType;
+}
+
+/**
+ * Imported generic aliases carry their concrete `typeArguments` at the use
+ * site, while their published metadata retains placeholders such as `T` or
+ * `Code`. Instantiate those placeholders before OpenAPI reads object
+ * properties so imported contracts remain as precise as local interfaces.
+ */
+function instantiateOpenApiGenericType(type: Type): Type {
+    const typeArguments = getTypeArguments(type);
+    if (!typeArguments.length) return type;
+
+    const parameterNames = collectGenericPlaceholderNames(type);
+    if (!parameterNames.length) return type;
+    const replacements = new Map(
+        parameterNames.map((name, index) => [name, typeArguments[index]]).filter((entry): entry is [string, Type] => !!entry[1])
+    );
+    if (!replacements.size) return type;
+    return substituteGenericPlaceholders(type, replacements);
+}
+
+function getTypeArguments(type: Type): Type[] {
+    const record = type as Type & { typeArguments?: Type[]; arguments?: Type[] };
+    return record.typeArguments ?? record.arguments ?? [];
+}
+
+function collectGenericPlaceholderNames(type: Type): string[] {
+    const declared = (type as Type & { typeParameters?: string[] }).typeParameters;
+    if (declared?.length) return declared;
+
+    // Metadata emitted before `typeParameters` was added still appears in
+    // deployed packages. Preserve compatibility by deriving placeholder order
+    // from the alias body when no declaration is available.
+    const names: string[] = [];
+    const maximumNames = getTypeArguments(type).length;
+    const seen = new Set<Type>();
+    const visit = (value: Type) => {
+        if (seen.has(value) || names.length >= maximumNames) return;
+        seen.add(value);
+        if (isGenericPlaceholder(value) || isLegacyUnknownGenericPlaceholder(value)) {
+            const name = openApiTypeName(value)!;
+            if (!names.includes(name)) names.push(name);
+            return;
+        }
+        const useSiteArguments = value === type ? new Set(getTypeArguments(value)) : undefined;
+        for (const child of nestedTypes(value)) {
+            if (!useSiteArguments?.has(child)) visit(child);
+        }
+    };
+    visit(type);
+    return names;
+}
+
+function isLegacyUnknownGenericPlaceholder(type: Type): boolean {
+    const name = openApiTypeName(type);
+    return type.kind === ReflectionKind.unknown && !!name && /^[A-Z_$][A-Za-z0-9_$]*$/.test(name);
+}
+
+function isGenericPlaceholder(type: Type): boolean {
+    return type.kind === ReflectionKind.class && !!openApiTypeName(type) && !resolveOpenApiClassType(type);
+}
+
+function substituteGenericPlaceholders(type: Type, replacements: ReadonlyMap<string, Type>, seen = new Map<Type, Type>()): Type {
+    const typeName = openApiTypeName(type);
+    if (typeName && replacements.has(typeName) && (type.kind === ReflectionKind.unknown || isGenericPlaceholder(type))) {
+        return replacements.get(typeName)!;
+    }
+    const existing = seen.get(type);
+    if (existing) return existing;
+
+    const clone = { ...type } as Type & { typeArguments?: Type[]; arguments?: Type[]; index?: Type };
+    seen.set(type, clone);
+    if ('type' in clone && isReflectedType(clone.type)) clone.type = substituteGenericPlaceholders(clone.type, replacements, seen) as never;
+    if ('types' in clone && Array.isArray(clone.types)) {
+        clone.types = clone.types.map(item => {
+            if (isReflectedType(item)) return substituteGenericPlaceholders(item, replacements, seen);
+            if (item && typeof item === 'object' && isReflectedType((item as { type?: unknown }).type)) {
+                const property = item as Record<string, unknown> & { type: Type };
+                return { ...property, type: substituteGenericPlaceholders(property.type, replacements, seen) };
+            }
+            return item;
+        }) as never;
+    }
+    if ('implements' in clone && Array.isArray(clone.implements))
+        clone.implements = clone.implements.map(item => substituteGenericPlaceholders(item, replacements, seen));
+    if (clone.index) clone.index = substituteGenericPlaceholders(clone.index, replacements, seen);
+    if (clone.typeArguments) clone.typeArguments = clone.typeArguments.map(item => substituteGenericPlaceholders(item, replacements, seen));
+    if (clone.arguments) clone.arguments = clone.arguments.map(item => substituteGenericPlaceholders(item, replacements, seen));
+    return clone;
+}
+
+function openApiTypeName(type: Type): string | undefined {
+    return (type as Type & { typeName?: string }).typeName;
+}
+
+function nestedTypes(type: Type): Type[] {
+    const nested: Type[] = [];
+    const record = type as Type & { type?: Type; types?: unknown[]; implements?: Type[]; typeArguments?: Type[]; arguments?: Type[]; index?: Type };
+    if (record.type && isReflectedType(record.type)) nested.push(record.type);
+    for (const item of record.types ?? []) {
+        if (isReflectedType(item)) nested.push(item);
+        else if (item && typeof item === 'object' && isReflectedType((item as { type?: unknown }).type)) nested.push((item as { type: Type }).type);
+    }
+    nested.push(...(record.implements ?? []), ...(record.typeArguments ?? []), ...(record.arguments ?? []));
+    if (record.index) nested.push(record.index);
+    return nested;
 }
 
 function typeToOpenApiSchemaInternal(
@@ -453,9 +565,94 @@ function schemaForUnion(type: Type, context: OpenApiSchemaContext): OpenApiSchem
         ]);
     }
 
+    const taggedUnion = nullable ? undefined : findTaggedObjectUnion(nonNull);
+    const branches = referenceTaggedUnionBranches(type, taggedUnion, nonNull, context);
+    const discriminator =
+        taggedUnion && branches.every((schema): schema is OpenApiReferenceObject => '$ref' in schema)
+            ? discriminatorForTaggedUnion(taggedUnion, branches)
+            : undefined;
     return {
-        oneOf: [...nonNull.map(item => typeToOpenApiSchema(item, context)), ...(nullable ? [{ type: 'null' } satisfies OpenApiSchemaObject] : [])]
+        oneOf: [...branches, ...(nullable ? [{ type: 'null' } satisfies OpenApiSchemaObject] : [])],
+        ...(discriminator ? { discriminator } : {})
     };
+}
+
+/**
+ * OpenAPI discriminators are only valid when a required property can select one
+ * branch without inspecting the remainder of the object. Restrict this to
+ * literal-string domains so broad strings and overlapping tags cannot produce
+ * misleading discriminator metadata.
+ */
+function findTaggedObjectUnion(branches: Type[]): TaggedObjectUnion | undefined {
+    const properties = branches.map(branch => listOpenApiTypeProperties(branch));
+    if (properties.some(branchProperties => branchProperties.length === 0)) return undefined;
+
+    const commonRequiredNames = properties[0]!
+        .filter(property => property.required)
+        .map(property => property.name)
+        .filter(name => properties.every(branchProperties => branchProperties.some(property => property.required && property.name === name)))
+        .sort();
+
+    const matches: TaggedObjectUnion[] = [];
+    for (const propertyName of commonRequiredNames) {
+        const domains = properties.map(branchProperties => {
+            const property = branchProperties.find(candidate => candidate.name === propertyName)!;
+            return literalStringDomain(property.type);
+        });
+        if (domains.some(values => values === undefined)) continue;
+        const valuesByBranch = domains as string[][];
+
+        const values = valuesByBranch.flat();
+        if (new Set(values).size !== values.length) continue;
+
+        matches.push({ propertyName, valuesByBranch });
+    }
+
+    // More than one candidate makes the selected discriminator arbitrary. Keep
+    // the schema honest rather than choosing a property by declaration order.
+    if (matches.length !== 1) return undefined;
+    return matches[0];
+}
+
+function referenceTaggedUnionBranches(
+    union: Type,
+    taggedUnion: TaggedObjectUnion | undefined,
+    branches: Type[],
+    context: OpenApiSchemaContext
+): Array<OpenApiSchemaObject | OpenApiReferenceObject> {
+    const schemas = branches.map(branch => typeToOpenApiSchema(branch, context));
+    if (!taggedUnion || schemas.every(schema => '$ref' in schema)) return schemas;
+
+    // Anonymous inline branches have no stable address for an OpenAPI
+    // discriminator mapping. A named union gives each branch a deterministic,
+    // reusable component name without coupling generation to a consumer model.
+    const unionName = getNamedAliasComponentName(union);
+    if (!unionName) return schemas;
+    return schemas.map((schema, index) => {
+        if ('$ref' in schema) return schema;
+        const tagName = taggedUnion.valuesByBranch[index]!.map(sanitizeComponentName).join('_');
+        const componentName = reserveComponentName(`${unionName}_${tagName}`, branches[index]!, context);
+        context.schemas[componentName] ??= schema;
+        return { $ref: `#/components/schemas/${componentName}` };
+    });
+}
+
+function discriminatorForTaggedUnion(taggedUnion: TaggedObjectUnion, schemas: OpenApiReferenceObject[]): OpenApiDiscriminatorObject {
+    return {
+        propertyName: taggedUnion.propertyName,
+        mapping: Object.fromEntries(
+            taggedUnion.valuesByBranch.flatMap((branchValues, index) => branchValues.map(value => [value, schemas[index]!.$ref]))
+        )
+    };
+}
+
+function literalStringDomain(type: Type): string[] | undefined {
+    const unwrapped = unwrapOpenApiType(type);
+    if (unwrapped.kind === ReflectionKind.literal) return typeof unwrapped.literal === 'string' ? [unwrapped.literal] : undefined;
+    if (unwrapped.kind !== ReflectionKind.union) return undefined;
+
+    const values = unwrapped.types.flatMap(item => literalStringDomain(item) ?? []);
+    return values.length === unwrapped.types.length && values.length > 0 ? values : undefined;
 }
 
 function schemaForLiteral(value: unknown): OpenApiSchemaObject {

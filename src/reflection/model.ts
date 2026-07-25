@@ -36,6 +36,8 @@ export interface TypeBase<K extends ReflectionKind = ReflectionKind> {
     annotations?: Record<string, Type>;
     validation?: ValidationAnnotation[];
     database?: Record<string, Record<string, any>>;
+    /** Declared generic parameter names retained for imported alias instantiation. */
+    typeParameters?: string[];
 }
 
 export type PrimitiveReflectionKind =

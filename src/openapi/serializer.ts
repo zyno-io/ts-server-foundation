@@ -1,4 +1,5 @@
 import { writeFile } from 'node:fs/promises';
+import { STATUS_CODES } from 'node:http';
 import { join } from 'node:path';
 
 import { isReflectedType, ReflectionKind, Type, typeAnnotation } from '../reflection';
@@ -9,6 +10,7 @@ import type { BaseAppConfig } from '../app/config';
 import { Env } from '../env';
 import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult } from '../http';
 import type { HttpRouteParameterPlan, HttpRoutePlan } from '../http';
+import { getOpenApiResponses, isOpenApiIgnored } from './decorators';
 import {
     allowsUndefined,
     createOpenApiSchemaContext,
@@ -59,6 +61,7 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
 
     for (const route of app.router.listRoutes()) {
         if (!options.includeInternal && isInternalRoute(route.path)) continue;
+        if (isOpenApiIgnored(route.controllerClass, route.propertyKey)) continue;
         const method = toOpenApiMethod(route.method);
         if (!method) continue;
         const path = toOpenApiPath(route.path);
@@ -312,6 +315,15 @@ function schemaForMultipleBodies(
 }
 
 function buildResponses(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): Record<string, OpenApiResponse> {
+    const responses = buildInferredResponses(route, schemaContext);
+    for (const response of getOpenApiResponses(route.controllerClass, route.propertyKey)) {
+        const typedResponse = buildTypedResponse(response.status, response.type, schemaContext, response.description);
+        responses[String(response.status)] = typedResponse[String(response.status)]!;
+    }
+    return responses;
+}
+
+function buildInferredResponses(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): Record<string, OpenApiResponse> {
     const apiResponse = getApiResponseMetadata(route.returnType);
     if (apiResponse) return buildTypedResponse(apiResponse.status, apiResponse.type, schemaContext);
 
@@ -414,16 +426,17 @@ function buildResponses(route: HttpRoutePlan, schemaContext: ReturnType<typeof c
 function buildTypedResponse(
     status: number,
     type: Type,
-    schemaContext: ReturnType<typeof createOpenApiSchemaContext>
+    schemaContext: ReturnType<typeof createOpenApiSchemaContext>,
+    description?: string
 ): Record<string, OpenApiResponse> {
     const returnType = unwrapOpenApiType(type);
     if (returnType.kind === ReflectionKind.void || returnType.kind === ReflectionKind.undefined) {
-        return { [status]: { description: responseDescription(status) } };
+        return { [status]: { description: description ?? responseDescription(status) } };
     }
 
     return {
         [status]: {
-            description: responseDescription(status),
+            description: description ?? responseDescription(status),
             content: {
                 'application/json': {
                     schema: typeToOpenApiSchema(type, schemaContext)
@@ -434,10 +447,7 @@ function buildTypedResponse(
 }
 
 function responseDescription(status: number): string {
-    if (status === 201) return 'Created';
-    if (status === 202) return 'Accepted';
-    if (status === 204) return 'No Content';
-    return 'OK';
+    return STATUS_CODES[status] ?? 'Response';
 }
 
 function getApiResponseMetadata(type: Type): ApiResponseMetadata | undefined {

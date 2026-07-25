@@ -20,6 +20,9 @@ func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) st
 	if ctx == nil {
 		ctx = &typeContext{seen: map[string]bool{}}
 	}
+	if ctx.typeParams[raw] {
+		return "{kind: 2, typeName: " + quote(raw) + "}"
+	}
 	ctx.depth++
 	defer func() { ctx.depth-- }()
 	if ctx.depth > 80 {
@@ -330,6 +333,14 @@ func objectLiteralExpr(info *fileInfo, reg *registry, typeName string, body stri
 	return "{kind: 18, typeName: " + quote(typeName) + objectIndexExpr(info, reg, body, ctx) + ", types: [" + renderUtilityProperties(info, reg, props, ctx) + "]}"
 }
 
+func stringSliceExpr(values []string) string {
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = quote(value)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
 func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, decl interfaceInfo, ctx *typeContext) string {
 	if ctx == nil {
 		ctx = &typeContext{seen: map[string]bool{}}
@@ -337,6 +348,9 @@ func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, 
 	if ctx.interfaces == nil {
 		ctx.interfaces = map[string]bool{}
 	}
+	previousTypeParams := ctx.typeParams
+	ctx.typeParams = mergedTypeParameters(previousTypeParams, decl.params)
+	defer func() { ctx.typeParams = previousTypeParams }()
 	key := info.moduleKey + "\x00" + strconv.Itoa(decl.pos)
 	if ctx.interfaces[key] {
 		return "{kind: 2, typeName: " + quote(typeName) + "}"
@@ -351,6 +365,9 @@ func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, 
 		"typeName: " + quote(typeName),
 		"types: [" + renderUtilityProperties(info, reg, props, ctx) + "]",
 	}
+	if len(decl.params) != 0 {
+		items = append(items, "typeParameters: "+stringSliceExpr(decl.params))
+	}
 	if index := objectIndexExpr(info, reg, body, ctx); index != "" {
 		items = append(items, strings.TrimPrefix(index, ", "))
 	}
@@ -361,12 +378,22 @@ func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, 
 }
 
 func interfaceObjectLiteralExprPreferred(info *fileInfo, reg *registry, typeName string, decl interfaceInfo, ctx *typeContext) string {
+	if ctx == nil {
+		ctx = &typeContext{seen: map[string]bool{}}
+	}
+	previousTypeParams := ctx.typeParams
+	ctx.typeParams = mergedTypeParameters(previousTypeParams, decl.params)
+	defer func() { ctx.typeParams = previousTypeParams }()
+
 	props := interfaceFullProperties(info, reg, decl, map[string]bool{})
 	body := interfaceFullBody(info, reg, decl, map[string]bool{})
 	items := []string{
 		"kind: 18",
 		"typeName: " + quote(typeName),
 		"types: [" + renderPreferredUtilityProperties(info, reg, props, ctx) + "]",
+	}
+	if len(decl.params) != 0 {
+		items = append(items, "typeParameters: "+stringSliceExpr(decl.params))
 	}
 	if index := objectIndexExpr(info, reg, body, ctx); index != "" {
 		items = append(items, strings.TrimPrefix(index, ", "))
@@ -375,6 +402,20 @@ func interfaceObjectLiteralExprPreferred(info *fileInfo, reg *registry, typeName
 		items = append(items, "implements: ["+implements+"]")
 	}
 	return "{" + strings.Join(items, ", ") + "}"
+}
+
+func mergedTypeParameters(existing map[string]bool, names []string) map[string]bool {
+	if len(names) == 0 {
+		return existing
+	}
+	merged := make(map[string]bool, len(existing)+len(names))
+	for name, enabled := range existing {
+		merged[name] = enabled
+	}
+	for _, name := range names {
+		merged[name] = true
+	}
+	return merged
 }
 
 func objectTypeLiteralExpr(info *fileInfo, reg *registry, raw string, ctx *typeContext) string {

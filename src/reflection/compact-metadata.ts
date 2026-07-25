@@ -45,10 +45,19 @@ export function createCompactMetadataRegistryV1(serialized: string, references: 
 }
 
 /** Resolve metadata published by a type-only external import at first use. */
-export function resolveCompactMetadataAliasV1(loadModule: () => unknown, exportName: string, typeName: string): unknown {
+export function resolveCompactMetadataAliasV1(
+    loadModule: (() => unknown) | ((specifier: string) => unknown),
+    specifierOrExportName: string,
+    exportNameOrTypeName: string,
+    maybeTypeName?: string
+): unknown {
+    const [load, exportName, typeName] =
+        maybeTypeName === undefined
+            ? [loadModule as () => unknown, specifierOrExportName, exportNameOrTypeName]
+            : [() => (loadModule as (specifier: string) => unknown)(specifierOrExportName), exportNameOrTypeName, maybeTypeName];
     let imported: Record<string, unknown> | undefined;
     try {
-        const loaded = loadModule();
+        const loaded = load();
         if (loaded && typeof loaded === 'object') imported = loaded as Record<string, unknown>;
     } catch {
         // A declaration-only package has no runtime module. Preserve the

@@ -69,6 +69,42 @@ Bodies with a required `FileUpload` are documented only as `multipart/form-data`
 
 Plain `Promise<T>` return types document and emit a `200` JSON response. `OkResponse`, `AnyResponse`, `JsonResponseResult`, `RawResponseResult`, `RedirectResponseResult`, and `EmptyResponseResult` keep their existing OpenAPI behavior.
 
+Use `openapi.response<T>()` when an operation documents additional response types without changing its runtime behavior. Use `openapi.errors<T>()` to add the same error body for several statuses. Decorators on a controller apply to every route; route decorators add to them, and a route response for the same status replaces the controller response.
+
+```ts
+import { http, openapi } from '@zyno-io/ts-server-foundation';
+
+class ProblemDetails {
+    code!: string;
+    message!: string;
+}
+
+class UserDto {
+    id!: string;
+}
+
+@openapi.errors<ProblemDetails>([401, 403])
+@http.controller('/users')
+class UserController {
+    @openapi.response<UserDto>({ status: 201, description: 'Created' })
+    @openapi.errors<ProblemDetails>(422)
+    @http.POST()
+    async create(): Promise<UserDto> {
+        return { id: 'user_1' };
+    }
+
+    @openapi.ignore()
+    @http.GET('/internal')
+    async internal(): Promise<UserDto> {
+        return { id: 'internal' };
+    }
+}
+```
+
+The decorators use reflected generic metadata and are documentation-only: they neither set response statuses nor alter response bodies at runtime. `openapi.ignore()` can be placed on a route or controller to exclude it from the generated document. Duplicate explicit statuses at the same scope fail early; method metadata deterministically overrides controller metadata for the same status.
+
+Object unions gain a native OpenAPI discriminator when TSF can prove one: every branch must have one qualifying common required property whose string literal values do not overlap. This deliberately does not infer discriminators from nullable unions, broad `string` properties, overlapping values, or unions with more than one possible tag property.
+
 An operation with a required `ParsedJwt` parameter receives `security: [{ bearerAuth: [] }]`, and the document gains an HTTP bearer security scheme with JWT format. An optional `ParsedJwt` does not mark the operation as requiring bearer authentication. Runtime authentication may also read the configured JWT cookie, but the generated document currently advertises only the Bearer mechanism.
 
 ## Operation IDs

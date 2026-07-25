@@ -66,6 +66,11 @@ export interface OpenApiReferenceObject {
     $ref: string;
 }
 
+export interface OpenApiDiscriminatorObject {
+    propertyName: string;
+    mapping?: Record<string, string>;
+}
+
 export interface OpenApiSchemaObject {
     type?: string | string[];
     format?: string;
@@ -79,6 +84,7 @@ export interface OpenApiSchemaObject {
     oneOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
     anyOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
     allOf?: Array<OpenApiSchemaObject | OpenApiReferenceObject>;
+    discriminator?: OpenApiDiscriminatorObject;
     not?: OpenApiSchemaObject | OpenApiReferenceObject;
     minLength?: number;
     maxLength?: number;

@@ -23,3 +23,9 @@ export class OpenApiImportedReportSource {
     detailBreakdown!: OpenApiImportedReportDetail[];
     customEntries!: OpenApiImportedReportCustomEntry[];
 }
+
+export interface OpenApiImportedGenericError<Code extends string = string> {
+    error: string;
+    code?: Code;
+    retryable?: boolean;
+}

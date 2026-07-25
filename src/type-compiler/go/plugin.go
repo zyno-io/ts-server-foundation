@@ -155,6 +155,7 @@ type callInfo struct {
 type typeContext struct {
 	seen       map[string]bool
 	interfaces map[string]bool
+	typeParams map[string]bool
 	depth      int
 	pos        int
 }

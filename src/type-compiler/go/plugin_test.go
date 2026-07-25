@@ -931,6 +931,26 @@ func TestAliasMetadataOnlyIncludesExportedDeclarations(t *testing.T) {
 	assertNotContains(t, got, "PrivateInterface")
 }
 
+func TestGenericInterfaceAliasMetadataRemainsPureJSON(t *testing.T) {
+	info, reg := testTypeInfo()
+	info.interfaces["ManagerApiError"] = []interfaceInfo{{
+		body:     "error: string; code?: Code; result?: T",
+		params:   []string{"Code", "T"},
+		exported: true,
+	}}
+
+	got := aliasMetadataExpression(info, reg)
+	assertContainsAll(t, got, `typeParameters: ["Code", "T"]`, `{kind: 2, typeName: "Code"}`, `{kind: 2, typeName: "T"}`)
+	assertNotContains(t, got, "classType")
+	template, err := parseExpressionTemplate(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compactMetadataIsPureJSON(template.parsed) {
+		t.Fatal("generic interface alias metadata should not require the TSF metadata runtime")
+	}
+}
+
 func TestTypeAliasEmissionDefaultsOnAndCanBeDisabled(t *testing.T) {
 	if !shouldEmitTypeAliases("") {
 		t.Fatal("alias metadata should remain enabled when no plugin config is supplied")

@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
-import { MaxLength, MinLength, type DatabaseField } from '../src';
+import { MaxLength, MinLength, type DatabaseField, type Type } from '../src';
 
 import {
     BaseAppConfig,
+    createOpenApiSchemaContext,
     DateString,
     deserialize,
     dumpOpenApiSchema,
@@ -32,6 +33,7 @@ import {
     jsonResponse,
     JsonResponseResult,
     OkResponse,
+    openapi,
     ParsedJwt,
     rawResponse,
     RawResponseResult,
@@ -42,12 +44,15 @@ import {
     shouldDumpOpenApiSchema,
     shouldExposeOpenApi,
     TestingHelpers,
+    typeToOpenApiSchema,
     UuidString,
     validate
 } from '../src';
 import { createApp } from '../src/app';
 import type { OpenApiReferenceObject, OpenApiSchemaObject } from '../src/openapi';
+import { resolveCompactMetadataAliasV1 } from '../src/reflection/compact-metadata';
 import { OpenApiImportedReportSource } from './openapi-imported-utility-fixtures';
+import type { OpenApiImportedGenericError } from './openapi-imported-utility-fixtures';
 import type {
     OpenApiReexportedBindingNode,
     OpenApiReexportedOption,
@@ -328,6 +333,26 @@ interface OpenApiTaggedUnionResponse {
     value: DateString | UuidString;
 }
 
+class OpenApiCreatedEvent {
+    kind!: 'created';
+    id!: string;
+}
+
+class OpenApiDeletedEvent {
+    kind!: 'deleted';
+    id!: string;
+}
+
+type OpenApiPromotedEvent = { kind: 'added'; addedId: string } | { kind: 'removed'; removedId: string };
+
+interface OpenApiNativeDiscriminatedUnionResponse {
+    value: OpenApiCreatedEvent | OpenApiDeletedEvent;
+    promotedValue: OpenApiPromotedEvent;
+    broadValue: { kind: string; id: string } | { kind: string; deletedAt: string };
+    ambiguousValue: { kind: 'created'; event: 'new' } | { kind: 'deleted'; event: 'old' };
+    nullableValue: { kind: 'created'; id: string } | { kind: 'deleted'; id: string } | null;
+}
+
 interface OpenApiRecursiveNode {
     name: string;
     child?: OpenApiRecursiveNode;
@@ -519,6 +544,17 @@ class OpenApiUsersController {
     @http.GET('/tagged-union')
     async taggedUnion(): Promise<OpenApiTaggedUnionResponse> {
         return { value: '2024-01-01' as DateString };
+    }
+
+    @http.GET('/native-discriminated-union')
+    async nativeDiscriminatedUnion(): Promise<OpenApiNativeDiscriminatedUnionResponse> {
+        return {
+            value: { kind: 'created', id: '' },
+            promotedValue: { kind: 'added', addedId: '' },
+            broadValue: { kind: '', id: '' },
+            ambiguousValue: { kind: 'created', event: 'new' },
+            nullableValue: { kind: 'created', id: '' }
+        };
     }
 
     @http.GET('/interfaces')
@@ -749,6 +785,56 @@ class OpenApiOtherController {
     }
 }
 
+class OpenApiDecoratorError {
+    code!: string;
+}
+
+class OpenApiDecoratorMethodResponse {
+    created!: boolean;
+}
+
+@openapi.response<OpenApiUserDto>({ status: 201, description: 'Created from controller' })
+@openapi.response<OpenApiUserDto>({ status: 202, description: 'Queued from controller' })
+@openapi.errors<OpenApiDecoratorError>([400, 404, 410])
+@http.controller('/decorated')
+class OpenApiDecoratorController {
+    @http.GET('/merged')
+    async merged(): Promise<OpenApiUserDto> {
+        return new OpenApiUserDto();
+    }
+
+    @openapi.response<OpenApiDecoratorMethodResponse>({ status: 201, description: 'Created from method' })
+    @openapi.errors<OpenApiDecoratorError>(422)
+    @http.POST('/override')
+    async override(): ApiResponse<OpenApiUserDto, 201> {
+        return new OpenApiUserDto();
+    }
+
+    @openapi.ignore()
+    @http.GET('/hidden')
+    async hidden(): Promise<OpenApiUserDto> {
+        return new OpenApiUserDto();
+    }
+}
+
+@openapi.ignore()
+@http.controller('/hidden-controller')
+class OpenApiIgnoredController {
+    @http.GET()
+    async hidden(): Promise<OpenApiUserDto> {
+        return new OpenApiUserDto();
+    }
+}
+
+@http.controller('/imported-generic')
+class OpenApiImportedGenericController {
+    @openapi.errors<OpenApiImportedGenericError<'provider_rejected' | 'retry_later'>>(422)
+    @http.GET()
+    async get(): Promise<OpenApiUserDto> {
+        return new OpenApiUserDto();
+    }
+}
+
 class ProductionConfig extends BaseAppConfig {
     APP_ENV = 'production';
     ENABLE_OPENAPI_SCHEMA = false;
@@ -774,6 +860,128 @@ afterEach(async () => {
 });
 
 describe('openapi', () => {
+    it('merges OpenAPI-only response metadata and excludes ignored controllers and routes', () => {
+        const app = createApp({
+            controllers: [OpenApiDecoratorController, OpenApiIgnoredController, OpenApiImportedGenericController],
+            enableHealthcheck: false
+        });
+
+        const doc = serializeOpenApiSchema(app);
+        const merged = doc.paths['/decorated/merged'].get!;
+        assert.deepStrictEqual(Object.keys(merged.responses).sort(), ['200', '201', '202', '400', '404', '410']);
+        assert.equal(merged.responses['201'].description, 'Created from controller');
+        assert.equal(merged.responses['202'].description, 'Queued from controller');
+        assert.equal(merged.responses['400'].description, 'Bad Request');
+        assert.equal(
+            referenceObject(merged.responses['400'].content?.['application/json'].schema).$ref,
+            '#/components/schemas/OpenApiDecoratorError'
+        );
+        assert.equal(merged.responses['410'].description, 'Gone');
+
+        const override = doc.paths['/decorated/override'].post!;
+        assert.deepStrictEqual(Object.keys(override.responses).sort(), ['201', '202', '400', '404', '410', '422']);
+        assert.equal(override.responses['201'].description, 'Created from method');
+        assert.equal(
+            referenceObject(override.responses['201'].content?.['application/json'].schema).$ref,
+            '#/components/schemas/OpenApiDecoratorMethodResponse'
+        );
+        assert.equal(override.responses['422'].description, 'Unprocessable Entity');
+        assert.equal(doc.paths['/decorated/hidden'], undefined);
+        assert.equal(doc.paths['/hidden-controller'], undefined);
+
+        const importedGenericError = resolveSchemaObject(
+            doc,
+            doc.paths['/imported-generic'].get?.responses['422'].content?.['application/json'].schema
+        );
+        assert.deepStrictEqual(Object.keys(importedGenericError.properties ?? {}).sort(), ['code', 'error', 'retryable']);
+        assert.deepStrictEqual(schemaObject(importedGenericError.properties?.code).enum, ['provider_rejected', 'retry_later']);
+    });
+
+    it('rejects duplicate explicit response statuses on one decorator target', () => {
+        class DuplicateResponseController {}
+
+        const first = openapi.response<OpenApiUserDto>({ status: 200 });
+        const duplicate = openapi.response<OpenApiUserDto>({ status: 200 });
+        first(DuplicateResponseController);
+        assert.throws(() => duplicate(DuplicateResponseController), /already declared/);
+    });
+
+    it('instantiates imported generic alias metadata for OpenAPI schemas', () => {
+        const imported = resolveCompactMetadataAliasV1(
+            (_specifier: string) => ({
+                __tsfTypeAliases: {
+                    ExternalGenericError: {
+                        kind: ReflectionKind.objectLiteral,
+                        typeName: 'ExternalGenericError',
+                        typeParameters: ['Code'],
+                        types: [
+                            { kind: ReflectionKind.propertySignature, name: 'error', type: { kind: ReflectionKind.string } },
+                            {
+                                kind: ReflectionKind.propertySignature,
+                                name: 'code',
+                                optional: true,
+                                type: { kind: ReflectionKind.class, typeName: 'Code', classType: () => undefined }
+                            }
+                        ]
+                    }
+                }
+            }),
+            '@fixture/shared',
+            'ExternalGenericError',
+            'ExternalGenericError'
+        ) as Type & { typeArguments?: Type[] };
+        imported.typeArguments = [
+            {
+                kind: ReflectionKind.union,
+                types: [
+                    { kind: ReflectionKind.literal, literal: 'first' },
+                    { kind: ReflectionKind.literal, literal: 'second' }
+                ]
+            }
+        ];
+
+        const context = createOpenApiSchemaContext();
+        typeToOpenApiSchema(imported, context);
+        const schema = schemaObject(context.schemas.ExternalGenericError);
+        assert.deepStrictEqual(Object.keys(schema.properties ?? {}).sort(), ['code', 'error']);
+        assert.deepStrictEqual(schemaObject(schema.properties?.code).enum, ['first', 'second']);
+    });
+
+    it('instantiates legacy imported generic aliases with unconstrained parameters', () => {
+        const imported = resolveCompactMetadataAliasV1(
+            (_specifier: string) => ({
+                __tsfTypeAliases: {
+                    ExternalGenericEnvelope: {
+                        kind: ReflectionKind.objectLiteral,
+                        typeName: 'ExternalGenericEnvelope',
+                        types: [
+                            {
+                                kind: ReflectionKind.propertySignature,
+                                name: 'result',
+                                type: { kind: ReflectionKind.unknown, typeName: 'T' }
+                            }
+                        ]
+                    }
+                }
+            }),
+            '@fixture/shared',
+            'ExternalGenericEnvelope',
+            'ExternalGenericEnvelope'
+        ) as Type & { typeArguments?: Type[] };
+        imported.typeArguments = [
+            {
+                kind: ReflectionKind.objectLiteral,
+                types: [{ kind: ReflectionKind.propertySignature, name: 'id', type: { kind: ReflectionKind.string } }]
+            }
+        ];
+
+        const context = createOpenApiSchemaContext();
+        typeToOpenApiSchema(imported, context);
+        const result = schemaObject(context.schemas.ExternalGenericEnvelope?.properties?.result);
+        assert.deepStrictEqual(Object.keys(result.properties ?? {}), ['id']);
+        assert.deepStrictEqual(result.required, ['id']);
+    });
+
     it('serializes reflected routes, parameters, bodies, responses, and security', () => {
         const app = createApp({
             controllers: [OpenApiUsersController],
@@ -1111,6 +1319,31 @@ describe('openapi', () => {
             }
         ]);
 
+        const nativeDiscriminatedUnion = schemaObject(doc.components?.schemas?.OpenApiNativeDiscriminatedUnionResponse);
+        const nativeDiscriminatedValue = schemaObject(nativeDiscriminatedUnion.properties?.value);
+        assert.deepStrictEqual(nativeDiscriminatedValue.discriminator, {
+            propertyName: 'kind',
+            mapping: {
+                created: '#/components/schemas/OpenApiCreatedEvent',
+                deleted: '#/components/schemas/OpenApiDeletedEvent'
+            }
+        });
+        const promotedEvent = schemaObject(doc.components?.schemas?.OpenApiPromotedEvent);
+        assert.deepStrictEqual(promotedEvent.discriminator, {
+            propertyName: 'kind',
+            mapping: {
+                added: '#/components/schemas/OpenApiPromotedEvent_added',
+                removed: '#/components/schemas/OpenApiPromotedEvent_removed'
+            }
+        });
+        assert.deepStrictEqual(promotedEvent.oneOf, [
+            { $ref: '#/components/schemas/OpenApiPromotedEvent_added' },
+            { $ref: '#/components/schemas/OpenApiPromotedEvent_removed' }
+        ]);
+        assert.equal(schemaObject(nativeDiscriminatedUnion.properties?.broadValue).discriminator, undefined);
+        assert.equal(schemaObject(nativeDiscriminatedUnion.properties?.ambiguousValue).discriminator, undefined);
+        assert.equal(schemaObject(nativeDiscriminatedUnion.properties?.nullableValue).discriminator, undefined);
+
         const interfaceListResponse = schemaObject(doc.paths['/users/interfaces'].get?.responses['200'].content?.['application/json'].schema);
         assert.equal(referenceObject(interfaceListResponse.items).$ref, '#/components/schemas/OpenApiInterfaceResponse');
         assert.equal(
@@ -1139,7 +1372,7 @@ describe('openapi', () => {
         const genericVariant = resolveSchemaObject(doc, schemaObject(genericContainer.properties?.items).items);
         assert.equal(genericVariant.oneOf?.length, 2);
         assert.deepStrictEqual(
-            genericVariant.oneOf?.map(item => schemaObject(item).properties?.kind),
+            genericVariant.oneOf?.map(item => resolveSchemaObject(doc, item).properties?.kind),
             [
                 { type: 'string', enum: ['alpha'] },
                 { type: 'string', enum: ['beta'] }
