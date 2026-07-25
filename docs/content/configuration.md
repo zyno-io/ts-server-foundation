@@ -37,6 +37,14 @@ Keys ending in `_SECRET` may contain encrypted `@zyno-io/config` payloads. They 
 
 Config loading reads from `Env` without deleting consumed keys from `process.env`. Values loaded into the typed config object remain available to later code and child processes.
 
+When an application needs dynamic environment keys that are intentionally not represented on its reflected config class, pass `envPassthrough` to `createApp()`. Matching keys from the resolved configuration are copied into `process.env`; process-environment values retain their normal precedence over file values.
+
+```ts
+const app = createApp({
+    envPassthrough: [/^ZRPC_[A-Z0-9_]+_URL$/]
+});
+```
+
 ## Required Environment
 
 `APP_ENV` is required only when `NODE_ENV=production`. The loader infers `APP_ENV=test` under Node's test runner and otherwise defaults to `development` outside production.

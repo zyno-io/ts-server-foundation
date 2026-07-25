@@ -55,6 +55,7 @@ export { getCurrentApp, setCurrentApp } from './current';
 export interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> extends ModuleDefinition<C> {
     config?: ClassType<C>;
     defaultConfig?: Partial<C>;
+    envPassthrough?: readonly RegExp[];
     db?: ClassType;
     frameworkConfig?: Record<string, unknown>;
     serverConfig?: Record<string, unknown>;
@@ -100,7 +101,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
 
     constructor(readonly options: CreateAppOptions<C>) {
         const configClass = options.config ?? (BaseAppConfig as ClassType<C>);
-        this.config = new ConfigLoader(configClass, options.defaultConfig).load();
+        this.config = new ConfigLoader(configClass, options.defaultConfig, options.envPassthrough).load();
         if (this.config.SENTRY_DSN) {
             installSentry({ dsn: this.config.SENTRY_DSN });
         }

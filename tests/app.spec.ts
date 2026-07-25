@@ -229,6 +229,59 @@ describe('config loader', () => {
         assert.equal(childEnv, 'test:34:process:keep');
     });
 
+    it('loads matching resolved values into process env', () => {
+        class AppConfig extends BaseAppConfig {}
+
+        makeTempCwd();
+        writeFileSync(
+            '.env.test',
+            'ZRPC_BILLING_URL=http://billing-from-file\nZRPC_ORDERS_URL=http://orders-from-file\nUNRELATED_DYNAMIC_VALUE=ignore\n'
+        );
+        process.env.APP_ENV = 'test';
+        process.env.ZRPC_ORDERS_URL = 'http://orders-from-process';
+
+        new ConfigLoader(AppConfig, undefined, [/^ZRPC_[A-Z0-9_]+_URL$/]).load();
+
+        assert.equal(process.env.ZRPC_BILLING_URL, 'http://billing-from-file');
+        assert.equal(process.env.ZRPC_ORDERS_URL, 'http://orders-from-process');
+        assert.equal(process.env.UNRELATED_DYNAMIC_VALUE, undefined);
+    });
+
+    it('does not load passthrough values when config validation fails', () => {
+        class AppConfig extends BaseAppConfig {
+            MODE!: 'allowed';
+        }
+
+        makeTempCwd();
+        writeFileSync('.env.test', 'MODE=denied\nZRPC_BILLING_URL=http://billing-from-file\n');
+        process.env.APP_ENV = 'test';
+
+        assert.throws(() => new ConfigLoader(AppConfig, undefined, [/^ZRPC_[A-Z0-9_]+_URL$/]).load(), /Invalid configuration/);
+        assert.equal(process.env.ZRPC_BILLING_URL, undefined);
+    });
+
+    it('preserves stateful passthrough pattern state', () => {
+        class AppConfig extends BaseAppConfig {}
+
+        const globalPattern = /^ZRPC_BILLING_URL$/g;
+        const stickyPattern = /^ZRPC_CATALOG_URL$/y;
+        globalPattern.lastIndex = 3;
+        stickyPattern.lastIndex = 5;
+        Object.freeze(globalPattern);
+        Object.freeze(stickyPattern);
+
+        makeTempCwd();
+        writeFileSync('.env.test', 'ZRPC_BILLING_URL=http://billing-from-file\nZRPC_CATALOG_URL=http://catalog-from-file\n');
+        process.env.APP_ENV = 'test';
+
+        new ConfigLoader(AppConfig, undefined, [globalPattern, stickyPattern]).load();
+
+        assert.equal(process.env.ZRPC_BILLING_URL, 'http://billing-from-file');
+        assert.equal(process.env.ZRPC_CATALOG_URL, 'http://catalog-from-file');
+        assert.equal(globalPattern.lastIndex, 3);
+        assert.equal(stickyPattern.lastIndex, 5);
+    });
+
     it('preserves consumed process env keys even when validation fails', () => {
         class AppConfig extends BaseAppConfig {
             MODE!: 'allowed';
@@ -311,6 +364,16 @@ describe('app lifecycle', () => {
         assert.strictEqual(app.get(AppConfig), app.config);
         assert.strictEqual(app.get(BaseAppConfig), app.config);
         assert.equal(app.get(AppConfig).CUSTOM_VALUE, 'ok');
+    });
+
+    it('forwards env passthrough patterns to the config loader', () => {
+        makeTempCwd();
+        writeFileSync('.env.test', 'ZRPC_CATALOG_URL=http://catalog-from-file\n');
+        process.env.APP_ENV = 'test';
+
+        createApp({ envPassthrough: [/^ZRPC_[A-Z0-9_]+_URL$/] });
+
+        assert.equal(process.env.ZRPC_CATALOG_URL, 'http://catalog-from-file');
     });
 
     it('dispatches lifecycle events in order', async () => {

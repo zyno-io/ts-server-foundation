@@ -10,7 +10,8 @@ import { isTestEnvironment } from './const';
 export class ConfigLoader<C extends object> {
     constructor(
         private configClass: ClassType<C>,
-        private defaultConfig?: Partial<C>
+        private defaultConfig?: Partial<C>,
+        private readonly envPassthrough: readonly RegExp[] = []
     ) {}
 
     load(): C {
@@ -42,7 +43,16 @@ export class ConfigLoader<C extends object> {
             throw new Error(`Invalid configuration: ${errors.map(e => `${e.path}: ${e.message}`).join(', ')}`);
         }
 
+        this.loadMatchingValuesIntoProcessEnv(loaded);
         return config;
+    }
+
+    private loadMatchingValuesIntoProcessEnv(loaded: Record<string, string>): void {
+        for (const [key, value] of Object.entries(loaded)) {
+            if (this.envPassthrough.some(pattern => matchesEnvironmentKey(pattern, key))) {
+                process.env[key] = value;
+            }
+        }
     }
 
     loadConfigObject(): Record<string, string> {
@@ -65,6 +75,10 @@ export class ConfigLoader<C extends object> {
             file: paths
         });
     }
+}
+
+function matchesEnvironmentKey(pattern: RegExp, key: string): boolean {
+    return new RegExp(pattern.source, pattern.flags).test(key);
 }
 
 function coerceConfigValue(value: string, type: Type): unknown {

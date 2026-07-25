@@ -181,6 +181,7 @@ Long-running commands can extend `CliServiceCommand`. These commands start an HT
 interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> extends ModuleDefinition<C> {
     config?: ClassType<C>;
     defaultConfig?: Partial<C>;
+    envPassthrough?: readonly RegExp[];
     db?: ClassType;
     frameworkConfig?: Record<string, unknown>;
     serverConfig?: Record<string, unknown>;
@@ -199,6 +200,7 @@ Common fields:
 | ------------------- | --------------------------------------------------------------------------------------------- |
 | `config`            | Config class. Defaults to `BaseAppConfig`.                                                    |
 | `defaultConfig`     | Default values applied before env files and `Env`.                                            |
+| `envPassthrough`    | Patterns for dynamic resolved config keys that should be copied into `process.env`.           |
 | `db`                | Database class from `createDatabase`, `createMySQLDatabase`, or `createPostgresDatabase`.     |
 | `controllers`       | HTTP controllers registered with the owned router.                                            |
 | `providers`         | DI providers. Classes, `useValue`, `useClass`, `useExisting`, and `useFactory` are supported. |
