@@ -167,7 +167,7 @@ func externalReceiveTypeFunctionInfos(fromFile string, spec string, exportName s
 }
 
 func externalFunctionInfos(fromFile string, spec string, reg *registry) map[string][]functionInfo {
-	root := externalPackageRoot(fromFile, spec)
+	root := externalPackageRoot(fromFile, spec, reg)
 	if root == "" {
 		return nil
 	}
@@ -204,13 +204,20 @@ func externalFunctionInfos(fromFile string, spec string, reg *registry) map[stri
 	return functions
 }
 
-func externalPackageRoot(fromFile string, spec string) string {
+func externalPackageRoot(fromFile string, spec string, reg *registry) string {
 	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") {
 		return ""
 	}
 	pkg := packageNameFromSpec(spec)
 	if pkg == "" {
 		return ""
+	}
+	if reg != nil {
+		if root := reg.externalPackageRoots[pkg]; root != "" {
+			if stat, err := os.Stat(root); err == nil && stat.IsDir() {
+				return filepath.Clean(root)
+			}
+		}
 	}
 	dir := filepath.Dir(fromFile)
 	for {

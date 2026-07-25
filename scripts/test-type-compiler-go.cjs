@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 const { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
-const { join, resolve } = require('node:path');
+const { dirname, join, resolve } = require('node:path');
+const { createRequire } = require('node:module');
 const { spawnSync } = require('node:child_process');
 
 const root = resolve(__dirname, '..');
 const pluginDir = join(root, 'src/type-compiler/go');
-const ttscDir = join(root, 'node_modules/ttsc');
+const projectRequire = createRequire(join(root, 'package.json'));
+const ttscDir = dirname(projectRequire.resolve('ttsc/package.json'));
 const shimDir = join(ttscDir, 'shim');
 
 if (!existsSync(join(ttscDir, 'go.mod'))) {
-    console.error('Missing node_modules/ttsc. Run yarn install before Go plugin tests.');
+    console.error('Missing ttsc. Run yarn install before Go plugin tests.');
     process.exit(1);
 }
 

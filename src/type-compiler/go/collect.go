@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,13 +17,14 @@ import (
 
 func collectRegistry(prog *driver.Program, cwd string, emitTypeAliases bool, emitUndecoratedMethods bool) *registry {
 	reg := &registry{
-		files:         map[string]*fileInfo{},
-		byPath:        map[string]*fileInfo{},
-		checker:       prog.Checker,
-		typiaCache:    map[typiaCacheKey]string{},
-		typiaFailures: map[*shimchecker.Type]bool{},
-		classes:       map[string]*classInfo{},
-		external:      map[string]map[string][]functionInfo{},
+		files:                map[string]*fileInfo{},
+		byPath:               map[string]*fileInfo{},
+		checker:              prog.Checker,
+		typiaCache:           map[typiaCacheKey]string{},
+		typiaFailures:        map[*shimchecker.Type]bool{},
+		classes:              map[string]*classInfo{},
+		external:             map[string]map[string][]functionInfo{},
+		externalPackageRoots: loadPnpExternalPackageRoots(cwd),
 	}
 	for _, file := range prog.TSProgram.SourceFiles() {
 		if shouldSkipFile(file.FileName(), cwd) {
@@ -56,6 +59,30 @@ func collectRegistry(prog *driver.Program, cwd string, emitTypeAliases bool, emi
 	}
 	precomputeMetadataExpressions(reg, emitTypeAliases)
 	return reg
+}
+
+// Yarn PnP keeps JavaScript packages inside ZipFS, which Node can read but the
+// native compiler cannot. The descriptor copies just imported declaration files
+// to this map before starting the host. Other package managers leave the map
+// empty and continue through the normal node_modules lookup.
+func loadPnpExternalPackageRoots(cwd string) map[string]string {
+	if cwd == "" {
+		return map[string]string{}
+	}
+	contents, err := os.ReadFile(filepath.Join(cwd, ".yarn", "tsf-pnp", "external-package-roots.json"))
+	if err != nil {
+		return map[string]string{}
+	}
+	roots := map[string]string{}
+	if err := json.Unmarshal(contents, &roots); err != nil {
+		return map[string]string{}
+	}
+	for packageName, root := range roots {
+		if stat, err := os.Stat(root); err != nil || !stat.IsDir() {
+			delete(roots, packageName)
+		}
+	}
+	return roots
 }
 
 func shouldSkipFile(fileName string, cwd string) bool {

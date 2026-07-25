@@ -17,13 +17,14 @@ import (
 const foundationPackageSpec = "@zyno-io/ts-server-foundation"
 
 type registry struct {
-	files         map[string]*fileInfo
-	byPath        map[string]*fileInfo
-	checker       *shimchecker.Checker
-	typiaCache    map[typiaCacheKey]string
-	typiaFailures map[*shimchecker.Type]bool
-	classes       map[string]*classInfo
-	external      map[string]map[string][]functionInfo
+	files                map[string]*fileInfo
+	byPath               map[string]*fileInfo
+	checker              *shimchecker.Checker
+	typiaCache           map[typiaCacheKey]string
+	typiaFailures        map[*shimchecker.Type]bool
+	classes              map[string]*classInfo
+	external             map[string]map[string][]functionInfo
+	externalPackageRoots map[string]string
 }
 
 type typiaCacheKey struct {

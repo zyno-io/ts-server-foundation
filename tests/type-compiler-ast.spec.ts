@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { describe, it } from 'node:test';
+
+const requireFromTest = createRequire(__filename);
+const typescriptDirectory = dirname(requireFromTest.resolve('typescript/package.json'));
+const ttscLauncher = join(dirname(requireFromTest.resolve('ttsc/package.json')), 'lib', 'launcher', 'ttsc.js');
 
 function createFixture(): string {
     const directory = join(tmpdir(), `tsf-ast-transform-${process.pid}-${Date.now()}`);
@@ -14,7 +19,7 @@ function createFixture(): string {
     mkdirSync(reflectionDirectory, { recursive: true });
     mkdirSync(orderAliasDirectory, { recursive: true });
 
-    symlinkSync(join(process.cwd(), 'node_modules', 'typescript'), join(directory, 'node_modules', 'typescript'), 'dir');
+    symlinkSync(typescriptDirectory, join(directory, 'node_modules', 'typescript'), 'dir');
 
     writeFileSync(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
     writeFileSync(
@@ -279,7 +284,7 @@ function createFixture(): string {
 function createAliasFixture(source: string, emitMetadataRuntimeImport?: boolean): string {
     const directory = join(tmpdir(), `tsf-alias-transform-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     mkdirSync(join(directory, 'node_modules'), { recursive: true });
-    symlinkSync(join(process.cwd(), 'node_modules', 'typescript'), join(directory, 'node_modules', 'typescript'), 'dir');
+    symlinkSync(typescriptDirectory, join(directory, 'node_modules', 'typescript'), 'dir');
 
     writeFileSync(join(directory, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
     writeFileSync(join(directory, 'alias-source.mts'), `export type SourceUnion = 'keep-first' | 'remove' | 'keep-second';`);
@@ -313,7 +318,7 @@ function createAliasFixture(source: string, emitMetadataRuntimeImport?: boolean)
 }
 
 function compileFixture(directory: string) {
-    return spawnSync(join(process.cwd(), 'node_modules', '.bin', 'ttsc'), ['-p', 'tsconfig.json'], {
+    return spawnSync(process.execPath, [ttscLauncher, '-p', 'tsconfig.json'], {
         cwd: directory,
         encoding: 'utf8',
         env: { ...process.env, NO_COLOR: '1' }
@@ -325,8 +330,7 @@ describe('AST metadata compiler integration', () => {
         const directory = createFixture();
         delete (globalThis as typeof globalThis & { __tsfOrder?: string[] }).__tsfOrder;
         try {
-            const executable = join(process.cwd(), 'node_modules', '.bin', 'ttsc');
-            const result = spawnSync(executable, ['-p', 'tsconfig.json'], {
+            const result = spawnSync(process.execPath, [ttscLauncher, '-p', 'tsconfig.json'], {
                 cwd: directory,
                 encoding: 'utf8',
                 env: { ...process.env, NO_COLOR: '1' }

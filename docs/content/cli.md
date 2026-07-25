@@ -228,6 +228,8 @@ Generation always enables `esModuleInterop` and disables generated service clien
 
 - adds itself to `postinstall` without replacing an existing postinstall command
 - moves the supported `typescript` and `ttsc` versions into `devDependencies`
+- marks `ttsc`, its platform hosts, and the protobuf tools as unplugged in Yarn
+  projects so native processes receive real executable paths under Plug'n'Play
 - keeps TSF/compiler versions aligned in every workspace package that directly depends on TSF
 - finds `tsconfig*.json` files outside generated/dependency directories
 - adds the TSF transform to `compilerOptions.plugins`

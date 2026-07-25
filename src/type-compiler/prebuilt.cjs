@@ -235,6 +235,7 @@ function shouldOmitSourceFile(name) {
     return (
         name === 'go.work' ||
         name === 'go.work.sum' ||
+        name === '.complete' ||
         name.endsWith('~') ||
         name.endsWith('.tgz') ||
         name.endsWith('.tar.gz') ||

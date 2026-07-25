@@ -799,7 +799,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@opentelemetry/core@npm:2.10.0, @opentelemetry/core@npm:^2.0.0, @opentelemetry/core@npm:^2.9.0":
+"@opentelemetry/core@npm:2.10.0, @opentelemetry/core@npm:^2.0.0, @opentelemetry/core@npm:^2.10.0, @opentelemetry/core@npm:^2.9.0":
   version: 2.10.0
   resolution: "@opentelemetry/core@npm:2.10.0"
   dependencies:
@@ -2432,6 +2432,7 @@ __metadata:
   dependencies:
     "@bufbuild/protobuf": "npm:^2.13.0"
     "@opentelemetry/api": "npm:^1.9.1"
+    "@opentelemetry/core": "npm:^2.10.0"
     "@opentelemetry/exporter-metrics-otlp-http": "npm:^0.221.0"
     "@opentelemetry/exporter-prometheus": "npm:^0.221.0"
     "@opentelemetry/exporter-trace-otlp-http": "npm:^0.221.0"
@@ -2489,6 +2490,27 @@ __metadata:
     vue-router: "npm:^5.2.0"
     ws: "npm:^8.21.1"
     yaml: "npm:^2.9.0"
+  dependenciesMeta:
+    "@ttsc/darwin-arm64":
+      unplugged: true
+    "@ttsc/darwin-x64":
+      unplugged: true
+    "@ttsc/linux-arm":
+      unplugged: true
+    "@ttsc/linux-arm64":
+      unplugged: true
+    "@ttsc/linux-x64":
+      unplugged: true
+    "@ttsc/win32-arm64":
+      unplugged: true
+    "@ttsc/win32-x64":
+      unplugged: true
+    protoc:
+      unplugged: true
+    ts-proto:
+      unplugged: true
+    ttsc:
+      unplugged: true
   bin:
     ts-server-foundation: dist/src/cli/tsf.js
     tsf: dist/src/cli/tsf.js

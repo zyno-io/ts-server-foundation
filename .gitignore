@@ -10,7 +10,7 @@ node_modules/
 !.yarn/sdks/
 !.yarn/versions/
 
-# Plug'n'Play artifacts if nodeLinker changes later.
+# Generated Plug'n'Play loader artifacts.
 .pnp.*
 
 # Build output

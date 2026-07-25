@@ -11,7 +11,10 @@ corepack yarn --version
 corepack yarn install --immutable
 ```
 
-The repository uses Yarn 4 and `nodeLinker: node-modules`.
+The repository uses Yarn 4 with strict Plug'n'Play (`nodeLinker: pnp`). Yarn
+keeps ordinary JavaScript dependencies in its cache archives. Compiler,
+proto-generation, and platform-native packages that require real executable
+paths are selectively unplugged.
 
 ## Build
 

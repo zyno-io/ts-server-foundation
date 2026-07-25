@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, globSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { parseDocument } from 'yaml';
 
 import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from './common';
 
@@ -24,6 +25,7 @@ interface PackageJson {
     devDependencies?: Record<string, string>;
     optionalDependencies?: Record<string, string>;
     peerDependencies?: Record<string, string>;
+    dependenciesMeta?: Record<string, { unplugged?: boolean }>;
     [key: string]: unknown;
 }
 
@@ -41,6 +43,7 @@ interface PackageManagerInfo {
 
 interface BaselineVersions {
     framework: string;
+    opentelemetryCore: string;
     ttsc: string;
     typescript: string;
 }
@@ -72,6 +75,7 @@ export function install(options: InstallOptions = {}): number {
     const workspacePkg = resolve(workspaceRoot) === resolve(projectDir) ? pkg : readPackageJson(join(workspaceRoot, 'package.json'));
     const packageManager = detectPackageManager(workspaceRoot, workspacePkg);
     const baselineVersions = readBaselineVersions();
+    const yarnConfigChanged = packageManager.manager === 'yarn' && ensureYarnPnpCompatibility(workspaceRoot, baselineVersions.opentelemetryCore);
     const postinstallChanged = ensurePostinstallScript(pkg);
     const changedPackages = new Map<string, PackageJson>();
     let compilerSetupChanged = false;
@@ -80,7 +84,7 @@ export function install(options: InstallOptions = {}): number {
 
     if (postinstallChanged) changedPackages.set(resolve(packageJsonPath), pkg);
     for (const workspace of compilerWorkspaces) {
-        const packageChanged = ensureCompilerSetup(workspace.pkg, baselineVersions);
+        const packageChanged = ensureCompilerSetup(workspace.pkg, baselineVersions, packageManager.manager === 'yarn');
         if (packageChanged) {
             changedPackages.set(workspace.packageJsonPath, workspace.pkg);
             compilerSetupChanged = true;
@@ -91,9 +95,10 @@ export function install(options: InstallOptions = {}): number {
     for (const [changedPackageJsonPath, changedPkg] of changedPackages) writePackageJson(changedPackageJsonPath, changedPkg);
     if (postinstallChanged) console.log('tsf-install: updated postinstall script');
     if (compilerSetupChanged) console.log('tsf-install: updated TypeScript compiler setup');
+    if (yarnConfigChanged) console.log("tsf-install: updated Yarn Plug'n'Play compatibility");
     if (tsconfigChanged) console.log('tsf-install: updated tsconfig compiler plugin');
 
-    if (compilerSetupChanged && options.runPackageManager !== false && process.env[PACKAGE_MANAGER_RERUN_ENV] !== '1') {
+    if ((compilerSetupChanged || yarnConfigChanged) && options.runPackageManager !== false && process.env[PACKAGE_MANAGER_RERUN_ENV] !== '1') {
         const status = runPackageManagerInstall(packageManager.installDir, packageManager.manager);
         if (status !== 0) return status;
     }
@@ -101,14 +106,39 @@ export function install(options: InstallOptions = {}): number {
     return options.runPackageManager === false ? 0 : prepareCompilerWorkspaces(compilerWorkspaces);
 }
 
-function ensureCompilerSetup(pkg: PackageJson, versions: BaselineVersions): boolean {
+function ensureCompilerSetup(pkg: PackageJson, versions: BaselineVersions, yarn: boolean): boolean {
     let changed = false;
     changed = ensureDevDependency(pkg, 'ttsc', versions.ttsc) || changed;
     changed = ensureDevDependency(pkg, 'typescript', versions.typescript) || changed;
+    if (yarn) changed = ensureYarnCompilerPackagesUnplugged(pkg) || changed;
     changed =
         (pkg.tsf?.compiler === true && !hasFoundationPackageDependency(pkg)
             ? ensureDevDependency(pkg, PACKAGE_NAME, versions.framework)
             : setDependencyVersionIfPresent(pkg, PACKAGE_NAME, versions.framework)) || changed;
+    return changed;
+}
+
+function ensureYarnCompilerPackagesUnplugged(pkg: PackageJson): boolean {
+    let changed = false;
+    pkg.dependenciesMeta ??= {};
+    for (const name of [
+        'ttsc',
+        'protoc',
+        'ts-proto',
+        '@ttsc/darwin-arm64',
+        '@ttsc/darwin-x64',
+        '@ttsc/linux-arm',
+        '@ttsc/linux-arm64',
+        '@ttsc/linux-x64',
+        '@ttsc/win32-arm64',
+        '@ttsc/win32-x64'
+    ]) {
+        const metadata = (pkg.dependenciesMeta[name] ??= {});
+        if (metadata.unplugged !== true) {
+            metadata.unplugged = true;
+            changed = true;
+        }
+    }
     return changed;
 }
 
@@ -134,9 +164,24 @@ function readBaselineVersions(): BaselineVersions {
     if (!frameworkVersion) throw new Error(`Could not determine ${PACKAGE_NAME} version`);
     return {
         framework: frameworkVersion,
+        opentelemetryCore: readPackageDependencyVersion(packageRoot, '@opentelemetry/core'),
         ttsc: readPackageDependencyVersion(packageRoot, 'ttsc'),
         typescript: readPackageDependencyVersion(packageRoot, 'typescript')
     };
+}
+
+function ensureYarnPnpCompatibility(projectRoot: string, opentelemetryCoreVersion: string): boolean {
+    const configPath = join(projectRoot, '.yarnrc.yml');
+    const document = parseDocument(existsSync(configPath) ? readFileSync(configPath, 'utf8') : '');
+    if (document.errors.length > 0) throw document.errors[0];
+    const nodeLinker = document.get('nodeLinker');
+    if (nodeLinker !== undefined && nodeLinker !== 'pnp') return false;
+
+    const dependencyPath = ['packageExtensions', '@sentry/node@*', 'dependencies', '@opentelemetry/core'];
+    if (document.getIn(dependencyPath) === opentelemetryCoreVersion) return false;
+    document.setIn(dependencyPath, opentelemetryCoreVersion);
+    writeFileSync(configPath, String(document));
+    return true;
 }
 
 function ensurePostinstallScript(pkg: PackageJson): boolean {

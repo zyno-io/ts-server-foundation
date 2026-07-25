@@ -23,10 +23,11 @@ func testTypeInfo() (*fileInfo, *registry) {
 		reexports:  map[string]importRef{},
 	}
 	reg := &registry{
-		files:    map[string]*fileInfo{info.moduleKey: info},
-		byPath:   map[string]*fileInfo{},
-		classes:  map[string]*classInfo{},
-		external: map[string]map[string][]functionInfo{},
+		files:                map[string]*fileInfo{info.moduleKey: info},
+		byPath:               map[string]*fileInfo{},
+		classes:              map[string]*classInfo{},
+		external:             map[string]map[string][]functionInfo{},
+		externalPackageRoots: map[string]string{},
 	}
 	return info, reg
 }
@@ -389,6 +390,19 @@ func TestReceiveTypeArgumentAcceptsQualifiedImports(t *testing.T) {
 		if !ok || got != "T" {
 			t.Fatalf("receiveTypeArgument(%q) = %q, %v", input, got, ok)
 		}
+	}
+}
+
+func TestExternalPackageRootUsesMaterializedPnpPackage(t *testing.T) {
+	root := t.TempDir()
+	materialized := filepath.Join(root, "materialized-package")
+	if err := os.MkdirAll(materialized, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := &registry{externalPackageRoots: map[string]string{"@fixture/receive-types": materialized}}
+	got := externalPackageRoot(filepath.Join(root, "src", "service.ts"), "@fixture/receive-types/client", reg)
+	if got != materialized {
+		t.Fatalf("externalPackageRoot() = %q, want %q", got, materialized)
 	}
 }
 

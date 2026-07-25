@@ -20,6 +20,13 @@ corepack yarn tsf-install
 
 `tsf-install` adds the supported TypeScript/`ttsc` compiler dependencies and configures TSF's metadata transform. Scaffolded applications run it from `postinstall`.
 
+Newly scaffolded applications use Yarn Plug'n'Play with a project-local cache.
+This keeps ordinary dependencies in `.yarn/cache` for fast, cacheable CI and
+Docker installs. The scaffold unplugs the compiler and proto-generation
+packages that require real executable paths. TSF materializes only its Go
+compiler source and imported declaration files into `.yarn/tsf-pnp` when Yarn
+serves them from ZipFS; that directory is disposable and ignored by Git.
+
 ## Scaffold Anatomy
 
 The generated project is intentionally small:
