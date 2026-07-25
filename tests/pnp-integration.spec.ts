@@ -21,7 +21,9 @@ function run(command: string, args: string[], cwd: string, env: NodeJS.ProcessEn
     const result = spawnSync(command, args, {
         cwd,
         encoding: 'utf8',
-        env: { ...process.env, ...env },
+        // This fixture creates its lockfile during the test, so it must not inherit
+        // Yarn's CI default of immutable installs from the repository job.
+        env: { ...process.env, ...env, YARN_ENABLE_IMMUTABLE_INSTALLS: 'false' },
         timeout: 180_000
     });
     assert.equal(result.status, 0, `${command} ${args.join(' ')}\n${result.stdout}\n${result.stderr}`);

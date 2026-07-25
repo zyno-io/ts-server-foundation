@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
     chmodSync,
+    copyFileSync,
     cpSync,
     existsSync,
     mkdirSync,
@@ -15,6 +16,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, it, mock } from 'node:test';
 
@@ -30,7 +32,8 @@ import { waitForTestDatabaseReady } from '../src/testing/database-readiness';
 const childProcess = require('node:child_process') as typeof import('node:child_process');
 const { spawn, spawnSync } = childProcess;
 // Fixture-local node_modules directories are deleted after each test, so reuse the repository's content-addressed plugin cache.
-const sharedTtscCacheDir = resolve(process.env.TTSC_CACHE_DIR ?? join(process.cwd(), 'node_modules', '.cache', 'ttsc'));
+const sharedTtscCacheDir = resolve(process.env.TTSC_CACHE_DIR ?? join(process.cwd(), '.yarn', 'ttsc-cache'));
+const repositoryRequire = createRequire(join(process.cwd(), 'package.json'));
 const foundationPackageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
     version: string;
     devDependencies: Record<string, string>;
@@ -99,22 +102,70 @@ function linkLocalTemplateDependencies(projectDir: string): void {
         devDependencies?: Record<string, string>;
     };
     for (const dependency of Object.keys(foundationPkg.dependencies ?? {})) {
-        linkDependency(projectDir, dependency, join(packageRoot, 'node_modules', ...dependency.split('/')));
+        linkDependency(projectDir, dependency, resolveLocalPackageRoot(dependency));
     }
     for (const dependency of Object.keys(foundationPkg.devDependencies ?? {})) {
-        linkDependency(projectDir, dependency, join(packageRoot, 'node_modules', ...dependency.split('/')));
+        linkDependency(projectDir, dependency, resolveLocalPackageRoot(dependency));
     }
+}
+
+function resolveLocalPackageRoot(packageName: string): string {
+    try {
+        // PnP locators identify the package root even for packages that don't export package.json.
+        const pnpapi = repositoryRequire('pnpapi') as {
+            resolveToUnqualified(request: string, issuer: string): string | null;
+        };
+        const packageRoot = pnpapi.resolveToUnqualified(packageName, join(process.cwd(), 'package.json'));
+        if (packageRoot !== null) return packageRoot;
+    } catch {
+        // node_modules installs don't expose pnpapi; find the conventional package root instead.
+    }
+
+    const conventionalRoot = join(process.cwd(), 'node_modules', ...packageName.split('/'));
+    if (existsSync(conventionalRoot)) return conventionalRoot;
+
+    let resolved: string;
+    try {
+        resolved = repositoryRequire.resolve(`${packageName}/package.json`);
+    } catch {
+        resolved = repositoryRequire.resolve(packageName);
+    }
+    let directory = dirname(resolved);
+    while (directory !== dirname(directory)) {
+        if (existsSync(join(directory, 'package.json'))) return directory;
+        directory = dirname(directory);
+    }
+    throw new Error(`Unable to find package root for ${packageName}`);
 }
 
 function linkDependency(projectDir: string, packageName: string, source: string): void {
     assert.equal(existsSync(source), true, `missing local dependency: ${source}`);
     const target = join(projectDir, 'node_modules', ...packageName.split('/'));
     mkdirSync(join(target, '..'), { recursive: true });
+    if (packageName === 'tslib' || packageName.startsWith('@types/')) {
+        copyDirectory(source, target);
+        return;
+    }
     symlinkSync(source, target, 'junction');
+}
+
+function copyDirectory(source: string, target: string): void {
+    mkdirSync(target, { recursive: true });
+    for (const entry of readdirSync(source, { withFileTypes: true })) {
+        const sourcePath = join(source, entry.name);
+        const targetPath = join(target, entry.name);
+        if (entry.isDirectory()) copyDirectory(sourcePath, targetPath);
+        else if (entry.isFile()) copyFileSync(sourcePath, targetPath);
+    }
 }
 
 function installLocalFoundationPackage(projectDir: string, packageRoot: string): void {
     const target = join(projectDir, 'node_modules', '@zyno-io', 'ts-server-foundation');
+    if ((process.versions as NodeJS.ProcessVersions & { pnp?: string }).pnp !== undefined) {
+        mkdirSync(dirname(target), { recursive: true });
+        symlinkSync(packageRoot, target, 'junction');
+        return;
+    }
     mkdirSync(target, { recursive: true });
     cpSync(join(packageRoot, 'package.json'), join(target, 'package.json'));
     cpSync(join(packageRoot, 'dist'), join(target, 'dist'), { recursive: true });
@@ -822,7 +873,7 @@ describe('CLI', () => {
 
         const result = runCli('tsf-dev.js', ['test'], target);
 
-        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
         assert.match(`${result.stdout}\n${result.stderr}`, /pass 1/);
         assert.equal(existsSync(join(target, 'dist', 'src', 'app.js')), true);
         assert.equal(existsSync(join(target, 'dist', 'tests', 'app.spec.js')), true);
@@ -2017,9 +2068,9 @@ exports.app = createApp({
             join(dir, 'package.json'),
             '{"name":"fixture","type":"commonjs","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
         );
-        linkDependency(dir, 'ttsc', join(packageRoot, 'node_modules', 'ttsc'));
-        linkDependency(dir, 'typescript', join(packageRoot, 'node_modules', 'typescript'));
-        linkDependency(dir, '@types/node', join(packageRoot, 'node_modules', '@types', 'node'));
+        linkDependency(dir, 'ttsc', resolveLocalPackageRoot('ttsc'));
+        linkDependency(dir, 'typescript', resolveLocalPackageRoot('typescript'));
+        linkDependency(dir, '@types/node', resolveLocalPackageRoot('@types/node'));
         installLocalFoundationPackage(dir, packageRoot);
         writeFileSync(
             join(dir, 'tsconfig.json'),

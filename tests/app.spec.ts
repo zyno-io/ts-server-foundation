@@ -756,7 +756,9 @@ void app.run();
         const result = spawnSync(process.execPath, [fixture, 'migrate:run'], {
             cwd: dir,
             encoding: 'utf8',
-            env: { ...process.env, APP_ENV: 'test', NODE_OPTIONS: '' }
+            // Keep Yarn's PnP loader when this test suite itself runs under PnP.
+            // The fixture imports the compiled package, which imports tslib.
+            env: { ...process.env, APP_ENV: 'test' }
         });
 
         assert.equal(result.status, 1, result.stderr);

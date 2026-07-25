@@ -102,6 +102,11 @@ function materializeImportedPackageRoots(context, pnpapi, cacheRoot) {
             continue;
         }
         if (typeof packageRoot !== 'string' || !fs.existsSync(packageRoot)) continue;
+        try {
+            if (!fs.statSync(packageRoot).isDirectory()) continue;
+        } catch {
+            continue;
+        }
         const normalized = cleanPackageRoot(packageRoot);
         const source = materializeTypeScriptPackage(request.packageName, normalized, cacheRoot);
         const bridgePackage = request.parent === undefined

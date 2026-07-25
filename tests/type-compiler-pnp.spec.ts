@@ -7,6 +7,11 @@ import { afterEach, describe, it } from 'node:test';
 // oxlint-disable-next-line typescript/no-require-imports
 const pnp = require('../src/type-compiler/pnp.cjs') as {
     isArchivePath(value: string): boolean;
+    materializeImportedPackageRoots(
+        context: { projectRoot: string; tsconfig: string },
+        pnpapi: { resolveToUnqualified(request: string, issuer: string): string | null },
+        cacheRoot: string
+    ): Record<string, string>;
     materializeTypeScriptPackage(packageName: string, source: string, cacheRoot: string): string;
     packageNameFromSpecifier(specifier: string): string;
 };
@@ -48,5 +53,23 @@ describe('type compiler PnP handoff', () => {
         assert.equal(readFileSync(join(materialized, 'index.d.ts'), 'utf8').includes('receive'), true);
         assert.equal(existsSync(join(materialized, 'nested', 'model.ts')), true);
         assert.equal(existsSync(join(materialized, 'runtime.js')), false);
+    });
+
+    it('skips virtual PnP resolutions that point to files instead of package directories', () => {
+        const root = temporaryDirectory();
+        const project = join(root, 'project');
+        const virtualModule = join(root, '.pnp.cjs');
+        mkdirSync(join(project, 'src'), { recursive: true });
+        writeFileSync(join(project, 'tsconfig.json'), '{}\n');
+        writeFileSync(join(project, 'src', 'index.ts'), "import 'pnpapi';\n");
+        writeFileSync(virtualModule, 'module.exports = {};\n');
+
+        const roots = pnp.materializeImportedPackageRoots(
+            { projectRoot: project, tsconfig: join(project, 'tsconfig.json') },
+            { resolveToUnqualified: () => virtualModule },
+            join(project, '.yarn', 'tsf-pnp')
+        );
+
+        assert.deepStrictEqual(roots, {});
     });
 });
