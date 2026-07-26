@@ -208,12 +208,16 @@ describe('CLI', () => {
     it('exposes REPL help through umbrella and standalone binaries', () => {
         const umbrella = runCli('tsf.js', ['repl', '--help']);
         const standalone = runCli('tsf-repl.js', ['--help']);
+        const fresh = runCli('tsf-dev.js', ['repl', '--help']);
 
         assert.equal(umbrella.status, 0, umbrella.stderr);
         assert.equal(standalone.status, 0, standalone.stderr);
+        assert.equal(fresh.status, 0, fresh.stderr);
         assert.match(umbrella.stdout, /tsf repl \[options\]/);
         assert.match(standalone.stdout, /--existing/);
         assert.match(standalone.stdout, /--new/);
+        assert.match(fresh.stdout, /tsf-dev repl \[options\]/);
+        assert.match(fresh.stdout, /--eval/);
     });
 
     it('discovers registered REPL targets and requires PID selection when ambiguous', async () => {

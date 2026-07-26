@@ -63,7 +63,7 @@ All commands resolve the project root from the working directory. `-p <file>` an
 | `clean`                                   | Removes `dist/`.                                                                                        |
 | `build [--watch]`                         | Cleans when needed and compiles with the installed `ttsc`.                                              |
 | `run [--debug] [script] -- <app-command>` | Ensures a watch build, then starts Node with source maps, file watching, and the requested app command. |
-| `repl [--debug] [script]`                 | Builds and starts a fresh application REPL process.                                                     |
+| `repl [--debug] [--eval code] [script]`   | Builds and starts a fresh application REPL process.                                                     |
 | `test [--debug]`                          | Builds the test config and delegates to `tsf-test`.                                                     |
 | `migrate [--debug]`                       | Builds, then invokes the package entrypoint with `migrate:run`.                                         |
 | `migrate:create [--debug]`                | Builds, then delegates to `tsf-migrate create`.                                                         |
@@ -116,13 +116,14 @@ When exactly one registered application is running, it is selected automatically
 
 `--existing` makes the default intent explicit. It never falls back to starting another application. `--new` instead performs a freshness-aware build and starts the application entrypoint with its built-in `repl` command. It may be combined with `--script`, `-p`/`--tsconfig`, `--debug`, or `--eval`. Existing-target options and `--new` are mutually exclusive.
 
-Both modes expose `app`, `container`, `config`, an optional `db`, `resolve`, `r`, `$`, `process`, `Buffer`, and `inspect`. Existing-process mode evaluates through the same DevConsole SRPC methods as the browser REPL and supports terminal history, multiline input, completion, same-endpoint reconnection, `.exit`, Ctrl+C, and Ctrl+D. `--eval` evaluates once without opening an interactive terminal and returns a failing status for evaluation errors.
+Both modes expose `app`, `container`, `config`, an optional `db`, `resolve`, `r`, `$`, `$$`, `process`, `Buffer`, and `inspect`. `resolve(token)` and `r(token)` resolve an explicit DI token. `$` is a name-indexed namespace of registered singleton and transient provider tokens, so `$.UserService` returns the token/class. `$$` lazily resolves the matching provider instance with its owning module's DI context, so `$$.UserService` preserves module-local dependencies; transient providers produce a new value on each access. Request- and HTTP-scoped providers, including controllers, are excluded because a REPL has no request context. `$$` also exposes registered database entity classes such as `$$.User`. Existing-process mode evaluates through the same DevConsole SRPC methods as the browser REPL and supports terminal history, multiline input, completion, same-endpoint reconnection, `.exit`, Ctrl+C, and Ctrl+D. `--eval` evaluates once without opening an interactive terminal and returns a failing status for evaluation errors.
 
 The direct compiled-entrypoint equivalent of new-process mode is:
 
 ```bash
 node . repl
 node . repl --eval 'config.APP_ENV'
+node . repl --help
 ```
 
 ### Tests

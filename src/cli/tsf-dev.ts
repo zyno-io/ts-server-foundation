@@ -182,6 +182,10 @@ async function cmdRun(args: string[]): Promise<number> {
 }
 
 function cmdRepl(args: string[]): number {
+    if (args.includes('--help') || args.includes('-h')) {
+        printReplUsage();
+        return 0;
+    }
     const debug = takeFlag(args, '--debug');
     const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
     let script = '.';
@@ -229,6 +233,12 @@ function cmdRepl(args: string[]): number {
         APP_ENV: Env.APP_ENV ?? 'development',
         TSF_TSCONFIG: tsconfig
     }).status;
+}
+
+function printReplUsage(): void {
+    console.log(
+        `Usage: tsf-dev repl [options] [script]\n\nBuild and start a fresh application REPL without starting HTTP listeners or workers.\n\nOptions:\n  --debug                   Start the application with the Node inspector paused\n  --eval <code>, -e <code>  Evaluate JavaScript once and exit\n  --script <path>           Application entrypoint (default: .)\n  -p, --tsconfig <file>     TypeScript config file (default: tsconfig.json)\n  --help, -h                Show this help\n`
+    );
 }
 
 function cmdTest(args: string[]): number {

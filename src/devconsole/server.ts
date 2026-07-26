@@ -15,7 +15,7 @@ import {
     type DevConsoleServerMessage as DCServerMsg
 } from './generated/devconsole';
 import { isLocalhostIncomingMessage } from './security';
-import { createReplContext, evaluateReplCode, tryGet } from './repl';
+import { createReplContext, disposeReplContext, evaluateReplCode, tryGet } from './repl';
 import type { DevConsoleStore } from './store';
 
 const SECRET_MASK_PATTERNS = ['SECRET', 'PASSWORD', 'DSN', 'TOKEN', 'KEY'];
@@ -45,6 +45,7 @@ export class DevConsoleSrpcServer {
 
     close(): void {
         this.server.close();
+        disposeReplContext(this.replContext);
     }
 
     private registerHandlers(): void {
@@ -267,7 +268,7 @@ export class DevConsoleSrpcServer {
 
     private handleReplComplete(code: string, cursorPos: number): { items: UReplCompleteItem[]; replaceStart: number; replaceEnd: number } {
         const beforeCursor = code.slice(0, cursorPos);
-        const match = beforeCursor.match(/((?:\$|r|resolve|app|config|db|container|[a-zA-Z_]\w*)(?:\.[a-zA-Z_]\w*)*(?:\.\w*)?)$/);
+        const match = beforeCursor.match(/((?:\$\$?|r|resolve|app|config|db|container|[a-zA-Z_]\w*)(?:\.[a-zA-Z_]\w*)*(?:\.\w*)?)$/);
         if (!match) return { items: [], replaceStart: cursorPos, replaceEnd: cursorPos };
 
         const fullExpression = match[1];

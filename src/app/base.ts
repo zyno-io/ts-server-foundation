@@ -98,6 +98,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private openApiDumpTimer?: NodeJS.Timeout;
     private readonly registeredCleanups: RegisteredAppCleanup[] = [];
     private cliServiceMode = false;
+    private replMode = false;
 
     constructor(readonly options: CreateAppOptions<C>) {
         const configClass = options.config ?? (BaseAppConfig as ClassType<C>);
@@ -242,7 +243,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                 workerStartAttempted = true;
                 await this.container.get(WorkerRunnerService).start();
             }
-            if (!this.cliServiceMode && shouldDumpOpenApiSchema(this.config)) this.scheduleOpenApiSchemaDump();
+            if (!this.cliServiceMode && !this.replMode && shouldDumpOpenApiSchema(this.config)) this.scheduleOpenApiSchemaDump();
             this.started = true;
         } catch (error) {
             const cleanupErrors: unknown[] = [];
@@ -316,6 +317,12 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         if (this.started || this.starting) throw new Error('Cannot configure CLI service mode after application startup');
         this.cliServiceMode = true;
         this.router.restrictControllers([HealthcheckController, MetricsController]);
+    }
+
+    configureForRepl(): void {
+        if (this.started || this.starting) throw new Error('Cannot configure REPL mode after application startup');
+        this.replMode = true;
+        this.router.restrictControllers([]);
     }
 
     private async runEntrypointCommand(args: string[]): Promise<boolean> {
@@ -429,6 +436,7 @@ Examples:
 
     private shouldStartWorkerRunner(): boolean {
         if (!this.options.enableWorker) return false;
+        if (this.replMode) return false;
         if (this.cliServiceMode) return false;
         if (this.forceWorkerRunner) return true;
         if (this.config.ENABLE_JOB_RUNNER !== undefined) return this.config.ENABLE_JOB_RUNNER === true;

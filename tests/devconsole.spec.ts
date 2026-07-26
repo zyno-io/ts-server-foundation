@@ -6,7 +6,21 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, it } from 'node:test';
 
-import { BaseAppConfig, BaseJob, createApp, http, HttpRequest, SrpcClient, WorkerJob, WorkerService } from '../src';
+import {
+    BaseAppConfig,
+    BaseEntity,
+    BaseJob,
+    createApp,
+    createDatabaseClass,
+    createModule,
+    http,
+    HttpRequest,
+    SrpcClient,
+    WorkerJob,
+    WorkerService,
+    type DatabaseDriver,
+    type DriverConnection
+} from '../src';
 import {
     DevConsoleClientMessage,
     DevConsoleServerMessage,
@@ -24,6 +38,7 @@ import {
     unregisterDevRun
 } from '../src/cli/dev-state';
 import { runReplCli } from '../src/cli/tsf-repl';
+import { createReplContext, disposeReplContext } from '../src/devconsole/repl';
 
 const originalEnv = { ...process.env };
 
@@ -52,6 +67,16 @@ class DevConsoleCaptureController {
 class DevConsoleHistoryJob extends BaseJob<{ index: number }, number> {
     handle(data: { index: number }): number {
         return data.index;
+    }
+}
+
+class DevConsoleReplDriver implements DatabaseDriver {
+    readonly dialect = 'postgres' as const;
+
+    async connect(): Promise<void> {}
+    async close(): Promise<void> {}
+    async acquire(): Promise<DriverConnection> {
+        throw new Error('The REPL namespace test does not acquire a database connection');
     }
 }
 
@@ -221,7 +246,7 @@ describe('devconsole', () => {
             assert.equal(env.PUBLIC_LABEL, 'visible');
 
             const repl = await client.invoke('uReplEval', {
-                code: '[resolve(config.constructor) === config, r(config.constructor) === config, $(config.constructor) === config]'
+                code: '[resolve(config.constructor) === config, r(config.constructor) === config, $.DevConsoleTestConfig === config.constructor, $$.DevConsoleTestConfig === config]'
             });
             assert.equal(repl.error, undefined);
             assert.match(repl.output, /true.*true.*true/);
@@ -240,6 +265,185 @@ describe('devconsole', () => {
             assert.match(captured.requestBody, /\.\.\. truncated 17 byte\(s\)$/);
         } finally {
             client.disconnect();
+            await app.stop();
+        }
+    });
+
+    it('exposes lazy provider and entity namespaces to DevConsole evaluations and completion', async () => {
+        process.env.APP_ENV = 'development';
+        let serviceInstances = 0;
+
+        class DevConsoleReplService {
+            constructor() {
+                serviceInstances++;
+            }
+        }
+
+        class DevConsoleReplEntity extends BaseEntity {}
+
+        const ReplDatabase = createDatabaseClass(() => new DevConsoleReplDriver(), [DevConsoleReplEntity]);
+        const imported = createModule({
+            providers: [
+                { provide: 'devconsole-repl-module-dependency', useValue: 'module-local dependency' },
+                {
+                    provide: 'devconsole-repl-module-service',
+                    useFactory: dependency => ({ dependency }),
+                    deps: ['devconsole-repl-module-dependency']
+                }
+            ]
+        });
+        const app = createApp({
+            config: DevConsoleTestConfig,
+            db: ReplDatabase,
+            imports: [imported],
+            providers: [DevConsoleReplService]
+        });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        const client = new SrpcClient<DCClientMsg, DCServerMsg>(
+            { info() {}, warn() {}, error() {}, debug() {} },
+            `ws://127.0.0.1:${address.port}/_devconsole/ws`,
+            DevConsoleClientMessage,
+            DevConsoleServerMessage,
+            'devconsole-repl-namespace-test',
+            undefined,
+            'unused-local-devconsole-secret',
+            { enableReconnect: false }
+        );
+
+        try {
+            await client.connect();
+            assert.equal(serviceInstances, 0);
+
+            const completion = await client.invoke('uReplComplete', {
+                code: '$$.DevConsoleRepl',
+                cursorPos: '$$.DevConsoleRepl'.length
+            });
+            assert.equal(
+                completion.items.some(item => item.label === 'DevConsoleReplService'),
+                true
+            );
+            assert.equal(
+                completion.items.some(item => item.label === 'DevConsoleReplEntity'),
+                true
+            );
+            assert.equal(serviceInstances, 0);
+
+            const repl = await client.invoke('uReplEval', {
+                code: `[
+                    $.DevConsoleReplService === $$.DevConsoleReplService.constructor,
+                    $['devconsole-repl-module-service'],
+                    $$['devconsole-repl-module-service'].dependency,
+                    $$.DevConsoleReplEntity === db.entityRegistry[0],
+                    globalThis.$ === $ && globalThis.$$ === $$
+                ]`
+            });
+            assert.equal(repl.error, undefined);
+            assert.match(repl.output, /true/);
+            assert.match(repl.output, /'devconsole-repl-module-service'/);
+            assert.match(repl.output, /'module-local dependency'/);
+            assert.equal(serviceInstances, 1);
+        } finally {
+            client.disconnect();
+            await app.stop();
+        }
+    });
+
+    it('excludes request-scoped providers and controllers but keeps transient REPL providers', async () => {
+        process.env.APP_ENV = 'test';
+        let transientInstances = 0;
+
+        class ReplRequestScopedService {}
+        class ReplTransientService {
+            constructor() {
+                transientInstances++;
+            }
+        }
+
+        @http.controller('/repl-hidden-controller')
+        class ReplHiddenController {
+            @http.GET()
+            get() {
+                return { ok: true };
+            }
+        }
+
+        const app = createApp({
+            controllers: [ReplHiddenController],
+            providers: [
+                { provide: ReplRequestScopedService, useClass: ReplRequestScopedService, scope: 'request' },
+                { provide: ReplTransientService, useClass: ReplTransientService, scope: 'transient' }
+            ]
+        });
+        app.configureForRepl();
+        const context = createReplContext(app);
+        const tokens = context.$ as Record<string, unknown>;
+        const instances = context.$$ as Record<string, unknown>;
+
+        try {
+            assert.deepStrictEqual(app.router.listRoutes(), []);
+            assert.equal(Object.hasOwn(tokens, 'ReplHiddenController'), false);
+            assert.equal(Object.hasOwn(instances, 'ReplHiddenController'), false);
+            assert.equal(Object.hasOwn(tokens, 'ReplRequestScopedService'), false);
+            assert.equal(Object.hasOwn(instances, 'ReplRequestScopedService'), false);
+            assert.equal(tokens.ReplTransientService, ReplTransientService);
+            assert.notEqual(instances.ReplTransientService, instances.ReplTransientService);
+            assert.equal(transientInstances, 2);
+        } finally {
+            disposeReplContext(context);
+            await app.stop();
+        }
+    });
+
+    it('restores global REPL namespaces only for their active owner', async () => {
+        process.env.APP_ENV = 'test';
+        const globals = globalThis as typeof globalThis & Record<string, unknown>;
+        const originalDollar = Object.getOwnPropertyDescriptor(globals, '$');
+        const originalDoubleDollar = Object.getOwnPropertyDescriptor(globals, '$$');
+        const externalDollar = { external: '$' };
+        const externalDoubleDollar = { external: '$$' };
+        Object.defineProperty(globals, '$', { configurable: true, writable: true, value: externalDollar });
+        Object.defineProperty(globals, '$$', { configurable: true, writable: true, value: externalDoubleDollar });
+
+        const app = createApp({});
+        const contexts: Record<string, unknown>[] = [];
+        try {
+            const first = createReplContext(app);
+            const second = createReplContext(app);
+            contexts.push(first, second);
+            assert.equal(globals.$, second.$);
+            assert.equal(globals.$$, second.$$);
+
+            disposeReplContext(first);
+            assert.equal(globals.$, second.$);
+            assert.equal(globals.$$, second.$$);
+            disposeReplContext(second);
+            assert.equal(globals.$, externalDollar);
+            assert.equal(globals.$$, externalDoubleDollar);
+
+            const third = createReplContext(app);
+            const fourth = createReplContext(app);
+            contexts.push(third, fourth);
+            disposeReplContext(fourth);
+            assert.equal(globals.$, third.$);
+            assert.equal(globals.$$, third.$$);
+            disposeReplContext(third);
+            assert.equal(globals.$, externalDollar);
+            assert.equal(globals.$$, externalDoubleDollar);
+
+            const changed = createReplContext(app);
+            contexts.push(changed);
+            globals.$ = externalDollar;
+            globals.$$ = externalDoubleDollar;
+            disposeReplContext(changed);
+            assert.equal(globals.$, externalDollar);
+            assert.equal(globals.$$, externalDoubleDollar);
+        } finally {
+            for (const context of contexts) disposeReplContext(context);
+            if (originalDollar) Object.defineProperty(globals, '$', originalDollar);
+            else delete globals.$;
+            if (originalDoubleDollar) Object.defineProperty(globals, '$$', originalDoubleDollar);
+            else delete globals.$$;
             await app.stop();
         }
     });

@@ -12,6 +12,7 @@ import {
     BaseAppConfig,
     BaseDatabase,
     BaseEntity,
+    BaseJob,
     cli,
     CliServiceCommand,
     ConfigLoader,
@@ -35,6 +36,7 @@ import {
     registerAppCleanup,
     resetLogSink,
     setLogSink,
+    WorkerJob,
     WorkerRunnerService
 } from '../src';
 
@@ -860,6 +862,70 @@ void app.run();
         assert.equal(existsSync(join(dir, 'openapi.yaml')), false);
     });
 
+    it('keeps the entrypoint REPL passive', async () => {
+        const dir = makeTempCwd();
+        process.argv.splice(
+            0,
+            process.argv.length,
+            'node',
+            'dist/src/index.js',
+            'repl',
+            '--eval',
+            'new Promise(resolve => setTimeout(resolve, 350))'
+        );
+
+        class ReplConfig extends BaseAppConfig {
+            APP_ENV = 'development';
+            ENABLE_OPENAPI_SCHEMA = true;
+        }
+
+        @WorkerJob({ cronSchedule: '* * * * *' })
+        class ReplJob extends BaseJob {
+            async handle(): Promise<void> {}
+        }
+
+        let autoConstructed = 0;
+        @AutoConstruct()
+        class ReplStartupService {
+            constructor() {
+                autoConstructed++;
+            }
+        }
+
+        @http.controller('/repl')
+        class ReplController {
+            @http.GET()
+            get() {
+                return { ok: true };
+            }
+        }
+
+        const app = createApp({
+            config: ReplConfig,
+            enableHealthcheck: false,
+            enableWorker: true,
+            controllers: [ReplController],
+            providers: [ReplJob, ReplStartupService]
+        });
+        let workerStarts = 0;
+        let listenCalls = 0;
+        app.get(WorkerRunnerService).start = async () => {
+            workerStarts++;
+        };
+        app.http.listen = async () => {
+            listenCalls++;
+            throw new Error('The REPL must not bind an HTTP server');
+        };
+
+        await app.run();
+
+        assert.equal(autoConstructed, 1);
+        assert.deepStrictEqual(app.router.listRoutes(), []);
+        assert.equal(listenCalls, 0);
+        assert.equal(workerStarts, 0);
+        assert.equal(existsSync(join(dir, 'openapi.yaml')), false);
+    });
+
     it('runs imported module commands with module-local providers', async () => {
         process.env.APP_ENV = 'test';
         process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'cdr:recording-prep-worker', '--once');
@@ -962,6 +1028,55 @@ void app.run();
 
         assert.equal(process.env.TSF_REPL_ENTRYPOINT_PROBE, 'test');
         assert.equal(process.exitCode, originalExitCode);
+        await app.stop();
+    });
+
+    it('exposes lazy provider namespaces to fresh REPL evaluations', async () => {
+        process.env.APP_ENV = 'test';
+        delete process.env.TSF_REPL_NAMESPACE_PROBE;
+        let instances = 0;
+
+        class FreshReplNamespaceService {
+            constructor() {
+                instances++;
+            }
+        }
+
+        process.argv.splice(
+            0,
+            process.argv.length,
+            'node',
+            'dist/src/index.js',
+            'repl',
+            '--eval',
+            "process.env.TSF_REPL_NAMESPACE_PROBE = [$.FreshReplNamespaceService === $$.FreshReplNamespaceService.constructor, globalThis.$ === $, globalThis.$$ === $$].join(',')"
+        );
+        const app = createApp({ providers: [FreshReplNamespaceService] });
+
+        await app.run(0, '127.0.0.1');
+
+        assert.equal(process.env.TSF_REPL_NAMESPACE_PROBE, 'true,true,true');
+        assert.equal(instances, 1);
+        await app.stop();
+    });
+
+    it('prints REPL help without starting the application', async () => {
+        process.env.APP_ENV = 'test';
+        let constructed = 0;
+
+        @AutoConstruct()
+        class ReplHelpStartupService {
+            constructor() {
+                constructed++;
+            }
+        }
+
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'repl', '--help');
+        const app = createApp({ providers: [ReplHelpStartupService] });
+
+        await app.run(0, '127.0.0.1');
+
+        assert.equal(constructed, 0);
         await app.stop();
     });
 

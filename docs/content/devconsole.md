@@ -105,7 +105,7 @@ Redis mutex monitor showing active mutexes (key, status, timing) and a history o
 
 ### REPL
 
-Interactive JavaScript REPL running in the server's context. Resolve DI tokens with `resolve(token)`, `r(token)`, or `$(token)`. Supports Tab-completion, command history (arrow keys), and multiline input (Shift+Enter). Console output (`log`, `warn`, `error`) is captured and displayed.
+Interactive JavaScript REPL running in the server's context. Resolve an explicit DI token with `resolve(token)` or `r(token)`. `$` is a name-indexed namespace of singleton and transient provider tokens (`$.UserService`), while `$$` lazily resolves matching provider instances from their owning module (`$$.UserService`) and exposes registered entity classes (`$$.User`). Transient providers create a new value per access; request- and HTTP-scoped providers, including controllers, are excluded because the REPL has no request context. Supports Tab-completion, command history (arrow keys), and multiline input (Shift+Enter). Console output (`log`, `warn`, `error`) is captured and displayed.
 
 The context also exposes `app`, `container`, `config`, an optional `db`, `process`, `Buffer`, and `inspect`. REPL code executes inside the server process with application privileges; the localhost restriction is the security boundary, so do not expose or proxy DevConsole to untrusted networks.
 
