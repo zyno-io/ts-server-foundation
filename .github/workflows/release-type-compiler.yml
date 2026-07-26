@@ -75,7 +75,7 @@ jobs:
       - name: Package prebuilt binary
         shell: bash
         run: |
-          node scripts/build-type-compiler-prebuilt.cjs \
+          yarn node scripts/build-type-compiler-prebuilt.cjs \
             --cache-dir "$TTSC_CACHE_DIR" \
             --output prebuilt \
             --version "${{ needs.version.outputs.value }}"
