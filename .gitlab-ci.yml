@@ -76,6 +76,7 @@ test-and-build:
       yarn build
 
       BUILD_VERSION=$(TZ=UTC0 git show -s --format=%cd --date=format-local:'%y.%-m%d.%-H%M' HEAD)
+      BUILD_VERSION=$(printf '%s\n' "$BUILD_VERSION" | sed 's/\.[0]*\([0-9][0-9]*\)$/.\1/')
 
       if [ "$CI_COMMIT_BRANCH" != "main" ]; then
         SHORT_SHA=$(echo "$CI_COMMIT_SHA" | head -c 7)
