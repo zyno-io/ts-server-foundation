@@ -1192,6 +1192,9 @@ describe('CLI', () => {
         runner.stderr.on('data', data => (output += data.toString()));
         const closed = new Promise<number | null>(resolve => runner.on('close', code => resolve(code)));
         const { stateFile } = getDevStatePaths(dir);
+        let interactive: import('node:child_process').ChildProcessWithoutNullStreams | undefined;
+        let interactiveClose: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+        let interactiveClosed: Promise<number | null> | undefined;
 
         try {
             let run: NonNullable<ReturnType<typeof readDevState>>['runs'][string] | undefined;
@@ -1216,40 +1219,106 @@ describe('CLI', () => {
             assert.equal(byUrl.status, 0, byUrl.stderr);
             assert.equal(byUrl.stdout.trim(), "'development'");
 
-            const interactive = spawn(process.execPath, [join(process.cwd(), 'dist', 'src', 'cli', 'tsf-repl.js')], {
+            const interactiveChild = spawn(process.execPath, [join(process.cwd(), 'dist', 'src', 'cli', 'tsf-repl.js')], {
                 cwd: dir,
                 env,
                 stdio: ['pipe', 'pipe', 'pipe']
             });
+            interactive = interactiveChild;
             let interactiveOutput = '';
-            interactive.stdout.on('data', data => (interactiveOutput += data.toString()));
-            interactive.stderr.on('data', data => (interactiveOutput += data.toString()));
-            const interactiveClosed = new Promise<number | null>(resolve => interactive.on('close', code => resolve(code)));
-            const waitForInteractiveOutput = async (needle: string, offset: number) => {
-                for (let attempt = 0; attempt < 200; attempt++) {
+            let interactiveError: Error | undefined;
+            let interactiveStdinError: Error | undefined;
+            let interactiveExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+            interactiveChild.stdout.on('data', data => (interactiveOutput += data.toString()));
+            interactiveChild.stderr.on('data', data => (interactiveOutput += data.toString()));
+            interactiveChild.on('error', error => (interactiveError = error));
+            interactiveChild.stdin.on('error', error => (interactiveStdinError = error));
+            interactiveChild.on('exit', (code, signal) => (interactiveExit = { code, signal }));
+            const closedInteractive = new Promise<number | null>(resolve =>
+                interactiveChild.on('close', (code, signal) => {
+                    interactiveClose = { code, signal };
+                    resolve(code);
+                })
+            );
+            interactiveClosed = closedInteractive;
+            const interactiveDiagnostics = () =>
+                [
+                    `spawn error: ${interactiveError?.stack ?? 'none'}`,
+                    `stdin error: ${interactiveStdinError?.stack ?? 'none'}`,
+                    `exit: ${interactiveExit ? `code ${interactiveExit.code}, signal ${interactiveExit.signal}` : 'none'}`,
+                    `close: ${interactiveClose ? `code ${interactiveClose.code}, signal ${interactiveClose.signal}` : 'none'}`,
+                    `output:\n${interactiveOutput}`
+                ].join('\n');
+            const interactiveFailed = () =>
+                interactiveError !== undefined ||
+                interactiveStdinError !== undefined ||
+                interactiveExit !== undefined ||
+                interactiveClose !== undefined;
+            const waitForInteractiveOutput = async (needle: string, offset: number, timeoutMs = 20_000) => {
+                const deadline = Date.now() + timeoutMs;
+                while (Date.now() < deadline) {
                     if (interactiveOutput.slice(offset).includes(needle)) return;
-                    await sleep(25);
+                    if (interactiveFailed())
+                        throw new Error(`interactive REPL failed before output ${JSON.stringify(needle)}\n${interactiveDiagnostics()}`);
+                    await sleep(Math.min(50, deadline - Date.now()));
                 }
-                throw new Error(`timed out waiting for ${JSON.stringify(needle)}\\n${interactiveOutput}`);
+                if (interactiveFailed())
+                    throw new Error(`interactive REPL failed before output ${JSON.stringify(needle)}\n${interactiveDiagnostics()}`);
+                throw new Error(`timed out after ${timeoutMs}ms waiting for ${JSON.stringify(needle)}\n${interactiveDiagnostics()}`);
+            };
+            const writeInteractive = async (input: string, end = false) => {
+                if (interactiveFailed() || interactiveChild.stdin.destroyed || !interactiveChild.stdin.writable) {
+                    throw new Error(`interactive REPL is unavailable for input ${JSON.stringify(input)}\n${interactiveDiagnostics()}`);
+                }
+                try {
+                    await new Promise<void>((resolve, reject) => {
+                        const written = (error?: Error | null) => {
+                            if (error) interactiveStdinError = error;
+                            if (interactiveStdinError) {
+                                reject(new Error(`could not write interactive REPL input ${JSON.stringify(input)}\n${interactiveDiagnostics()}`));
+                            } else resolve();
+                        };
+                        if (end) interactiveChild.stdin.end(input, written);
+                        else interactiveChild.stdin.write(input, written);
+                    });
+                } catch (error) {
+                    if (interactiveStdinError) {
+                        throw new Error(`could not write interactive REPL input ${JSON.stringify(input)}\n${interactiveDiagnostics()}`);
+                    }
+                    interactiveStdinError = error instanceof Error ? error : new Error(String(error));
+                    throw new Error(`could not write interactive REPL input ${JSON.stringify(input)}\n${interactiveDiagnostics()}`);
+                }
+            };
+            const waitForInteractiveClose = async (timeoutMs = 5_000) => {
+                const closed = await Promise.race([
+                    closedInteractive.then(() => true),
+                    new Promise<boolean>(resolve => {
+                        const timer = setTimeout(() => resolve(false), timeoutMs);
+                        timer.unref();
+                    })
+                ]);
+                if (!closed) throw new Error(`timed out after ${timeoutMs}ms waiting for the interactive REPL to exit\n${interactiveDiagnostics()}`);
             };
 
+            await waitForInteractiveOutput('Connected to repl-process-fixture (development)', 0);
             let interactiveOutputOffset = interactiveOutput.length;
-            interactive.stdin.write("'interactive repl probe'\n");
+            await writeInteractive("'interactive repl probe'\n");
             await waitForInteractiveOutput("'interactive repl probe'", interactiveOutputOffset);
 
             interactiveOutputOffset = interactiveOutput.length;
-            interactive.stdin.write('({\n');
+            await writeInteractive('({\n');
             await waitForInteractiveOutput('| ', interactiveOutputOffset);
 
             interactiveOutputOffset = interactiveOutput.length;
-            interactive.stdin.write("    probe: 'multiline repl probe'\n");
+            await writeInteractive("    probe: 'multiline repl probe'\n");
             await waitForInteractiveOutput('| ', interactiveOutputOffset);
 
             interactiveOutputOffset = interactiveOutput.length;
-            interactive.stdin.write('})\n');
+            await writeInteractive('})\n');
             await waitForInteractiveOutput("probe: 'multiline repl probe'", interactiveOutputOffset);
-            interactive.stdin.end('.exit\n');
-            assert.equal(await interactiveClosed, 0, interactiveOutput);
+            await writeInteractive('.exit\n', true);
+            await waitForInteractiveClose();
+            assert.equal(await closedInteractive, 0, interactiveOutput);
             assert.match(interactiveOutput, /Connected to repl-process-fixture \(development\), pid \d+/);
             assert.match(interactiveOutput, /'interactive repl probe'/);
             assert.match(interactiveOutput, /probe: 'multiline repl probe'/);
@@ -1282,6 +1351,31 @@ describe('CLI', () => {
             assert.equal(freshError.status, 1);
             assert.match(freshError.stderr, /fresh repl error/);
         } finally {
+            if (interactive && interactiveClosed && !interactiveClose) {
+                if (interactive.exitCode === null && interactive.signalCode === null) interactive.kill('SIGTERM');
+                const interactiveExited = await Promise.race([
+                    interactiveClosed.then(() => true),
+                    new Promise<boolean>(resolve => {
+                        const timer = setTimeout(() => resolve(false), 5_000);
+                        timer.unref();
+                    })
+                ]);
+                if (!interactiveExited) {
+                    interactive.kill('SIGKILL');
+                    const killed = await Promise.race([
+                        interactiveClosed.then(() => true),
+                        new Promise<boolean>(resolve => {
+                            const timer = setTimeout(() => resolve(false), 5_000);
+                            timer.unref();
+                        })
+                    ]);
+                    if (!killed) {
+                        interactive.stdin.destroy();
+                        interactive.stdout.destroy();
+                        interactive.stderr.destroy();
+                    }
+                }
+            }
             runner.kill('SIGTERM');
             const exited = await Promise.race([
                 closed.then(() => true),
