@@ -39,7 +39,9 @@ func resolvedReceiveTypeCall(info *fileInfo, reg *registry, node *shimast.Node) 
 	}
 	name := "ReceiveType"
 	if declaration.Name() != nil {
-		name = declaration.Name().Text()
+		// A resolved signature can be declared by a computed method, whose name
+		// node cannot be converted to text by the TypeScript Go AST API.
+		name = nodeText(declarationFile, declaration.Name().AsNode())
 	}
 	fn := functionInfo{
 		name:       name,

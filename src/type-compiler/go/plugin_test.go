@@ -380,6 +380,58 @@ func TestReceiveTypeMethodCandidatesIncludeStaticMethods(t *testing.T) {
 	}
 }
 
+func TestCollectRegistryHandlesReceiveTypeCallsToComputedMethods(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tsconfig.json"), []byte(`{
+		"compilerOptions": {"strict": true, "target": "ESNext"},
+		"include": ["*.ts"],
+		"reflection": true
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source.ts"), []byte(`
+		type ReceiveType<T> = { readonly type?: T };
+		const method = 'receive';
+
+		class Receiver {
+			[method]<T>(value: T, type?: ReceiveType<T>): T {
+				return value;
+			}
+		}
+
+		new Receiver()[method]<{ id: string }>({ id: 'one' });
+	`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	program, diagnostics, err := driver.LoadProgram(root, "tsconfig.json", driver.LoadProgramOptions{SingleThreaded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics) != 0 {
+		t.Fatalf("unexpected diagnostics: %v", diagnostics)
+	}
+	defer func() { _ = program.Close() }()
+
+	reg := collectRegistry(program, root, true, true)
+	var info *fileInfo
+	for _, candidate := range reg.files {
+		if candidate != nil && candidate.file != nil && filepath.Base(candidate.file.FileName()) == "source.ts" {
+			info = candidate
+			break
+		}
+	}
+	if info == nil {
+		t.Fatal("source.ts was not collected")
+	}
+	if len(info.calls) != 1 {
+		t.Fatalf("receive-type calls = %#v", info.calls)
+	}
+	if info.calls[0].metadataArgIndex != 1 || info.calls[0].typeText != "{ id: string }" {
+		t.Fatalf("receive-type call = %#v", info.calls[0])
+	}
+}
+
 func TestReceiveTypeArgumentAcceptsQualifiedImports(t *testing.T) {
 	for _, input := range []string{
 		"ReceiveType<T>",
