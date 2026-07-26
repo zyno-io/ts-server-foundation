@@ -34,7 +34,8 @@ import {
     type QueryResult,
     registerAppCleanup,
     resetLogSink,
-    setLogSink
+    setLogSink,
+    WorkerRunnerService
 } from '../src';
 
 const originalEnv = { ...process.env };
@@ -766,7 +767,9 @@ void app.run();
     });
 
     it('limits CLI services to operational controllers and CLI auto-construct providers', async () => {
-        process.env.APP_ENV = 'test';
+        process.env.APP_ENV = 'development';
+        process.env.DEVCONSOLE_ENABLED = 'false';
+        process.env.ENABLE_JOB_RUNNER = 'true';
         process.env.OTEL_METRICS_ENDPOINT_ENABLED = 'true';
         process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'service:test');
         const constructed: string[] = [];
@@ -775,6 +778,7 @@ void app.run();
         let metricsStatus: number | undefined;
         let applicationStatus: number | undefined;
         let routePaths: string[] = [];
+        let workerStarts = 0;
 
         @AutoConstruct()
         class ServerStartupService {
@@ -812,12 +816,17 @@ void app.run();
             controllers: [ApplicationController],
             providers: [ServerStartupService, CliStartupService],
             commands: [TestCliServiceCommand],
+            enableWorker: true,
             frameworkConfig: { port: 0 }
         });
+        app.get(WorkerRunnerService).start = async () => {
+            workerStarts++;
+        };
 
         await app.run();
 
         assert.deepStrictEqual(constructed, ['cli']);
+        assert.equal(workerStarts, 0);
         assert.deepStrictEqual(routePaths, ['/healthz', '/metrics']);
         assert.equal(healthStatus, 200);
         assert.equal(metricsStatus, 503);

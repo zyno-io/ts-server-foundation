@@ -429,6 +429,7 @@ Examples:
 
     private shouldStartWorkerRunner(): boolean {
         if (!this.options.enableWorker) return false;
+        if (this.cliServiceMode) return false;
         if (this.forceWorkerRunner) return true;
         if (this.config.ENABLE_JOB_RUNNER !== undefined) return this.config.ENABLE_JOB_RUNNER === true;
         return this.config.APP_ENV !== 'production';

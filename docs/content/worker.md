@@ -11,7 +11,9 @@ const app = createApp({
 });
 ```
 
-Normal server processes can enqueue jobs. Runner ownership is controlled by `ENABLE_JOB_RUNNER`:
+Normal server processes can enqueue jobs. The job runner starts only for the main app process or `node . worker:start`; CLI service commands never start it, even when `ENABLE_JOB_RUNNER=true`.
+
+For the main app process, runner ownership is controlled by `ENABLE_JOB_RUNNER`:
 
 | Environment           | Default runner behavior                                                                                  |
 | --------------------- | -------------------------------------------------------------------------------------------------------- |
