@@ -499,6 +499,8 @@ func TestTypeExprRendersObjectLiteralsAndUtilityTypes(t *testing.T) {
 	pickExpr := typeExpr(info, reg, "Pick<User, 'id' | 'email'>")
 	for _, want := range []string{
 		"typeName: \"Pick\"",
+		"utilityType: \"Pick\"",
+		"utilityKeys: [\"id\", \"email\"]",
 		"name: \"id\", type: {kind: 6}",
 		"name: \"email\", type: {kind: 12, types: [{kind: 6}, {kind: 4}]}, optional: true",
 	} {
@@ -506,6 +508,14 @@ func TestTypeExprRendersObjectLiteralsAndUtilityTypes(t *testing.T) {
 			t.Fatalf("pick expression %q does not contain %q", pickExpr, want)
 		}
 	}
+
+	lengthExpr := typeExpr(info, reg, "Length<4>")
+	assertContainsAll(t, lengthExpr,
+		`kind: 13, typeName: "Length"`,
+		`kind: 6`,
+		`typeName: "MinLength", validation: [{name: "minLength", args: [{kind: 10, literal: 4}]}]`,
+		`typeName: "MaxLength", validation: [{name: "maxLength", args: [{kind: 10, literal: 4}]}]`,
+	)
 
 	unionReturnExpr := typeExpr(info, reg, "Promise<{ result: 'token' } | { result: 'login'; jwt: string }>")
 	assertContainsAll(t, unionReturnExpr,

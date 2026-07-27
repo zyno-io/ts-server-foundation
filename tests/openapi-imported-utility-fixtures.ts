@@ -1,4 +1,4 @@
-import type { OnUpdate, UuidString } from '../src';
+import type { Length, OnUpdate, UuidString } from '../src';
 
 export class OpenApiImportedResponseSource {
     id!: UuidString;
@@ -8,6 +8,7 @@ export class OpenApiImportedResponseSource {
 export class OpenApiImportedTimestampedSource {
     id!: UuidString;
     kind!: string;
+    code!: Length<4>;
     updatedAt!: Date & OnUpdate<'CURRENT_TIMESTAMP'>;
 }
 

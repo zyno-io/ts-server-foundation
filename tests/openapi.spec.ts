@@ -201,7 +201,7 @@ class OpenApiChannelSource {
 
 type OpenApiPickId = Pick<OpenApiPickSource, 'id'>;
 type OpenApiPickEmail = Pick<OpenApiPickSource, 'email'>;
-type OpenApiTimestampedPickResponse = Pick<OpenApiImportedTimestampedSource, 'id' | 'kind' | 'updatedAt'>;
+type OpenApiTimestampedPickResponse = Pick<OpenApiImportedTimestampedSource, 'id' | 'kind' | 'code' | 'updatedAt'>;
 interface OpenApiInterfaceExtendsAlias extends OpenApiPickId {
     enabled: boolean;
 }
@@ -494,7 +494,7 @@ class OpenApiUsersController {
 
     @http.GET('/timestamped-pick')
     async timestampedPick(): Promise<OpenApiTimestampedPickResponse> {
-        return { id: '' as UuidString, kind: 'example', updatedAt: new Date() };
+        return { id: '' as UuidString, kind: 'example', code: 'ABCD', updatedAt: new Date() };
     }
 
     @http.GET('/timestamped-picks')
@@ -1139,6 +1139,11 @@ describe('openapi', () => {
         assert.deepStrictEqual(schemaObject(schemaForRef(doc, timestampedPick)?.properties?.updatedAt), {
             type: 'string',
             format: 'date-time'
+        });
+        assert.deepStrictEqual(schemaObject(schemaForRef(doc, timestampedPick)?.properties?.code), {
+            type: 'string',
+            minLength: 4,
+            maxLength: 4
         });
         assert.equal(doc.components?.schemas?.OpenApiTimestampedPickResponse_2, undefined);
 

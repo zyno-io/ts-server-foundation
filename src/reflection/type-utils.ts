@@ -124,6 +124,7 @@ function isKnownMarkerTypeName(typeName: string | undefined): boolean {
         case 'GreaterThan':
         case 'HasDefault':
         case 'Index':
+        case 'Length':
         case 'LessThan':
         case 'Maximum':
         case 'MaxLength':

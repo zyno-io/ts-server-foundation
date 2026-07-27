@@ -198,6 +198,12 @@ func genericTypeExpr(info *fileInfo, reg *registry, name string, args []string, 
 		return validationMarker("MinLength", "minLength", literalArg(firstArg(args)))
 	case "MaxLength":
 		return validationMarker("MaxLength", "maxLength", literalArg(firstArg(args)))
+	case "Length":
+		value := literalArg(firstArg(args))
+		return "{kind: 13, typeName: \"Length\", types: [{kind: 6}, " +
+			validationMarker("MinLength", "minLength", value) + ", " +
+			validationMarker("MaxLength", "maxLength", value) + ", " +
+			typeAnnotationMarker("Length", "tsf:length", value) + "]}"
 	case "Minimum":
 		return validationMarker("Minimum", "minimum", literalArg(firstArg(args)))
 	case "GreaterThan":
@@ -514,7 +520,12 @@ func utilityTypeExpr(info *fileInfo, reg *registry, name string, args []string, 
 	}
 
 	sourceExpr := typeExprCtx(info, reg, firstArg(args), ctx)
-	return "{kind: 18, typeName: " + quote(name) + ", typeArguments: [" + sourceExpr + "], types: [" + renderUtilityProperties(owner, reg, props, ctx) + "]}", true
+	keysExpr := "[]"
+	if name == "Pick" || name == "Omit" {
+		keysExpr = utilityKeysExpr(firstArg(args[1:]))
+	}
+	return "{kind: 18, typeName: " + quote(name) + ", utilityType: " + quote(name) + ", typeArguments: [" + sourceExpr +
+		"], utilityKeys: " + keysExpr + ", types: [" + renderUtilityProperties(owner, reg, props, ctx) + "]}", true
 }
 
 func runtimeUtilityTypeExpr(info *fileInfo, reg *registry, name string, args []string, ctx *typeContext) (string, bool) {
