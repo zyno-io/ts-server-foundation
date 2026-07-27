@@ -112,7 +112,8 @@ export function isMarkerType(type: Type): boolean {
 }
 
 function isBareKnownMarkerType(type: Type): boolean {
-    return type.kind === ReflectionKind.unknown && isKnownMarkerTypeName(type.typeName);
+    if (!isKnownMarkerTypeName(type.typeName)) return false;
+    return type.kind === ReflectionKind.unknown || (type.kind === ReflectionKind.class && !tryResolveClassType(type.classType));
 }
 
 function isKnownMarkerTypeName(typeName: string | undefined): boolean {

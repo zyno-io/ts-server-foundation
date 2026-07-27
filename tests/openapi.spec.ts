@@ -51,7 +51,7 @@ import {
 import { createApp } from '../src/app';
 import type { OpenApiReferenceObject, OpenApiSchemaObject } from '../src/openapi';
 import { resolveCompactMetadataAliasV1 } from '../src/reflection/compact-metadata';
-import { OpenApiImportedReportSource, OpenApiImportedResponseSource } from './openapi-imported-utility-fixtures';
+import { OpenApiImportedReportSource, OpenApiImportedResponseSource, OpenApiImportedTimestampedSource } from './openapi-imported-utility-fixtures';
 import type { OpenApiImportedGenericError } from './openapi-imported-utility-fixtures';
 import type {
     OpenApiReexportedBindingNode,
@@ -201,6 +201,7 @@ class OpenApiChannelSource {
 
 type OpenApiPickId = Pick<OpenApiPickSource, 'id'>;
 type OpenApiPickEmail = Pick<OpenApiPickSource, 'email'>;
+type OpenApiTimestampedPickResponse = Pick<OpenApiImportedTimestampedSource, 'id' | 'kind' | 'updatedAt'>;
 interface OpenApiInterfaceExtendsAlias extends OpenApiPickId {
     enabled: boolean;
 }
@@ -489,6 +490,16 @@ class OpenApiUsersController {
             customEntries: [],
             sourceBreakdown: []
         };
+    }
+
+    @http.GET('/timestamped-pick')
+    async timestampedPick(): Promise<OpenApiTimestampedPickResponse> {
+        return { id: '' as UuidString, kind: 'example', updatedAt: new Date() };
+    }
+
+    @http.GET('/timestamped-picks')
+    async timestampedPicks(): Promise<OpenApiTimestampedPickResponse[]> {
+        return [];
     }
 
     @http.POST('/reexported-rule-set')
@@ -824,6 +835,28 @@ function createOpenApiPartialResponseMetadata<T extends Type>(source: T): Type {
     } as Type;
 }
 
+function createOpenApiDeferredMarkerResponseMetadata<T extends Type>(source: T): Type {
+    return {
+        kind: ReflectionKind.objectLiteral,
+        typeName: 'OpenApiDeferredMarkerResponse',
+        typeArguments: [source],
+        types: [
+            {
+                kind: ReflectionKind.propertySignature,
+                name: 'updatedAt',
+                type: {
+                    kind: ReflectionKind.intersection,
+                    types: [
+                        { kind: ReflectionKind.class, typeName: 'Date', classType: Date },
+                        { kind: ReflectionKind.class, typeName: 'OnUpdate', classType: (() => undefined) as never }
+                    ]
+                } as Type,
+                optional: false
+            }
+        ]
+    } as Type;
+}
+
 function createOpenApiSharedResponseSourceMetadata(): Type {
     return {
         kind: ReflectionKind.class,
@@ -1099,6 +1132,16 @@ describe('openapi', () => {
         assert.deepStrictEqual(doc.paths['/users/{id}'].get?.tags, ['openApiUsers']);
         assert.equal(doc.paths['/openapi.json'], undefined);
         assert.equal(doc.paths['/openapi.yaml'], undefined);
+
+        const timestampedPick = referenceObject(doc.paths['/users/timestamped-pick'].get?.responses['200'].content?.['application/json'].schema).$ref;
+        const timestampedPicks = schemaObject(doc.paths['/users/timestamped-picks'].get?.responses['200'].content?.['application/json'].schema);
+        assert.equal(referenceObject(timestampedPicks.items).$ref, timestampedPick);
+        assert.deepStrictEqual(schemaObject(schemaForRef(doc, timestampedPick)?.properties?.updatedAt), {
+            type: 'string',
+            format: 'date-time'
+        });
+        assert.equal(doc.components?.schemas?.OpenApiTimestampedPickResponse_2, undefined);
+
         const internalDoc = serializeOpenApiSchema(createApp({}));
         assert.equal(internalDoc.paths['/healthz'], undefined);
         assert.equal(internalDoc.paths['/openapi.json'], undefined);
@@ -1607,6 +1650,28 @@ describe('openapi', () => {
         const partialResponse = schemaObject(partialResponseContext.schemas.OpenApiPartialResponse);
         assert.deepStrictEqual(partialResponse.required, undefined);
         assert.deepStrictEqual(schemaObject(partialResponse.properties?.enabled), { type: 'boolean' });
+    });
+
+    it('preserves unresolved known class markers in direct and array schemas', () => {
+        const context = createOpenApiSchemaContext();
+        const direct = referenceObject(
+            typeToOpenApiSchema(createOpenApiDeferredMarkerResponseMetadata(createOpenApiSharedResponseSourceMetadata()), context)
+        );
+        const array = schemaObject(
+            typeToOpenApiSchema(
+                {
+                    kind: ReflectionKind.array,
+                    type: createOpenApiDeferredMarkerResponseMetadata(createOpenApiSharedResponseSourceMetadata())
+                } as Type,
+                context
+            )
+        );
+        assert.equal(referenceObject(array.items).$ref, direct.$ref);
+        assert.deepStrictEqual(schemaObject(schemaForRef({ components: { schemas: context.schemas } }, direct.$ref)?.properties?.updatedAt), {
+            type: 'string',
+            format: 'date-time'
+        });
+        assert.equal(context.schemas.OpenApiDeferredMarkerResponse_2, undefined);
     });
 
     it('expands runtime utility metadata from reflected source class properties', () => {
