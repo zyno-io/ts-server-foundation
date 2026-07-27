@@ -1,3 +1,10 @@
+import type { UuidString } from '../src';
+
+export class OpenApiImportedResponseSource {
+    id!: UuidString;
+    label!: string;
+}
+
 interface OpenApiImportedReportCategory {
     categoryId: string;
     total: number;

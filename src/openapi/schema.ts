@@ -11,7 +11,7 @@ import {
     type TypeProperty,
     type TypePropertySignature
 } from '../reflection';
-import { isMarkerType, normalizeTypeMetadata, tryResolveClassType } from '../reflection/type-utils';
+import { getUtilityTypeName, isMarkerType, normalizeTypeMetadata, tryResolveClassType } from '../reflection/type-utils';
 
 import { FileUpload } from '../http';
 import { normalizeAllowedTypes, parseByteSize } from '../http/uploads';
@@ -236,6 +236,10 @@ function isOpenApiClassType(type: TypeClass, classType: TypeClass['classType']):
  * properties so imported contracts remain as precise as local interfaces.
  */
 function instantiateOpenApiGenericType(type: Type): Type {
+    // Utility arguments describe their source shape; they are not concrete
+    // arguments for placeholders declared by an imported generic alias.
+    if (getUtilityTypeName(type as unknown as Record<string, unknown>)) return type;
+
     const typeArguments = getTypeArguments(type);
     if (!typeArguments.length) return type;
 
@@ -266,6 +270,7 @@ function collectGenericPlaceholderNames(type: Type): string[] {
     const visit = (value: Type) => {
         if (seen.has(value) || names.length >= maximumNames) return;
         seen.add(value);
+        if (isMarkerType(value)) return;
         if (isGenericPlaceholder(value) || isLegacyUnknownGenericPlaceholder(value)) {
             const name = openApiTypeName(value)!;
             if (!names.includes(name)) names.push(name);

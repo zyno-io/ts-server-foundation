@@ -51,7 +51,7 @@ import {
 import { createApp } from '../src/app';
 import type { OpenApiReferenceObject, OpenApiSchemaObject } from '../src/openapi';
 import { resolveCompactMetadataAliasV1 } from '../src/reflection/compact-metadata';
-import { OpenApiImportedReportSource } from './openapi-imported-utility-fixtures';
+import { OpenApiImportedReportSource, OpenApiImportedResponseSource } from './openapi-imported-utility-fixtures';
 import type { OpenApiImportedGenericError } from './openapi-imported-utility-fixtures';
 import type {
     OpenApiReexportedBindingNode,
@@ -747,6 +747,102 @@ class OpenApiNamingController {
         return { email: '' };
     }
 }
+
+@http.controller('/shared-response')
+class OpenApiSharedResponseController {
+    @http.GET()
+    async sharedResponse(): Promise<unknown> {
+        return {};
+    }
+
+    @http.GET('/list')
+    async sharedResponses(): Promise<unknown> {
+        return [];
+    }
+}
+
+const sharedResponseController = OpenApiSharedResponseController as typeof OpenApiSharedResponseController & {
+    __tsfType: { methods: Array<{ name: string; returnType: Type }> };
+};
+
+// External packages expose their source class through a runtime metadata thunk;
+// local test fixtures are otherwise resolved eagerly by the type compiler.
+function createOpenApiSharedResponseMetadata<T extends Type>(source: T): Type {
+    return {
+        kind: ReflectionKind.objectLiteral,
+        typeName: 'OpenApiSharedResponse',
+        utilityType: 'Pick',
+        typeArguments: [source],
+        utilityKeys: ['id', 'label'],
+        types: []
+    } as Type;
+}
+
+function createOpenApiPartialResponseMetadata<T extends Type>(source: T): Type {
+    const selected = {
+        kind: ReflectionKind.objectLiteral,
+        typeName: 'Pick',
+        utilityType: 'Pick',
+        typeArguments: [source],
+        utilityKeys: ['id', 'label', 'enabled'],
+        types: [
+            {
+                kind: ReflectionKind.propertySignature,
+                name: 'id',
+                type: {
+                    kind: ReflectionKind.string,
+                    annotations: { 'tsf:type': { kind: ReflectionKind.literal, literal: 'uuid' } }
+                } as Type,
+                optional: false
+            },
+            { kind: ReflectionKind.propertySignature, name: 'label', type: { kind: ReflectionKind.string } as Type, optional: false },
+            {
+                kind: ReflectionKind.propertySignature,
+                name: 'enabled',
+                type: {
+                    kind: ReflectionKind.intersection,
+                    types: [
+                        { kind: ReflectionKind.boolean },
+                        {
+                            kind: ReflectionKind.unknown,
+                            typeName: 'HasDefault',
+                            annotations: { 'tsf:hasDefault': { kind: ReflectionKind.undefined } }
+                        }
+                    ]
+                },
+                optional: false
+            }
+        ]
+    } as Type;
+
+    const selectedProperties = (selected as { types: Array<{ kind: ReflectionKind; name: string; type: Type; optional?: boolean }> }).types;
+    return {
+        kind: ReflectionKind.objectLiteral,
+        typeName: 'OpenApiPartialResponse',
+        typeArguments: [selected],
+        types: selectedProperties.map(property => ({ ...property, optional: true }))
+    } as Type;
+}
+
+function createOpenApiSharedResponseSourceMetadata(): Type {
+    return {
+        kind: ReflectionKind.class,
+        typeName: 'OpenApiImportedResponseSource',
+        classType: () => OpenApiImportedResponseSource
+    } as unknown as Type;
+}
+
+sharedResponseController.__tsfType.methods.find(method => method.name === 'sharedResponse')!.returnType = {
+    kind: ReflectionKind.promise,
+    type: createOpenApiSharedResponseMetadata(createOpenApiSharedResponseSourceMetadata())
+};
+sharedResponseController.__tsfType.methods.find(method => method.name === 'sharedResponses')!.returnType = {
+    kind: ReflectionKind.promise,
+    type: {
+        kind: ReflectionKind.array,
+        type: createOpenApiSharedResponseMetadata(createOpenApiSharedResponseSourceMetadata())
+    }
+};
 
 @http.controller('/runtime-utility')
 class OpenApiRuntimeUtilityController {
@@ -1450,7 +1546,8 @@ describe('openapi', () => {
                 OpenApiConflictBController,
                 OpenApiInterfaceConflictAController,
                 OpenApiInterfaceConflictBController,
-                OpenApiNamingController
+                OpenApiNamingController,
+                OpenApiSharedResponseController
             ],
             enableHealthcheck: false
         });
@@ -1489,6 +1586,27 @@ describe('openapi', () => {
         assert.equal(schemaObject(schemaForRef(doc, pickEmailRef)?.properties?.email).type, 'string');
         assert.equal(schemaForRef(doc, pickIdRef)?.properties?.email, undefined);
         assert.equal(schemaForRef(doc, pickEmailRef)?.properties?.id, undefined);
+
+        const sharedResponseRef = referenceObject(doc.paths['/shared-response'].get?.responses['200'].content?.['application/json'].schema).$ref;
+        const sharedResponses = schemaObject(doc.paths['/shared-response/list'].get?.responses['200'].content?.['application/json'].schema);
+        assert.equal(referenceObject(sharedResponses.items).$ref, sharedResponseRef);
+        assert.equal(doc.components?.schemas?.OpenApiSharedResponse_2, undefined);
+        assert.deepStrictEqual(schemaObject(schemaForRef(doc, sharedResponseRef)?.properties?.id), {
+            type: 'string',
+            format: 'uuid',
+            pattern: '^(?:urn:uuid:)?[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+        });
+    });
+
+    it('preserves default markers in nested utility metadata', () => {
+        const partialResponseContext = createOpenApiSchemaContext();
+        assert.deepStrictEqual(
+            typeToOpenApiSchema(createOpenApiPartialResponseMetadata(createOpenApiSharedResponseSourceMetadata()), partialResponseContext),
+            { $ref: '#/components/schemas/OpenApiPartialResponse' }
+        );
+        const partialResponse = schemaObject(partialResponseContext.schemas.OpenApiPartialResponse);
+        assert.deepStrictEqual(partialResponse.required, undefined);
+        assert.deepStrictEqual(schemaObject(partialResponse.properties?.enabled), { type: 'boolean' });
     });
 
     it('expands runtime utility metadata from reflected source class properties', () => {
