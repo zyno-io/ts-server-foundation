@@ -362,15 +362,29 @@ function materializeTypeScriptPackage(packageName, source, cacheRoot) {
 }
 
 function hashTypeScriptFiles(root, directory, hash) {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    let entries;
+    try {
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (error) {
+        if (error?.code === 'ENOENT') return;
+        throw error;
+    }
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
         if (entry.isDirectory()) {
             if (!PRUNED_DIRECTORIES.has(entry.name)) hashTypeScriptFiles(root, path.join(directory, entry.name), hash);
             continue;
         }
         if (!entry.isFile() || (entry.name !== 'package.json' && !TYPE_SCRIPT_SOURCE.test(entry.name))) continue;
         const file = path.join(directory, entry.name);
+        let source;
+        try {
+            source = fs.readFileSync(file);
+        } catch (error) {
+            if (error?.code === 'ENOENT') continue;
+            throw error;
+        }
         hash.update(`${path.relative(root, file).replaceAll(path.sep, '/')}\n`);
-        hash.update(fs.readFileSync(file));
+        hash.update(source);
     }
 }
 

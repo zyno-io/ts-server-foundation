@@ -55,6 +55,17 @@ describe('type compiler PnP handoff', () => {
         assert.equal(existsSync(join(materialized, 'runtime.js')), false);
     });
 
+    it('tolerates package directories disappearing before materialization', () => {
+        const root = temporaryDirectory();
+        const source = join(root, 'removed-package');
+        mkdirSync(source, { recursive: true });
+        rmSync(source, { recursive: true });
+
+        const materialized = pnp.materializeTypeScriptPackage('example', source, join(root, 'project', '.yarn', 'tsf-pnp'));
+
+        assert.equal(existsSync(materialized), true);
+    });
+
     it('skips virtual PnP resolutions that point to files instead of package directories', () => {
         const root = temporaryDirectory();
         const project = join(root, 'project');
