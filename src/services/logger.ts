@@ -36,6 +36,7 @@ export type LogSink = (entry: LogEntry) => void;
 export const shouldUsePinoPretty = isDevFeatureEnabled(Env.ENABLE_PINO_PRETTY);
 export const shouldUseSingleLine = isDevFeatureEnabled(Env.ENABLE_PINO_SINGLE_LINE);
 export const LoggerContextProps: string[] = ['http', 'job'];
+export const LoggerHttpContextProps: string[] = ['reqId', 'traceId'];
 export const LoggerContextSymbol = Symbol('LoggerContext');
 
 const PinoSeverityMap = {
@@ -220,6 +221,13 @@ export async function withLoggerContext<T>(data: LogData, fn: () => Promise<T>):
     );
 }
 
+export function projectLoggerHttpContext(context: unknown): LogData | undefined {
+    if (!isLogObject(context)) return undefined;
+
+    const entries = LoggerHttpContextProps.flatMap(prop => (Object.hasOwn(context, prop) ? [[prop, context[prop]] as [string, unknown]] : []));
+    return entries.length ? Object.fromEntries(entries) : undefined;
+}
+
 export function setLogSink(sink: LogSink): void {
     currentSink = sink;
     defaultLogger = new ExtendedLogger('', undefined, sink);
@@ -344,7 +352,9 @@ function getLoggerContextProps(): LogData | undefined {
 
     const entries: [string, unknown][] = [];
     for (const prop of LoggerContextProps) {
-        if (context[prop]) entries.push([prop, context[prop]]);
+        if (!context[prop]) continue;
+        const value = prop === 'http' ? projectLoggerHttpContext(context[prop]) : context[prop];
+        if (value) entries.push([prop, value]);
     }
 
     const loggerContext = context[LoggerContextSymbol];

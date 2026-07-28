@@ -2,7 +2,7 @@ import type { ServerResponse } from 'node:http';
 
 import type { BaseAppConfig } from '../app/config';
 import { isTestEnvironment } from '../app/const';
-import type { ScopedLogger } from '../services';
+import { projectLoggerHttpContext, type ScopedLogger } from '../services/logger';
 import { HttpError } from './errors';
 import { getHttpRequestErrorState } from './request-error-state';
 import type { HttpRequest } from './request';
@@ -41,9 +41,7 @@ export class HttpRequestLogger {
     createState(request: HttpRequest, outgoing: ServerResponse): RequestLoggingState {
         const state: RequestLoggingState = {
             request,
-            // Native response events run after the request async context has closed. Keep the
-            // mutable request context on this logger so terminal records retain request fields.
-            logger: this.logger.data({ http: request.context }),
+            logger: this.logger,
             mode: this.config.HTTP_REQUEST_LOGGING_MODE ?? getDefaultRequestLoggingMode(),
             startedAt: Date.now(),
             skipped: this.shouldSkip(request),
@@ -55,7 +53,7 @@ export class HttpRequestLogger {
             if (state.finished || state.aborted || outgoing.writableFinished) return;
             state.aborted = true;
             if (this.shouldLogAbort(state)) {
-                state.logger.warn('Request aborted during processing', {
+                this.loggerFor(state).warn('Request aborted during processing', {
                     method: request.method,
                     url: request.url,
                     duration: Date.now() - state.startedAt
@@ -77,7 +75,7 @@ export class HttpRequestLogger {
     start(state: RequestLoggingState): void {
         state.request.store['$RequestTime'] = state.startedAt;
         if (state.mode !== 'e2e' || state.skipped) return;
-        state.logger.info('Request', {
+        this.loggerFor(state).info('Request', {
             method: state.request.method,
             url: state.request.url,
             remoteAddress: state.request.getRemoteAddress(),
@@ -89,7 +87,7 @@ export class HttpRequestLogger {
         if (state.finished || state.aborted) return;
         state.finished = true;
         if (!this.shouldLogFinish(state, response.statusCode)) return;
-        state.logger.info('Response', {
+        this.loggerFor(state).info('Response', {
             method: state.request.method,
             url: state.request.url,
             statusCode: response.statusCode,
@@ -101,7 +99,7 @@ export class HttpRequestLogger {
         if (state.finished || state.aborted || state.hooked || response.writableEnded) return;
         state.hooked = true;
         if (!this.shouldLogFinish(state, response.statusCode)) return;
-        state.logger.info('Response stream hooked by controller', {
+        this.loggerFor(state).info('Response stream hooked by controller', {
             method: state.request.method,
             url: state.request.url,
             statusCode: response.statusCode,
@@ -114,12 +112,12 @@ export class HttpRequestLogger {
         if (error instanceof HttpError) {
             const requestError = getHttpRequestErrorState(state.request);
             if (requestError?.error === error && requestError.matchedRoute) {
-                this.logger.warn('Request processing error', { 'error.message': error.message });
+                this.loggerFor(state).warn('Request processing error', { 'error.message': error.message });
             }
             return;
         }
         if (response.statusCode < 500) return;
-        state.logger.error('Request processing error', error, {
+        this.loggerFor(state).error('Request processing error', error, {
             method: state.request.method,
             url: state.request.url,
             statusCode: response.statusCode,
@@ -131,7 +129,7 @@ export class HttpRequestLogger {
         this.error(
             {
                 request,
-                logger: this.logger.data({ http: request.context }),
+                logger: this.logger,
                 mode: this.config.HTTP_REQUEST_LOGGING_MODE ?? getDefaultRequestLoggingMode(),
                 startedAt,
                 skipped: this.shouldSkip(request),
@@ -142,6 +140,11 @@ export class HttpRequestLogger {
             error,
             response
         );
+    }
+
+    private loggerFor(state: Pick<RequestLoggingState, 'logger' | 'request'>): ScopedLogger {
+        const httpContext = projectLoggerHttpContext(state.request.context);
+        return httpContext ? state.logger.data({ http: httpContext }) : state.logger;
     }
 
     dispose(state: RequestLoggingState, outgoing: ServerResponse): void {

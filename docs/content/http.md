@@ -99,7 +99,21 @@ Node HTTP requests are logged at the server boundary and configured with `HTTP_R
 | `errors` | Logs only request processing errors and aborted requests. |
 | `none`   | Disables normal request logs.                             |
 
-Test mode defaults to `errors` so service/application logs remain visible without routine HTTP `Request` and `Response` records. Request logs include method, URL, status code, duration, remote address on start, and the active request context. `/healthz` request logging is disabled by default; set `HEALTHZ_ENABLE_REQUEST_LOGGING=true` to include it. `/metrics` is always skipped.
+Test mode defaults to `errors` so service/application logs remain visible without routine HTTP `Request` and `Response` records. Request logs include method, URL, status code, duration, remote address on start, and the allowlisted request context fields. `LoggerHttpContextProps` contains `reqId` and `traceId` by default; add application-specific context field names explicitly when they are safe to log. `/healthz` request logging is disabled by default; set `HEALTHZ_ENABLE_REQUEST_LOGGING=true` to include it. `/metrics` is always skipped.
+
+```ts
+import { LoggerHttpContextProps, setHttpContextResolver } from '@zyno-io/ts-server-foundation';
+
+setHttpContextResolver(request => ({
+    reqId: request.headers['x-request-id'],
+    tenantId: request.headers['x-tenant-id'],
+    sessionToken: request.headers['x-session-token']
+}));
+
+LoggerHttpContextProps.push('tenantId');
+```
+
+In this example, logs include `reqId` and `tenantId`; `sessionToken` remains available through `request.context` but is not logged.
 
 Exclude additional request paths through app options. Strings match exact pathnames (regardless of query strings), while regular expressions support path patterns:
 

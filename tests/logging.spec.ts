@@ -30,7 +30,7 @@ describe('logging contracts', () => {
 
         await withContextData(
             {
-                http: { requestId: 'req-1' },
+                http: { reqId: 'req-1', traceId: 'trace-1', hiddenHttp: 'not-logged' },
                 job: { jobId: 'job-1' },
                 hidden: 'not-logged'
             },
@@ -48,14 +48,14 @@ describe('logging contracts', () => {
         assert.deepStrictEqual(entries[0].data, {
             source: 'scope',
             scopeOnly: true,
-            http: { requestId: 'req-1' },
+            http: { reqId: 'req-1', traceId: 'trace-1' },
             job: { jobId: 'job-1' }
         });
         assert.equal((entries[0].data as Record<string, unknown> | undefined)?.hidden, undefined);
         assert.deepStrictEqual(entries[1].data, {
             source: 'outer-context',
             scopeOnly: true,
-            http: { requestId: 'req-1' },
+            http: { reqId: 'req-1', traceId: 'trace-1' },
             job: { jobId: 'job-1' },
             extra: 'outer'
         });

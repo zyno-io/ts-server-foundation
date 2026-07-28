@@ -23,6 +23,7 @@ import {
     HttpQueries,
     HttpQuery,
     HttpRequest,
+    LoggerHttpContextProps,
     HttpRequestStream,
     HttpUserError,
     HttpMiddleware,
@@ -2414,13 +2415,14 @@ describe('http router', () => {
         }
 
         process.env.APP_ENV = 'test';
-        setHttpContextResolver(() => ({ reqId: 'ctx-1' }));
+        setHttpContextResolver(() => ({ reqId: 'ctx-1', hidden: 'not-logged' }));
         setLogSink(entry => entries.push(entry));
         try {
             const app = createApp({ controllers: [LogContextController] });
             await app.request(HttpRequest.GET('/log-context'));
 
             assert.equal((entries[0]?.data?.http as Record<string, unknown> | undefined)?.reqId, 'ctx-1');
+            assert.equal((entries[0]?.data?.http as Record<string, unknown> | undefined)?.hidden, undefined);
         } finally {
             resetLogSink();
             setHttpContextResolver(() => ({ reqId: 'test-req' }));
@@ -2440,6 +2442,7 @@ describe('http router', () => {
             @http.GET('/mutate-context')
             mutateContext(request: HttpRequest) {
                 request.context.controllerValue = 'seen-by-finish-log';
+                request.context.hiddenControllerValue = 'not-logged';
                 return { ok: true };
             }
 
@@ -2466,6 +2469,7 @@ describe('http router', () => {
 
         process.env.APP_ENV = 'test';
         setLogSink(entry => entries.push(entry));
+        LoggerHttpContextProps.push('controllerValue');
         const excludedPattern = /^\/request-logging\/pattern\//g;
         const app = createApp({
             controllers: [RequestLoggingController],
@@ -2497,6 +2501,7 @@ describe('http router', () => {
 
             assert.equal(mutated.statusCode, 200);
             assert.equal((entries[1]?.data?.http as Record<string, unknown> | undefined)?.controllerValue, 'seen-by-finish-log');
+            assert.equal((entries[1]?.data?.http as Record<string, unknown> | undefined)?.hiddenControllerValue, undefined);
 
             entries.length = 0;
             const excluded = await requestNodeHttp(address.port, 'GET', '/request-logging/excluded?source=poll');
@@ -2537,6 +2542,8 @@ describe('http router', () => {
         } finally {
             await app.stop();
             resetLogSink();
+            const controllerValueIndex = LoggerHttpContextProps.indexOf('controllerValue');
+            if (controllerValueIndex >= 0) LoggerHttpContextProps.splice(controllerValueIndex, 1);
         }
     });
 
