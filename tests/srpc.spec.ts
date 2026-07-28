@@ -405,7 +405,12 @@ describe('srpc', () => {
 
         try {
             await client.connect();
-            await assert.rejects(client.invoke('uError', { message: 'expected failure', userError: true }), /expected failure/);
+            await assert.rejects(client.invoke('uError', { message: 'expected failure', userError: true }), error => {
+                assert.ok(error instanceof SrpcError);
+                assert.equal(error.message, 'expected failure');
+                assert.equal(error.isUserError, true);
+                return true;
+            });
             await assert.rejects(client.invoke('uSlow', { delayMs: 50 }, 5), /Request timeout after 5ms/);
         } finally {
             await harness.close();
