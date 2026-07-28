@@ -418,6 +418,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             meshOptions,
             meshLink: {
                 secret: linkSecret,
+                path: '/_tsf/direct-mesh',
                 advertiseUrl: `ws://127.0.0.1:${firstPort}/_tsf/direct-mesh`
             }
         });
@@ -432,6 +433,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             meshOptions,
             meshLink: {
                 secret: linkSecret,
+                path: '/_tsf/direct-mesh',
                 advertiseUrl: `ws://127.0.0.1:${secondPort}/_tsf/direct-mesh`
             }
         });
