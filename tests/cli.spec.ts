@@ -2171,13 +2171,13 @@ exports.app = createApp({
         assert.match(executes[1].sql, /ALTER TABLE `users` CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci/);
     });
 
-    it('forwards migrate reset through tsf-dev', () => {
+    it('runs migrate reset through the package entrypoint without an app export', () => {
         const dir = repoTempDir();
         const packageRoot = process.cwd();
         mkdirSync(join(dir, 'src', 'migrations'), { recursive: true });
         writeFileSync(
             join(dir, 'package.json'),
-            '{"name":"fixture","type":"commonjs","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
+            '{"name":"fixture","type":"commonjs","main":"./dist/src/index.js","devDependencies":{"@types/node":"^26","ttsc":"0.18.3","typescript":"7.0.2"}}'
         );
         linkDependency(dir, 'ttsc', resolveLocalPackageRoot('ttsc'));
         linkDependency(dir, 'typescript', resolveLocalPackageRoot('typescript'));
@@ -2198,33 +2198,42 @@ exports.app = createApp({
                 include: ['src/**/*.ts']
             })
         );
-        writeFileSync(join(dir, 'src', 'index.ts'), 'export const compiled = true;\n');
         writeFileSync(join(dir, 'src', 'migrations', '99999999_999999_old.ts'), 'export default async function oldMigration() {}\n');
         writeFileSync(
-            join(dir, 'app.js'),
+            join(dir, 'src', 'app.ts'),
             `
-const { BaseAppConfig, BaseDatabase, createApp } = require(${JSON.stringify(join(packageRoot, 'dist', 'src'))});
+import { BaseAppConfig, BaseDatabase, createApp as createFoundationApp } from '@zyno-io/ts-server-foundation';
 
 class Config extends BaseAppConfig {
     APP_ENV = 'test';
 }
 
 class FakeDriver {
-    dialect = 'postgres';
+    readonly dialect = 'postgres' as const;
     async connect() {}
     async close() {}
-    async acquire() { throw new Error('reset should not acquire a connection without entities'); }
+    async acquire(): Promise<never> { throw new Error('reset should not acquire a connection without entities'); }
 }
 
-exports.app = createApp({
-    config: Config,
-    providers: [{ provide: BaseDatabase, useValue: new BaseDatabase(new FakeDriver()) }],
-    enableHealthcheck: false
-});
+export function createApp() {
+    return createFoundationApp({
+        config: Config,
+        providers: [{ provide: BaseDatabase, useValue: new BaseDatabase(new FakeDriver()) }],
+        enableHealthcheck: false
+    });
+}
+`
+        );
+        writeFileSync(
+            join(dir, 'src', 'index.ts'),
+            `
+import { createApp } from './app';
+
+void createApp().run();
 `
         );
 
-        const result = runCli('tsf-dev.js', ['migrate:reset', '--app', 'app.js', '--migrations-dir', 'src/migrations'], dir);
+        const result = runCli('tsf-dev.js', ['migrate:reset', '--migrations-dir', 'src/migrations'], dir);
 
         assert.equal(result.status, 0, result.stderr);
         assert.match(result.stdout, /Removed 1 migration file/);

@@ -66,9 +66,9 @@ All commands resolve the project root from the working directory. `-p <file>` an
 | `repl [--debug] [--eval code] [script]`   | Builds and starts a fresh application REPL process.                                                     |
 | `test [--debug]`                          | Builds the test config and delegates to `tsf-test`.                                                     |
 | `migrate [--debug]`                       | Builds, then invokes the package entrypoint with `migrate:run`.                                         |
-| `migrate:create [--debug]`                | Builds, then delegates to `tsf-migrate create`.                                                         |
-| `migrate:reset [--debug]`                 | Builds, then delegates to `tsf-migrate reset`.                                                          |
-| `migrate:charset [--debug]`               | Builds, then delegates to `tsf-migrate charset`.                                                        |
+| `migrate:create [--debug]`                | Builds, then invokes the package entrypoint with `migrate:create`.                                      |
+| `migrate:reset [--debug]`                 | Builds, then invokes the package entrypoint with `migrate:reset`.                                       |
+| `migrate:charset [--debug]`               | Builds, then invokes the package entrypoint with `migrate:charset`.                                     |
 | `openapi:generate`                        | Builds, then invokes the package entrypoint with `openapi:generate`.                                    |
 
 ### Build And Watch

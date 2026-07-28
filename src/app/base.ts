@@ -1,6 +1,6 @@
 import { Container, getProviderToken, isStructuredProvider } from '../di';
 import { normalizeModule } from '../di';
-import { BaseDatabase, loadMigrationsFromDirectory, MigrationRunner } from '../database';
+import { BaseDatabase } from '../database';
 import type { ModuleDefinition, ModuleLike, Provider, Token } from '../di';
 import { EventBus, EventToken, getListenerMethodMetadata } from '../events';
 import { HealthcheckController, HealthcheckService } from '../health';
@@ -46,7 +46,7 @@ import {
     onServerShutdown,
     onServerShutdownRequested
 } from './lifecycle';
-import { parseEntrypointMigrationsDir } from './migrations-entrypoint';
+import { executeMigrationCommand, parseMigrationCommandOptions, type MigrationEntrypointCommand } from './migrations-entrypoint';
 import { getCommandMetadata } from './commands';
 import { setCurrentApp } from './current';
 
@@ -343,7 +343,16 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                 return true;
             case 'migrate':
             case 'migrate:run':
-                await this.runMigrationsFromEntrypoint(rest);
+                await this.runMigrationEntrypoint('run', rest);
+                return true;
+            case 'migrate:create':
+                await this.runMigrationEntrypoint('create', rest);
+                return true;
+            case 'migrate:reset':
+                await this.runMigrationEntrypoint('reset', rest);
+                return true;
+            case 'migrate:charset':
+                await this.runMigrationEntrypoint('charset', rest);
                 return true;
             case 'openapi:generate':
                 await this.runOpenApiGenerationFromEntrypoint(rest);
@@ -373,6 +382,9 @@ Commands:
   server:start          Start the HTTP server
   worker:start          Start the worker runner and HTTP health checks
   migrate, migrate:run  Run compiled database migrations
+  migrate:create        Create a raw SQL migration from entity/database diff
+  migrate:reset         Replace source migrations with a base migration
+  migrate:charset       Standardize MySQL charset and collation
   openapi:generate      Write openapi.yaml from registered routes
   repl                  Start an interactive application REPL
 ${customCommandLines ? `${customCommandLines}\n` : ''}
@@ -381,6 +393,7 @@ Examples:
   node ${entrypoint} server:start
   node ${entrypoint} worker:start
   node ${entrypoint} migrate:run
+  node ${entrypoint} migrate:create --description add_users
   node ${entrypoint} openapi:generate
   node ${entrypoint} repl`);
         process.exitCode = 1;
@@ -409,19 +422,9 @@ Examples:
         await new Promise<void>(() => {});
     }
 
-    private async runMigrationsFromEntrypoint(args: string[]): Promise<void> {
-        if (!this.options.db) throw new Error('Cannot run migrations without a configured database provider');
-        const db = this.get(BaseDatabase);
-        try {
-            const migrationsDir = parseEntrypointMigrationsDir(args);
-            const migrations = await loadMigrationsFromDirectory(migrationsDir);
-            const executions = await new MigrationRunner(db).run(migrations);
-            if (this.options.enableWorker) await this.get(WorkerRunnerService).removeStaleBullMqCronJobs();
-            console.log(`Ran ${executions.length} migration(s).`);
-        } finally {
-            if (this.options.enableWorker) await this.get(WorkerQueueRegistry).shutdown();
-            await db.driver.close();
-        }
+    private async runMigrationEntrypoint(command: MigrationEntrypointCommand, args: string[]): Promise<void> {
+        if (!this.container.has(BaseDatabase)) throw new Error('Cannot run migrations without a configured database provider');
+        await executeMigrationCommand(this, command, parseMigrationCommandOptions(command, args));
     }
 
     private async runOpenApiGenerationFromEntrypoint(args: string[]): Promise<void> {

@@ -262,12 +262,7 @@ function cmdMigrate(command: 'run' | 'create' | 'reset' | 'charset', args: strin
     const tsconfig = extractTsconfigArg(args) ?? 'tsconfig.json';
     const tscStatus = runTscIfNeeded(tsconfig);
     if (tscStatus !== 0) return tscStatus;
-    if (command === 'run') {
-        return runNode([...(debug ? ['--inspect-brk=9226'] : []), '--enable-source-maps', '.', 'migrate:run', ...args], projectDir, {
-            TSF_TSCONFIG: tsconfig
-        }).status;
-    }
-    return runNode([...(debug ? ['--inspect-brk=9226'] : []), join(__dirname, 'tsf-migrate.js'), command, ...args], projectDir, {
+    return runNode([...(debug ? ['--inspect-brk=9226'] : []), '--enable-source-maps', '.', `migrate:${command}`, ...args], projectDir, {
         TSF_TSCONFIG: tsconfig
     }).status;
 }

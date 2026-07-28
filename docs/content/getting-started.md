@@ -146,7 +146,7 @@ Run the server entrypoint with an explicit command:
 node . server:start
 ```
 
-`app.run()` handles command dispatch for `server:start`, `worker:start`, `migrate:run`, `openapi:generate`, `repl`, and commands registered on the app. Direct HTTP server APIs live under `app.http`; for tests, demos, or embedded usage call `app.http.listen()`:
+`app.run()` handles command dispatch for `server:start`, `worker:start`, `migrate:run`, `migrate:create`, `migrate:reset`, `migrate:charset`, `openapi:generate`, `repl`, and commands registered on the app. `tsf-dev migrate:create`, `tsf-dev migrate:reset`, and `tsf-dev migrate:charset` build the project and invoke these commands through the package entrypoint, so the app only needs to be created by that entrypoint. Direct HTTP server APIs live under `app.http`; for tests, demos, or embedded usage call `app.http.listen()`:
 
 Running `node .` without a command, or with an unknown command, prints usage and sets a failing exit code. Production process definitions should always include the intended command.
 

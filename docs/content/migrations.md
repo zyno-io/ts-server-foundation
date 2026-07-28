@@ -67,7 +67,15 @@ Convenience functions:
 
 ## CLI
 
-The `tsf-migrate` binary loads a compiled app module, resolves `BaseDatabase` from the app, and runs the selected command.
+For normal development, use `tsf-dev` migration commands. They build the project and run the package entrypoint (`node . migrate:<command>`), so `src/index.ts` can create and run the app without exporting an app instance.
+
+```bash
+corepack yarn tsf-dev migrate:create --description add_users
+corepack yarn tsf-dev migrate:reset
+corepack yarn tsf-dev migrate:charset utf8mb4 utf8mb4_0900_ai_ci
+```
+
+`tsf-migrate` remains available for standalone use. It loads a compiled app module, resolves `BaseDatabase` from the app, and runs the selected command. Pass `--app` when the app is not at the default emitted `src/app.ts` path.
 
 ```bash
 corepack yarn build
@@ -87,14 +95,14 @@ Commands:
 
 Options:
 
-| Option                               | Description                                            |
-| ------------------------------------ | ------------------------------------------------------ |
+| Option                               | Description                                                         |
+| ------------------------------------ | ------------------------------------------------------------------- |
 | `--app <path>`                       | Compiled app module. Defaults to the emitted path for `src/app.ts`. |
-| `--description <text>` / `-d <text>` | Migration file description. Default `auto_migration`.  |
-| `--migrations-dir <path>`            | Source migration directory. Default `src/migrations`.  |
-| `--pg-schema <schema>`               | PostgreSQL schema for introspection.                   |
-| `--table <name>`                     | Limit diff generation to one table. Repeatable.        |
-| `--tables <a,b>`                     | Limit diff generation to a comma-separated table list. |
+| `--description <text>` / `-d <text>` | Migration file description. Default `auto_migration`.               |
+| `--migrations-dir <path>`            | Source migration directory. Default `src/migrations`.               |
+| `--pg-schema <schema>`               | PostgreSQL schema for introspection.                                |
+| `--table <name>`                     | Limit diff generation to one table. Repeatable.                     |
+| `--tables <a,b>`                     | Limit diff generation to a comma-separated table list.              |
 
 ## Diff Generation
 
