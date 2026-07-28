@@ -27,6 +27,7 @@ import {
     type ColumnSchema,
     type Coordinate,
     type DateString,
+    type HasDefault,
     type NullableMySQLCoordinate,
     Length,
     type TableSchema,
@@ -150,6 +151,7 @@ class MigrationNumberEntity extends BaseEntity {
     score!: number;
     attempts!: number & Minimum<0>;
     total!: UnsignedNumber;
+    totalWithDefault!: UnsignedNumber & HasDefault;
 }
 
 @entity.name('migration_uuid_entities')
@@ -380,12 +382,16 @@ describe('migration create entity schema', () => {
         assert.equal(mysqlColumns.attempts.unsigned, true);
         assert.equal(mysqlColumns.total.type, 'double');
         assert.equal(mysqlColumns.total.unsigned, true);
+        assert.equal(mysqlColumns.totalWithDefault.type, 'double');
+        assert.equal(mysqlColumns.totalWithDefault.unsigned, true);
         assert.equal(postgresColumns.id.type, 'int');
         assert.equal(postgresColumns.score.type, 'double');
         assert.equal(postgresColumns.attempts.type, 'double');
         assert.equal(postgresColumns.attempts.unsigned, false);
         assert.equal(postgresColumns.total.type, 'double');
         assert.equal(postgresColumns.total.unsigned, false);
+        assert.equal(postgresColumns.totalWithDefault.type, 'double');
+        assert.equal(postgresColumns.totalWithDefault.unsigned, false);
     });
 
     it('does not let recursive annotations preempt mixed union handling', () => {

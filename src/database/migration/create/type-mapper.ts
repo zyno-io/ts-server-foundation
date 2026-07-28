@@ -112,19 +112,8 @@ function resolveColumnTypeBase(type: Type, dialect: Dialect): ResolvedColumnType
             return { type: 'varchar', size: intersectionMaxLength };
         }
 
-        const base = type.types.find(item =>
-            [
-                ReflectionKind.string,
-                ReflectionKind.number,
-                ReflectionKind.boolean,
-                ReflectionKind.bigint,
-                ReflectionKind.enum,
-                ReflectionKind.union,
-                ReflectionKind.class,
-                ReflectionKind.literal
-            ].includes(item.kind)
-        );
-        if (base) return resolveColumnType(base, dialect);
+        const base = unwrapValueType(type);
+        if (base !== type) return resolveColumnType(base, dialect);
     }
 
     if (type.kind === ReflectionKind.enum) {
