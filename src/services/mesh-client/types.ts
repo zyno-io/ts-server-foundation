@@ -1,6 +1,8 @@
 export interface RegisteredClient<TMeta> {
     clientId: string;
     nodeId: number;
+    connectionId?: string;
+    processId?: string;
     connectedAt: number;
     metadata: TMeta;
 }
@@ -15,15 +17,30 @@ export type RegisterResult =
     | { status: 'conflict'; ownerNodeId: number | null };
 
 export interface MeshClientRegistryBackend<TMeta> {
-    register(clientId: string, nodeId: number, metadata: TMeta, allowSupersede?: boolean): Promise<RegisterResult>;
-    reserve(clientId: string, nodeId: number, metadata: TMeta, allowSupersede?: boolean): Promise<RegisterResult>;
-    activate(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean>;
-    unregister(clientId: string, nodeId: number): Promise<boolean>;
-    updateMetadata(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean>;
+    register(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        allowSupersede?: boolean,
+        connectionId?: string,
+        processId?: string
+    ): Promise<RegisterResult>;
+    reserve(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        allowSupersede?: boolean,
+        connectionId?: string,
+        processId?: string
+    ): Promise<RegisterResult>;
+    activate(clientId: string, nodeId: number, metadata: TMeta, connectionId?: string): Promise<boolean>;
+    unregister(clientId: string, nodeId: number, connectionId?: string): Promise<boolean>;
+    updateMetadata(clientId: string, nodeId: number, metadata: TMeta, connectionId?: string): Promise<boolean>;
     getClient(clientId: string): Promise<RegisteredClient<TMeta> | undefined>;
     listClients(): Promise<RegisteredClient<TMeta>[]>;
     listClientsForNode(nodeId: number): Promise<RegisteredClient<TMeta>[]>;
     cleanupNode(nodeId: number): Promise<RegisteredClient<TMeta>[]>;
+    refreshNode?(nodeId: number): Promise<void>;
 }
 
 export class ClientNotFoundError extends Error {

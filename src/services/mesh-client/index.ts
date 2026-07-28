@@ -4,5 +4,7 @@ export { MeshClientService } from './mesh-client-service';
 export type { MeshClientServiceOptions } from './mesh-client-service';
 export { MeshSrpcServer } from './mesh-srpc-server';
 export type { MeshSrpcServerOptions } from './mesh-srpc-server';
+export { MeshRemoteSrpcConnection } from './mesh-srpc-remote-connection';
+export type { MeshRemoteConnectionTransport, MeshRemoteSrpcConnectionOptions } from './mesh-srpc-remote-connection';
 export { ClientDisconnectedError, ClientInvocationError, ClientNotFoundError } from './types';
 export type { MeshClientRegistryBackend, RegisteredClient, RegisterResult } from './types';

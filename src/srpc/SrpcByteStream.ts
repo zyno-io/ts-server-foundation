@@ -22,12 +22,14 @@ interface IPendingReceiver {
 export interface IByteStream {
     [ByteStreamInfo]?: IByteStreamInfo;
     write(streamId: number, data: unknown): boolean | void | Promise<boolean | void>;
-    finish(streamId: number): void;
-    destroy(streamId: number, err?: unknown): void;
+    finish(streamId: number): boolean | void | Promise<boolean | void>;
+    destroy(streamId: number, err?: unknown): boolean | void | Promise<boolean | void>;
     attachDisconnectHandler(handler: () => void): void;
     detachDisconnectHandler(handler: () => void): void;
     getBufferedAmount(): number;
     parentStreamId: string;
+    allocateSenderId?(): number;
+    attachReceiver?(streamId: number): void | Promise<void>;
 }
 
 export interface IByteStreamable {
@@ -60,8 +62,12 @@ export class SrpcByteStream extends Duplex {
 
         const info = stream.byteStream[ByteStreamInfo]!;
         if (id === 0) {
-            this._id = info.nextId;
-            info.nextId += info.step;
+            if (stream.byteStream.allocateSenderId) {
+                this._id = stream.byteStream.allocateSenderId();
+            } else {
+                this._id = info.nextId;
+                info.nextId += info.step;
+            }
             this.isSender = true;
             info.senders.set(this._id, this);
         } else {
@@ -70,6 +76,11 @@ export class SrpcByteStream extends Duplex {
             info.receivers.set(this._id, this);
             this.flushPendingReceiver(info);
             this.on('end', () => this.cleanup());
+            if (stream.byteStream.attachReceiver) {
+                Promise.resolve(stream.byteStream.attachReceiver(this._id)).catch(error => {
+                    this.destroy(error instanceof Error ? error : new Error(String(error)));
+                });
+            }
         }
     }
 
@@ -93,6 +104,30 @@ export class SrpcByteStream extends Duplex {
 
     static createSender(stream: IByteStreamable): SrpcByteStream {
         return new SrpcByteStream(stream);
+    }
+
+    static reserveSenderIds(stream: IByteStreamable, count: number): number[] {
+        if (!Number.isSafeInteger(count) || count < 1 || count > 65_536) {
+            throw new Error('Invalid sRPC byte stream ID reservation count');
+        }
+        const info = SrpcByteStream.ensureInfo(stream);
+        const ids: number[] = [];
+        for (let i = 0; i < count; i++) {
+            if (!Number.isSafeInteger(info.nextId) || info.nextId <= 0) {
+                throw new Error('sRPC byte stream ID space exhausted');
+            }
+            ids.push(info.nextId);
+            info.nextId += info.step;
+        }
+        return ids;
+    }
+
+    static hasReceiver(stream: IByteStreamable, id: number): boolean {
+        return SrpcByteStream.ensureInfo(stream).receivers.has(id);
+    }
+
+    static hasSender(stream: IByteStreamable, id: number): boolean {
+        return SrpcByteStream.ensureInfo(stream).senders.has(id);
     }
 
     static writeReceiver(stream: IByteStreamable, id: number, data: unknown): void {
@@ -183,8 +218,10 @@ export class SrpcByteStream extends Duplex {
     _final(callback: (error?: Error | null) => void): void {
         try {
             this.localFinished = true;
-            this.parent.byteStream.finish(this._id);
-            callback();
+            Promise.resolve(this.parent.byteStream.finish(this._id)).then(
+                () => callback(),
+                error => callback(error instanceof Error ? error : new Error(String(error)))
+            );
         } catch (error) {
             callback(error instanceof Error ? error : new Error(String(error)));
         }
@@ -193,7 +230,23 @@ export class SrpcByteStream extends Duplex {
     _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
         const normalSenderFinish = this.isSender && this.localFinished && !error;
         if (!this.remotelyDestroyed && !normalSenderFinish && (this.isSender || !this.remoteFinished)) {
-            this.parent.byteStream.destroy(this._id, error ?? undefined);
+            try {
+                Promise.resolve(this.parent.byteStream.destroy(this._id, error ?? undefined)).then(
+                    () => {
+                        this.cleanup();
+                        callback(error);
+                    },
+                    destroyError => {
+                        this.cleanup();
+                        callback(destroyError instanceof Error ? destroyError : new Error(String(destroyError)));
+                    }
+                );
+                return;
+            } catch (destroyError) {
+                this.cleanup();
+                callback(destroyError instanceof Error ? destroyError : new Error(String(destroyError)));
+                return;
+            }
         }
         this.cleanup();
         callback(error);

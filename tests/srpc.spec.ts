@@ -140,6 +140,17 @@ describe('srpc', () => {
             assert.equal(client.isConnected, true);
             assert.equal(stream.clientId, 'client-1');
             assert.deepEqual(stream.meta, { tenant: 'alpha' });
+            assert.equal(await harness.server.resolveClient('client-1'), stream);
+            assert.deepEqual(await harness.server.listClients(), [stream]);
+            assert.equal(await harness.server.updateClientMetadata(stream, { region: 'test' }), true);
+            assert.deepEqual(stream.meta, { tenant: 'alpha', region: 'test' });
+
+            const broadcasts: string[] = [];
+            harness.server.registerBroadcastHandler('refresh', (data: { key: string }) => {
+                broadcasts.push(data.key);
+            });
+            await harness.server.broadcast('refresh', { key: 'local' });
+            assert.deepEqual(broadcasts, ['local']);
 
             const echo = await client.invoke('uEcho', { message: 'hello' });
             assert.deepEqual(echo, { message: 'Echo: hello' });

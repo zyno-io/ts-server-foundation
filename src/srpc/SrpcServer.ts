@@ -18,6 +18,7 @@ import {
     RequestKeys,
     ResponseData,
     SrpcDisconnectCause,
+    SrpcConnection,
     SrpcError,
     SrpcMeta,
     SrpcStream,
@@ -65,19 +66,23 @@ export class SrpcServer<
             handler: TSrpcMessageHandlerFnOrClass<SrpcStream<TMeta>, unknown, unknown>;
         }
     >();
+    private readonly broadcastHandlers = new Map<string, Set<(data: unknown, senderInstanceId: number) => void | Promise<void>>>();
     private readonly blockedClientRequests = new WeakSet<SrpcStream<TMeta>>();
     private readonly pendingClientRequests = new WeakMap<SrpcStream<TMeta>, TClientOutput[]>();
     private readonly lateReplyTombstonesByStream = new WeakMap<SrpcStream<TMeta>, Map<string, number>>();
     private readonly cleanupUpgradeHandler?: () => void;
     private readonly inactivityCheckInterval: ReturnType<typeof setInterval>;
-    private clientAuthorizer?: (metadata: any, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>;
+    private clientAuthorizer?: (
+        metadata: Record<string, unknown>,
+        req: IncomingMessage
+    ) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>;
     private clientKeyFetcher?: (clientId: string) => Promise<false | string> | false | string;
 
     readonly streamsById = new Map<string, SrpcStream<TMeta>>();
     readonly streamsByClientId = new Map<string, SrpcStream<TMeta>>();
     protected readonly pendingStreamsByClientId = new Map<string, SrpcStream<TMeta>>();
 
-    constructor(private readonly options: ISrpcServerOptions<TClientOutput, TServerOutput>) {
+    constructor(protected readonly options: ISrpcServerOptions<TClientOutput, TServerOutput>) {
         this.logger = createLogger(options.logger, options.logLevel);
         this.wsServer.on('connection', (ws, request) => this.attachConnection(ws, request));
 
@@ -181,6 +186,14 @@ export class SrpcServer<
             connectedAt: Date.now(),
             isActivated: false,
             lastPingAt: Date.now(),
+            get connected() {
+                return ws.readyState === WebSocket.OPEN;
+            },
+            close: async reason => {
+                if (stream.lastPingAt < 0) return;
+                this.cleanupStream(stream, 'disconnect');
+                if (reason && ws.readyState === WebSocket.OPEN) ws.close(1000, reason.slice(0, 123));
+            },
             byteStream: {
                 parentStreamId: streamId,
                 write: (substreamId, chunk) =>
@@ -338,7 +351,7 @@ export class SrpcServer<
         for (const message of pending) this.handleStreamDataReceived(stream, message);
     }
 
-    private handleByteSubstreamOperation(stream: SrpcStream<TMeta>, op: NonNullable<TClientOutput['byteStreamOperation']>): void {
+    protected handleByteSubstreamOperation(stream: SrpcStream<TMeta>, op: NonNullable<TClientOutput['byteStreamOperation']>): void {
         if (op.write) SrpcByteStream.writeReceiver(stream, op.streamId, op.write.chunk);
         else if (op.finish) SrpcByteStream.finishReceiver(stream, op.streamId);
         else if (op.destroy) SrpcByteStream.destroySubstream(stream, op.streamId, op.destroy.error);
@@ -451,14 +464,14 @@ export class SrpcServer<
         return request.socket.remoteAddress ?? '127.0.0.1';
     }
 
-    private writeToStream(stream: SrpcStream<TMeta>, data: TServerOutput): boolean {
+    protected writeToStream(stream: SrpcStream<TMeta>, data: TServerOutput): boolean {
         if (stream.$ws.readyState !== WebSocket.OPEN) return false;
         stream.$ws.send(encodeSrpcMessage(this.options.serverMessage, data));
         notifySrpcObservers({ type: 'message', stream, direction: 'outbound', data, at: Date.now() });
         return true;
     }
 
-    private writeToStreamAsync(stream: SrpcStream<TMeta>, data: TServerOutput): Promise<void> {
+    protected writeToStreamAsync(stream: SrpcStream<TMeta>, data: TServerOutput): Promise<void> {
         if (stream.$ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Failed to send SRPC message: not connected'));
         const encoded = encodeSrpcMessage(this.options.serverMessage, data);
         return new Promise((resolve, reject) => {
@@ -482,7 +495,9 @@ export class SrpcServer<
         stream.$ws.close(closeCodeForCause(cause), message.slice(0, 123));
     }
 
-    setClientAuthorizer(authorizer: (metadata: any, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>): void {
+    setClientAuthorizer(
+        authorizer: (metadata: Record<string, unknown>, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>
+    ): void {
         this.clientAuthorizer = authorizer;
     }
 
@@ -507,6 +522,43 @@ export class SrpcServer<
 
     registerDisconnectHandler(handler: (stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause) => void): void {
         this.streamDisconnectionHandlers.add(handler);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    registerBroadcastHandler(type: string, handler: (data: any, senderInstanceId: number) => void | Promise<void>): void {
+        const handlers = this.broadcastHandlers.get(type) ?? new Set();
+        handlers.add(handler as (data: unknown, senderInstanceId: number) => void | Promise<void>);
+        this.broadcastHandlers.set(type, handlers);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async broadcast(type: string, data: any, options?: { skipSelf?: boolean }): Promise<void> {
+        if (options?.skipSelf) return;
+        const handlers = this.broadcastHandlers.get(type);
+        if (!handlers) return;
+        await Promise.all([...handlers].map(handler => handler(data, 0)));
+    }
+
+    async resolveClient(clientId: string): Promise<SrpcConnection<TMeta> | undefined> {
+        return this.streamsByClientId.get(clientId);
+    }
+
+    async listClients(): Promise<SrpcConnection<TMeta>[]> {
+        return [...this.streamsByClientId.values()];
+    }
+
+    async disconnectClient(streamOrClientId: SrpcStream<TMeta> | string, reason?: string): Promise<boolean> {
+        const stream = typeof streamOrClientId === 'string' ? this.streamsByClientId.get(streamOrClientId) : streamOrClientId;
+        if (!stream || this.streamsById.get(stream.id) !== stream) return false;
+        await stream.close(reason);
+        return true;
+    }
+
+    async updateClientMetadata(streamOrClientId: SrpcStream<TMeta> | string, metadata: Partial<TMeta>): Promise<boolean> {
+        const stream = typeof streamOrClientId === 'string' ? this.streamsByClientId.get(streamOrClientId) : streamOrClientId;
+        if (!stream || this.streamsById.get(stream.id) !== stream) return false;
+        Object.assign(stream.meta, metadata);
+        return true;
     }
 
     invoke<P extends InvokePrefixes<TServerOutput, TClientOutput>>(
@@ -560,6 +612,30 @@ export class SrpcServer<
                 reject(new Error('Failed to send request: not connected'));
             }
         });
+    }
+
+    protected encodeMeshInvokeRequest(prefix: string, data: unknown): Uint8Array {
+        return encodeSrpcMessage(this.options.serverMessage, { [`${prefix}Request`]: data } as unknown as TServerOutput);
+    }
+
+    protected decodeMeshInvokeRequest(prefix: string, data: Uint8Array): unknown {
+        return (this.options.serverMessage.decode(data) as Record<string, unknown>)[`${prefix}Request`];
+    }
+
+    protected encodeMeshInvokeResponse(prefix: string, data: unknown): Uint8Array {
+        return encodeSrpcMessage(this.options.clientMessage, { [`${prefix}Response`]: data } as unknown as TClientOutput);
+    }
+
+    protected decodeMeshInvokeResponse(prefix: string, data: Uint8Array): unknown {
+        return (this.options.clientMessage.decode(data) as Record<string, unknown>)[`${prefix}Response`];
+    }
+
+    protected reserveByteStreamSenderIds(stream: SrpcStream<TMeta>, count: number): number[] {
+        return SrpcByteStream.reserveSenderIds(stream, count);
+    }
+
+    protected writeByteStreamOperation(stream: SrpcStream<TMeta>, operation: NonNullable<TServerOutput['byteStreamOperation']>): Promise<void> {
+        return this.writeToStreamAsync(stream, { byteStreamOperation: operation } as TServerOutput);
     }
 
     private addLateReplyTombstone(stream: SrpcStream<TMeta>, requestId: string): void {

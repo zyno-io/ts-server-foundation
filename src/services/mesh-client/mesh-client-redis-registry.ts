@@ -32,6 +32,8 @@ local setKeyPrefix = ARGV[5]
 local connectedAt = tonumber(ARGV[6])
 local allowSupersede = ARGV[7] == "1"
 local state = ARGV[8]
+local connectionId = ARGV[9]
+local processId = ARGV[10]
 local ttl = ${KEY_TTL_SECONDS}
 
 -- Check if client already exists on a different node
@@ -56,6 +58,8 @@ local value = cjson.encode({
     nodeId = tonumber(nodeId),
     connectedAt = connectedAt,
     state = state,
+    connectionId = connectionId,
+    processId = processId,
     hasMetadata = hasMetadata,
     metadata = cjson.decode(metadataJson)
 })
@@ -81,6 +85,7 @@ local clientId = ARGV[1]
 local nodeId = ARGV[2]
 local metadataJson = ARGV[3]
 local hasMetadata = ARGV[4] == "1"
+local connectionId = ARGV[5]
 local ttl = ${KEY_TTL_SECONDS}
 
 local existing = redis.call("hget", clientsKey, clientId)
@@ -92,11 +97,16 @@ local parsed = cjson.decode(existing)
 if tostring(parsed.nodeId) ~= nodeId then
     return 0
 end
+if connectionId ~= "" and tostring(parsed.connectionId or "") ~= connectionId then
+    return 0
+end
 
 local value = cjson.encode({
     nodeId = parsed.nodeId,
     connectedAt = parsed.connectedAt,
     state = "active",
+    connectionId = parsed.connectionId,
+    processId = parsed.processId,
     hasMetadata = hasMetadata,
     metadata = cjson.decode(metadataJson)
 })
@@ -112,6 +122,7 @@ local clientsKey = KEYS[1]
 local setKey = KEYS[2]
 local clientId = ARGV[1]
 local nodeId = ARGV[2]
+local connectionId = ARGV[3]
 
 local existing = redis.call("hget", clientsKey, clientId)
 if not existing then
@@ -120,6 +131,9 @@ end
 
 local parsed = cjson.decode(existing)
 if tostring(parsed.nodeId) ~= nodeId then
+    return 0
+end
+if connectionId ~= "" and tostring(parsed.connectionId or "") ~= connectionId then
     return 0
 end
 
@@ -137,6 +151,7 @@ local clientId = ARGV[1]
 local nodeId = ARGV[2]
 local metadataJson = ARGV[3]
 local hasMetadata = ARGV[4] == "1"
+local connectionId = ARGV[5]
 local ttl = ${KEY_TTL_SECONDS}
 
 local existing = redis.call("hget", clientsKey, clientId)
@@ -148,11 +163,16 @@ local parsed = cjson.decode(existing)
 if tostring(parsed.nodeId) ~= nodeId then
     return 0
 end
+if connectionId ~= "" and tostring(parsed.connectionId or "") ~= connectionId then
+    return 0
+end
 
 local value = cjson.encode({
     nodeId = parsed.nodeId,
     connectedAt = parsed.connectedAt,
     state = parsed.state or "active",
+    connectionId = parsed.connectionId,
+    processId = parsed.processId,
     hasMetadata = hasMetadata,
     metadata = cjson.decode(metadataJson)
 })
@@ -185,6 +205,17 @@ redis.call("del", setKey)
 return removed
 `;
 
+const REFRESH_NODE_SCRIPT = `
+local clientsKey = KEYS[1]
+local setKey = KEYS[2]
+local ttl = tonumber(ARGV[1])
+if redis.call("exists", setKey) == 1 then
+    redis.call("expire", setKey, ttl)
+    redis.call("expire", clientsKey, ttl)
+end
+return 1
+`;
+
 // --- Redis Client Type ---
 
 type ClientRedisClient = ReturnType<typeof createRedis>['client'] & {
@@ -198,12 +229,30 @@ type ClientRedisClient = ReturnType<typeof createRedis>['client'] & {
         setKeyPrefix: string,
         connectedAt: string,
         allowSupersede: string,
-        state: string
+        state: string,
+        connectionId: string,
+        processId: string
     ) => Promise<number>;
-    MC_ACTIVATE: (clientsKey: string, setKey: string, clientId: string, nodeId: string, metadataJson: string, hasMetadata: string) => Promise<number>;
-    MC_UNREGISTER: (clientsKey: string, setKey: string, clientId: string, nodeId: string) => Promise<number>;
-    MC_UPDATE_METADATA: (clientsKey: string, clientId: string, nodeId: string, metadataJson: string, hasMetadata: string) => Promise<number>;
+    MC_ACTIVATE: (
+        clientsKey: string,
+        setKey: string,
+        clientId: string,
+        nodeId: string,
+        metadataJson: string,
+        hasMetadata: string,
+        connectionId: string
+    ) => Promise<number>;
+    MC_UNREGISTER: (clientsKey: string, setKey: string, clientId: string, nodeId: string, connectionId: string) => Promise<number>;
+    MC_UPDATE_METADATA: (
+        clientsKey: string,
+        clientId: string,
+        nodeId: string,
+        metadataJson: string,
+        hasMetadata: string,
+        connectionId: string
+    ) => Promise<number>;
     MC_CLEANUP_NODE: (clientsKey: string, setKey: string, nodeId: string) => Promise<string[]>;
+    MC_REFRESH_NODE: (clientsKey: string, setKey: string, ttl: string) => Promise<number>;
 };
 
 let clientRedis: { client: ClientRedisClient; prefix: string } | null = null;
@@ -216,6 +265,7 @@ function getClientRedis(): { client: ClientRedisClient; prefix: string } {
         client.defineCommand('MC_UNREGISTER', { lua: UNREGISTER_SCRIPT, numberOfKeys: 2 });
         client.defineCommand('MC_UPDATE_METADATA', { lua: UPDATE_METADATA_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('MC_CLEANUP_NODE', { lua: CLEANUP_NODE_SCRIPT, numberOfKeys: 2 });
+        client.defineCommand('MC_REFRESH_NODE', { lua: REFRESH_NODE_SCRIPT, numberOfKeys: 2 });
         const nextClient = client as ClientRedisClient;
         registerRedisStateReset(nextClient, () => {
             if (clientRedis?.client === nextClient) clientRedis = null;
@@ -274,7 +324,9 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
         nodeId: number,
         metadata: TMeta,
         allowSupersede: boolean,
-        state: MeshClientRegistrationState
+        state: MeshClientRegistrationState,
+        connectionId?: string,
+        processId?: string
     ): Promise<RegisterResult> {
         const { client } = getClientRedis();
         const encoded = this.encodeMetadata(metadata);
@@ -288,7 +340,9 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
             this.nodeSetKeyPrefix(),
             String(Date.now()),
             allowSupersede ? '1' : '0',
-            state
+            state,
+            connectionId ?? '',
+            processId ?? ''
         );
         if (result === -2) {
             // Conflict: the owner may have disappeared between the script
@@ -300,15 +354,29 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
         return { status: 'ok', supersededNodeId: result >= 0 ? result : null };
     }
 
-    async register(clientId: string, nodeId: number, metadata: TMeta, allowSupersede = true): Promise<RegisterResult> {
-        return this.registerWithState(clientId, nodeId, metadata, allowSupersede, 'active');
+    async register(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        allowSupersede = true,
+        connectionId?: string,
+        processId?: string
+    ): Promise<RegisterResult> {
+        return this.registerWithState(clientId, nodeId, metadata, allowSupersede, 'active', connectionId, processId);
     }
 
-    async reserve(clientId: string, nodeId: number, metadata: TMeta, allowSupersede = true): Promise<RegisterResult> {
-        return this.registerWithState(clientId, nodeId, metadata, allowSupersede, 'pending');
+    async reserve(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        allowSupersede = true,
+        connectionId?: string,
+        processId?: string
+    ): Promise<RegisterResult> {
+        return this.registerWithState(clientId, nodeId, metadata, allowSupersede, 'pending', connectionId, processId);
     }
 
-    async activate(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean> {
+    async activate(clientId: string, nodeId: number, metadata: TMeta, connectionId?: string): Promise<boolean> {
         const { client } = getClientRedis();
         const encoded = this.encodeMetadata(metadata);
         const result = await client.MC_ACTIVATE(
@@ -317,25 +385,42 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
             clientId,
             String(nodeId),
             encoded.metadataJson,
-            encoded.hasMetadata
+            encoded.hasMetadata,
+            connectionId ?? ''
         );
         return result === 1;
     }
 
-    async unregister(clientId: string, nodeId: number): Promise<boolean> {
+    async unregister(clientId: string, nodeId: number, connectionId?: string): Promise<boolean> {
         const { client } = getClientRedis();
-        const result = await client.MC_UNREGISTER(this.clientsKey(), this.nodeSetKey(nodeId), clientId, String(nodeId));
+        const result = await client.MC_UNREGISTER(this.clientsKey(), this.nodeSetKey(nodeId), clientId, String(nodeId), connectionId ?? '');
         return result === 1;
     }
 
-    async updateMetadata(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean> {
+    async updateMetadata(clientId: string, nodeId: number, metadata: TMeta, connectionId?: string): Promise<boolean> {
         const { client } = getClientRedis();
         const encoded = this.encodeMetadata(metadata);
-        const result = await client.MC_UPDATE_METADATA(this.clientsKey(), clientId, String(nodeId), encoded.metadataJson, encoded.hasMetadata);
+        const result = await client.MC_UPDATE_METADATA(
+            this.clientsKey(),
+            clientId,
+            String(nodeId),
+            encoded.metadataJson,
+            encoded.hasMetadata,
+            connectionId ?? ''
+        );
         return result === 1;
     }
 
-    private tryParse(raw: string): { nodeId: number; connectedAt: number; metadata: TMeta; state: MeshClientRegistrationState } | undefined {
+    private tryParse(raw: string):
+        | {
+              nodeId: number;
+              connectionId?: string;
+              processId?: string;
+              connectedAt: number;
+              metadata: TMeta;
+              state: MeshClientRegistrationState;
+          }
+        | undefined {
         try {
             const parsed = JSON.parse(raw) as {
                 nodeId: number;
@@ -343,9 +428,13 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
                 hasMetadata?: boolean;
                 metadata: TMeta;
                 state?: MeshClientRegistrationState;
+                connectionId?: string;
+                processId?: string;
             };
             return {
                 nodeId: parsed.nodeId,
+                connectionId: parsed.connectionId,
+                processId: parsed.processId,
                 connectedAt: parsed.connectedAt,
                 metadata: parsed.hasMetadata === false ? (undefined as TMeta) : parsed.metadata,
                 state: parsed.state ?? 'active'
@@ -359,6 +448,8 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
         clientId: string,
         parsed: {
             nodeId: number;
+            connectionId?: string;
+            processId?: string;
             connectedAt: number;
             metadata: TMeta;
             state: MeshClientRegistrationState;
@@ -370,6 +461,8 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
         return {
             clientId,
             nodeId: parsed.nodeId,
+            connectionId: parsed.connectionId,
+            processId: parsed.processId,
             connectedAt: parsed.connectedAt,
             metadata: parsed.metadata
         };
@@ -436,11 +529,18 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
                 removed.push({
                     clientId: result[i + 1],
                     nodeId: parsed.nodeId,
+                    connectionId: parsed.connectionId,
+                    processId: parsed.processId,
                     connectedAt: parsed.connectedAt,
                     metadata: parsed.metadata
                 });
             }
         }
         return removed;
+    }
+
+    async refreshNode(nodeId: number): Promise<void> {
+        const { client } = getClientRedis();
+        await client.MC_REFRESH_NODE(this.clientsKey(), this.nodeSetKey(nodeId), String(KEY_TTL_SECONDS));
     }
 }

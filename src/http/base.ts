@@ -224,6 +224,10 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
         return typeof configured === 'number' ? configured : Number(configured);
     }
 
+    getAddress(): ReturnType<Server['address']> {
+        return this.server?.address() ?? null;
+    }
+
     private shouldLogStartupDetails(): boolean {
         return this.options.config.APP_ENV !== 'test';
     }

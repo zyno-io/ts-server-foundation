@@ -14,6 +14,7 @@ import {
     RequestKeys,
     ResponseData,
     SrpcDisconnectCause,
+    SrpcError,
     SrpcMessageFns,
     SrpcMeta,
     encodeSrpcMessage
@@ -251,7 +252,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             return;
         }
         this.requestQueue.delete(requestId);
-        if (message.error) queueItem.reject(new Error(message.error));
+        if (message.error) queueItem.reject(new SrpcError(message.error, message.userError));
         else queueItem.resolve(message);
     }
 
@@ -267,7 +268,18 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                     [handlerMeta.resultType]: result
                 } as unknown as TClientInput);
             } catch (error) {
-                this.writeMessage({ requestId, reply: true, error: String(error) } as TClientInput);
+                const isUserError =
+                    (error instanceof SrpcError && error.isUserError) ||
+                    (typeof error === 'object' &&
+                        error !== null &&
+                        (error as { name?: unknown }).name === 'SrpcError' &&
+                        (error as { isUserError?: unknown }).isUserError === true);
+                this.writeMessage({
+                    requestId,
+                    reply: true,
+                    error: isUserError && error instanceof Error ? error.message : String(error),
+                    userError: isUserError
+                } as TClientInput);
             }
             return;
         }

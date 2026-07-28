@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { finished } from 'node:stream/promises';
 import { after, before, describe, it, mock } from 'node:test';
 
 import {
@@ -22,7 +24,9 @@ import {
     MeshSrpcServer,
     setCurrentApp,
     sleepMs,
+    SrpcByteStream,
     SrpcClient,
+    SrpcError,
     withMutex
 } from '../src';
 import type { BaseMessage, SrpcMessageFns, SrpcMeta } from '../src';
@@ -64,6 +68,21 @@ const JsonMessage: SrpcMessageFns<BaseMessage> = {
         return JSON.parse(Buffer.from(input).toString('utf8')) as BaseMessage;
     }
 };
+
+interface DirectClientMessage extends BaseMessage {
+    dConsumeResponse?: { bytes: number };
+    dProduceResponse?: { streamId: number };
+    dFailResponse?: { ok: boolean };
+}
+
+interface DirectServerMessage extends BaseMessage {
+    dConsumeRequest?: { streamId: number };
+    dProduceRequest?: { content: string };
+    dFailRequest?: { message: string };
+}
+
+const DirectClientCodec = createBinaryJsonCodec<DirectClientMessage>();
+const DirectServerCodec = createBinaryJsonCodec<DirectServerMessage>();
 
 describe('Redis-backed services', { skip: redisSkip }, () => {
     let app: App;
@@ -231,6 +250,14 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         );
         assert.equal(await first.activate('pending-client', { role: 'active' }), true);
         assert.equal((await first.getClient('pending-client'))?.metadata.role, 'active');
+
+        await first.register('fenced-client', { role: 'old' }, true, 'connection-old');
+        await first.register('fenced-client', { role: 'current' }, true, 'connection-current');
+        assert.equal(await first.unregister('fenced-client', 'connection-old'), false);
+        assert.equal(await first.updateMetadata('fenced-client', { role: 'stale-update' }, 'connection-old'), false);
+        assert.equal((await first.getClient('fenced-client'))?.connectionId, 'connection-current');
+        assert.equal((await first.getClient('fenced-client'))?.metadata.role, 'current');
+        assert.equal(await first.unregister('fenced-client', 'connection-current'), true);
     });
 
     it('recreates default Redis helper clients after their owning app stops', async () => {
@@ -372,6 +399,111 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         }
     });
 
+    it('routes transparent unary calls and byte streams over direct mesh links', async () => {
+        const key = `mesh-srpc-direct-${Date.now()}-${process.pid}`;
+        const firstHttp = createServer();
+        const secondHttp = createServer();
+        await Promise.all([listen(firstHttp), listen(secondHttp)]);
+        const firstPort = (firstHttp.address() as AddressInfo).port;
+        const secondPort = (secondHttp.address() as AddressInfo).port;
+        const linkSecret = 'mesh-srpc-direct-integration-secret';
+        const first = new MeshSrpcServer<SrpcMeta, DirectClientMessage, DirectServerMessage>({
+            logger: createLogger('FirstDirectMeshSrpc'),
+            clientMessage: DirectClientCodec,
+            serverMessage: DirectServerCodec,
+            wsPath: '/direct-client',
+            httpServer: firstHttp,
+            logLevel: false,
+            meshKey: key,
+            meshOptions,
+            meshLink: {
+                secret: linkSecret,
+                advertiseUrl: `ws://127.0.0.1:${firstPort}/_tsf/direct-mesh`
+            }
+        });
+        const second = new MeshSrpcServer<SrpcMeta, DirectClientMessage, DirectServerMessage>({
+            logger: createLogger('SecondDirectMeshSrpc'),
+            clientMessage: DirectClientCodec,
+            serverMessage: DirectServerCodec,
+            wsPath: '/direct-client',
+            httpServer: secondHttp,
+            logLevel: false,
+            meshKey: key,
+            meshOptions,
+            meshLink: {
+                secret: linkSecret,
+                advertiseUrl: `ws://127.0.0.1:${secondPort}/_tsf/direct-mesh`
+            }
+        });
+        first.setClientAuthorizer(() => true);
+        second.setClientAuthorizer(() => true);
+        const client = new SrpcClient<DirectClientMessage, DirectServerMessage>(
+            createLogger('DirectMeshSrpcClient'),
+            `ws://127.0.0.1:${secondPort}/direct-client`,
+            DirectClientCodec,
+            DirectServerCodec,
+            'direct-client',
+            {},
+            'unused',
+            { enableReconnect: false }
+        );
+        client.registerMessageHandler('dConsume', data => {
+            const receiver = SrpcByteStream.createReceiver(client, data.streamId);
+            let bytes = 0;
+            receiver.on('data', chunk => {
+                bytes += chunk.length;
+            });
+            return new Promise((resolve, reject) => {
+                receiver.once('end', () => resolve({ bytes }));
+                receiver.once('error', reject);
+            });
+        });
+        client.registerMessageHandler('dProduce', data => {
+            const sender = SrpcByteStream.createSender(client);
+            sender.end(Buffer.from(data.content));
+            return { streamId: sender.id };
+        });
+        client.registerMessageHandler('dFail', data => {
+            throw new SrpcError(data.message, true);
+        });
+
+        try {
+            await first.meshStart();
+            await second.meshStart();
+            await client.connect();
+            await waitFor(async () => (await first.clientRegistry.getClient('direct-client')) !== undefined);
+
+            const connection = await first.resolveClient('direct-client');
+            assert.ok(connection);
+            assert.equal(first.streamsByClientId.has('direct-client'), false);
+
+            const sender = SrpcByteStream.createSender(connection);
+            const consumed = first.invoke(connection, 'dConsume', { streamId: sender.id });
+            sender.end(Buffer.from('cross-replica upload'));
+            await finished(sender, { readable: false });
+            assert.deepStrictEqual(await consumed, { bytes: Buffer.byteLength('cross-replica upload') });
+
+            const produced = await first.invoke(connection, 'dProduce', { content: 'cross-replica download' });
+            const receiver = SrpcByteStream.createReceiver(connection, produced.streamId);
+            const chunks: Buffer[] = [];
+            receiver.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            await finished(receiver, { writable: false });
+            assert.equal(Buffer.concat(chunks).toString(), 'cross-replica download');
+
+            await assert.rejects(
+                first.invoke(connection, 'dFail', { message: 'remote user error' }),
+                error => error instanceof SrpcError && error.isUserError === true && error.message === 'remote user error'
+            );
+        } finally {
+            client.disconnect();
+            await first.meshStop();
+            await second.meshStop();
+            first.close();
+            second.close();
+            await Promise.all([closeServer(firstHttp), closeServer(secondHttp)]);
+        }
+    });
+
     it('executes distributed methods locally and logs handler failures', async () => {
         const error = new Error('boom');
         const logger = { error: mock.fn() };
@@ -408,4 +540,37 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
         if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
         await sleepMs(10);
     }
+}
+
+function listen(server: Server): Promise<void> {
+    return new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+    });
+}
+
+function closeServer(server: Server): Promise<void> {
+    return new Promise((resolve, reject) => {
+        server.close(error => {
+            if (error) reject(error);
+            else resolve();
+        });
+    });
+}
+
+function createBinaryJsonCodec<T extends BaseMessage>(): SrpcMessageFns<T> {
+    return {
+        encode(message) {
+            return Buffer.from(
+                JSON.stringify(message, (_key, value) => (value instanceof Uint8Array ? { $bytes: Buffer.from(value).toString('base64') } : value))
+            );
+        },
+        decode(input) {
+            return JSON.parse(Buffer.from(input).toString('utf8'), (_key, value: unknown) => {
+                if (typeof value !== 'object' || value === null) return value;
+                const bytes = (value as { $bytes?: unknown }).$bytes;
+                return typeof bytes === 'string' ? Buffer.from(bytes, 'base64') : value;
+            }) as T;
+        }
+    };
 }

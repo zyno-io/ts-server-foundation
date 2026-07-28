@@ -26,11 +26,11 @@ export interface BaseMessage {
         spanId: string;
         traceFlags: number;
     };
-    pingPong?: {};
+    pingPong?: object;
     byteStreamOperation?: {
         streamId: number;
         write?: { chunk: Uint8Array };
-        finish?: {};
+        finish?: object;
         destroy?: { error?: string };
     };
 }
@@ -96,6 +96,79 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly connectedAt: number;
     isActivated: boolean;
     lastPingAt: number;
+    readonly connected: boolean;
+    close(reason?: string): Promise<void>;
+}
+
+/**
+ * Transport-neutral handle for an sRPC client connection.
+ *
+ * A handle is pinned to one connection generation (`id`). Implementations
+ * must not silently retarget it after the same client reconnects.
+ */
+export interface SrpcConnection<T = SrpcMeta> extends IByteStreamable {
+    readonly id: string;
+    readonly clientId: string;
+    readonly meta: T;
+    readonly connectedAt: number;
+    readonly connected: boolean;
+    close(reason?: string): Promise<void>;
+}
+
+export class SrpcClientNotFoundError extends Error {
+    constructor(clientId: string) {
+        super(`sRPC client not found: ${clientId}`);
+        this.name = 'SrpcClientNotFoundError';
+    }
+}
+
+export class SrpcStaleConnectionError extends Error {
+    constructor(clientId: string) {
+        super(`sRPC client connection is stale: ${clientId}`);
+        this.name = 'SrpcStaleConnectionError';
+    }
+}
+
+export class SrpcOwnerUnavailableError extends Error {
+    constructor(clientId: string, cause?: unknown) {
+        super(`sRPC client owner is unavailable: ${clientId}`, { cause });
+        this.name = 'SrpcOwnerUnavailableError';
+    }
+}
+
+export class SrpcIndeterminateDeliveryError extends Error {
+    constructor(clientId: string, cause?: unknown) {
+        super(`sRPC invocation delivery is indeterminate: ${clientId}`, { cause });
+        this.name = 'SrpcIndeterminateDeliveryError';
+    }
+}
+
+export class SrpcMeshProtocolError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'SrpcMeshProtocolError';
+    }
+}
+
+export class SrpcMeshAuthenticationError extends Error {
+    constructor(message = 'sRPC mesh peer authentication failed') {
+        super(message);
+        this.name = 'SrpcMeshAuthenticationError';
+    }
+}
+
+export class SrpcBackpressureError extends Error {
+    constructor(message = 'sRPC mesh backpressure limit exceeded') {
+        super(message);
+        this.name = 'SrpcBackpressureError';
+    }
+}
+
+export class SrpcStreamClosedError extends Error {
+    constructor(message = 'sRPC byte stream is closed') {
+        super(message);
+        this.name = 'SrpcStreamClosedError';
+    }
 }
 
 export type SrpcMessageHandlerFn<C, I, O> = (wrappedStream: C, data: I) => Promise<O> | O;

@@ -1,10 +1,16 @@
-import type { BaseMessage, ISrpcServerOptions, SrpcDisconnectCause, SrpcMeta, SrpcStream } from '../../srpc/types';
+import type { BaseMessage, ISrpcServerOptions, SrpcConnection, SrpcDisconnectCause, SrpcMeta, SrpcStream } from '../../srpc/types';
 import type { MeshBroadcastMap, MeshBroadcastOptions, MeshServiceOptions } from '../mesh';
 
+import { getCurrentApp, onServerBootstrap, onServerShutdownRequested } from '../../app';
+import { SrpcByteStream } from '../../srpc/SrpcByteStream';
+import { SrpcError, SrpcStaleConnectionError } from '../../srpc/types';
 import { SrpcServer } from '../../srpc/SrpcServer';
 import { createLogger } from '../logger';
+import { acquireMeshLinkRuntime, getMeshLinkProcessId, resolveMeshLinkAdvertiseUrl, type MeshLinkRuntime } from '../mesh-link';
 import { MeshClientRegistry } from './mesh-client-registry';
 import { MeshClientService } from './mesh-client-service';
+import { MeshRemoteSrpcConnection } from './mesh-srpc-remote-connection';
+import { MeshSrpcLinkController } from './mesh-srpc-link-controller';
 import { ClientDisconnectedError, type MeshClientRegistryBackend, type RegisteredClient } from './types';
 
 // --- Options ---
@@ -14,6 +20,16 @@ export interface MeshSrpcServerOptions<TMeta, TRegistryMeta = TMeta> {
     meshOptions?: MeshServiceOptions;
     registryBackend?: MeshClientRegistryBackend<TRegistryMeta>;
     extractMetadata?: (stream: SrpcStream<TMeta>) => TRegistryMeta;
+    meshLink?: {
+        advertiseUrl?: string;
+        path?: string;
+        secret?: string;
+        connectTimeoutMs?: number;
+        requestTimeoutMs?: number;
+        idleTimeoutMs?: number;
+        maxFrameBytes?: number;
+        maxBufferedBytes?: number;
+    };
 }
 
 // --- MeshSrpcServer ---
@@ -29,6 +45,16 @@ export class MeshSrpcServer<
     private meshClientService: MeshClientService<TRegistryMeta, TBroadcasts>;
     private meshLogger = createLogger(this);
     private extractMetadataFn?: (stream: SrpcStream<TMeta>) => TRegistryMeta;
+    private readonly meshKey: string;
+    private readonly meshLinkOptions: MeshSrpcServerOptions<TMeta, TRegistryMeta>['meshLink'];
+    private meshLinkRuntime?: MeshLinkRuntime;
+    private meshLinkController?: MeshSrpcLinkController<TMeta, TRegistryMeta>;
+    private unregisterMeshLinkRoute?: () => void;
+    private meshStartPromise?: Promise<void>;
+    private meshRunning = false;
+    private meshStopping = false;
+    private meshLinkRequestTimeoutMs = 30_000;
+    private readonly unregisterLifecycleHandlers: (() => void)[] = [];
 
     private connectedCallbacks = new Set<(clientId: string, metadata: TRegistryMeta) => void | Promise<void>>();
     private disconnectedCallbacks = new Set<(clientId: string, metadata: TRegistryMeta) => void | Promise<void>>();
@@ -50,6 +76,8 @@ export class MeshSrpcServer<
         super(options);
 
         this.extractMetadataFn = options.extractMetadata;
+        this.meshKey = options.meshKey;
+        this.meshLinkOptions = options.meshLink;
 
         // Cast needed: MeshClientServiceOptions doesn't carry TBroadcasts,
         // but the broadcast generic only affects registerBroadcastHandler/broadcast
@@ -102,6 +130,17 @@ export class MeshSrpcServer<
                 }
             }
         });
+
+        try {
+            const app = getCurrentApp();
+            this.unregisterLifecycleHandlers.push(
+                app.on(onServerBootstrap, () => this.meshStart()),
+                app.on(onServerShutdownRequested, () => this.meshStop())
+            );
+        } catch {
+            // Standalone servers using an explicit httpServer retain the
+            // idempotent meshStart()/meshStop() lifecycle.
+        }
     }
 
     ////////////////////////////////////////
@@ -134,7 +173,7 @@ export class MeshSrpcServer<
                 return true;
             }
 
-            const registered = await this.meshClientService.reserveClient(stream.clientId, metadata, allowSupersede);
+            const registered = await this.meshClientService.reserveClient(stream.clientId, metadata, allowSupersede, stream.id);
             if (!registered) {
                 this.meshLogger.warn('Rejecting stream due to cross-pod conflict', {
                     streamId: stream.id,
@@ -233,7 +272,7 @@ export class MeshSrpcServer<
                 if (stream.lastPingAt < 0 || this.streamsByClientId.get(stream.clientId) !== stream) {
                     return false;
                 }
-                return this.meshClientService.activateClient(stream.clientId, metadata);
+                return this.meshClientService.activateClient(stream.clientId, metadata, stream.id);
             });
 
             if (!activated) {
@@ -293,7 +332,8 @@ export class MeshSrpcServer<
 
             const hasMetadata = this.clientMetadata.has(stream.clientId);
             const metadata = this.clientMetadata.get(stream.clientId) as TRegistryMeta;
-            const removed = await this.meshClientService.unregisterClient(stream.clientId);
+            const removed = await this.meshClientService.unregisterClient(stream.clientId, stream.id);
+            this.meshLinkController?.invalidateConnection(stream.clientId, stream.id);
             if (removed && hasMetadata && publishedLifecycle) {
                 this.clientMetadata.delete(stream.clientId);
                 void this.enqueueClientCallback(stream.clientId, async () => {
@@ -344,7 +384,7 @@ export class MeshSrpcServer<
         // Do NOT route through meshClientService.updateClientMetadata here -
         // that would loop back into clientUpdateMetaFn -> stream.meta -> proxy.
         void this.enqueueClientRegistry(stream.clientId, async () => {
-            await this.clientRegistry.updateMetadata(stream.clientId, metadata);
+            await this.clientRegistry.updateMetadata(stream.clientId, metadata, stream.id);
         });
     }
 
@@ -399,19 +439,43 @@ export class MeshSrpcServer<
         return this.meshClientService.clientRegistry;
     }
 
+    get startupState(): 'stopped' | 'starting' | 'ready' | 'draining' {
+        if (this.meshStopping) return 'draining';
+        if (this.meshStartPromise) return 'starting';
+        return this.meshRunning ? 'ready' : 'stopped';
+    }
+
+    ready(): Promise<void> {
+        return this.meshStart();
+    }
+
     /**
      * Update metadata for a client, regardless of which node owns it.
      * Routes through the mesh to the owning node so that stream.meta
      * reflects the change immediately and the proxy auto-syncs to Redis.
      * For local streams, you can also mutate stream.meta directly.
      */
-    async updateClientMetadata(clientId: string, metadata: TRegistryMeta): Promise<boolean> {
+    override async updateClientMetadata(
+        connectionOrClientId: SrpcConnection<TMeta> | string,
+        metadata: TRegistryMeta | Partial<TMeta>
+    ): Promise<boolean> {
+        const clientId = typeof connectionOrClientId === 'string' ? connectionOrClientId : connectionOrClientId.clientId;
+        const connection = typeof connectionOrClientId === 'string' ? await this.resolveClient(clientId) : connectionOrClientId;
+        if (!connection) return false;
+        if (connection instanceof MeshRemoteSrpcConnection) {
+            if (!this.meshLinkController) throw new SrpcStaleConnectionError(clientId);
+            await this.meshLinkController.updateMetadata(connection, metadata as TRegistryMeta);
+            Object.assign(connection.meta, metadata);
+            return true;
+        }
+        if (this.streamsByClientId.get(clientId) !== connection) throw new SrpcStaleConnectionError(clientId);
+
         // Set clientMetadata eagerly so the proxy's deferred syncStreamMeta
         // sees shallowChanged=false and skips the redundant Redis write.
         const previous = this.clientMetadata.get(clientId);
-        this.clientMetadata.set(clientId, snapshotMetadata(metadata));
+        this.clientMetadata.set(clientId, snapshotMetadata(metadata as TRegistryMeta));
 
-        const updated = await this.meshClientService.updateClientMetadata(clientId, metadata);
+        const updated = await this.meshClientService.updateClientMetadata(clientId, metadata as TRegistryMeta);
         if (!updated) {
             // Restore on failure
             if (previous !== undefined) {
@@ -446,21 +510,119 @@ export class MeshSrpcServer<
         return this.meshClientService.broadcast(type, data, options);
     }
 
+    override async resolveClient(clientId: string): Promise<SrpcConnection<TMeta> | undefined> {
+        const local = this.streamsByClientId.get(clientId);
+        if (local) return local;
+        if (!this.meshLinkController) return undefined;
+        return this.meshLinkController.resolveClient(clientId);
+    }
+
+    override async listClients(): Promise<SrpcConnection<TMeta>[]> {
+        if (!this.meshLinkController) return super.listClients();
+        return this.meshLinkController.listClients();
+    }
+
+    override async disconnectClient(connectionOrClientId: SrpcConnection<TMeta> | string, reason?: string): Promise<boolean> {
+        const connection = typeof connectionOrClientId === 'string' ? await this.resolveClient(connectionOrClientId) : connectionOrClientId;
+        if (!connection) return false;
+        if (connection instanceof MeshRemoteSrpcConnection) {
+            await connection.close(reason);
+            return true;
+        }
+        if (!('lastPingAt' in connection)) throw new SrpcStaleConnectionError(connection.clientId);
+        return super.disconnectClient(connection as SrpcStream<TMeta>, reason);
+    }
+
     /**
      * Invoke a client method across any node in the mesh.
      * Overloaded: when called with a stream, delegates to SrpcServer.invoke.
      * When called with a clientId string, routes through the mesh.
      */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    override invoke(streamOrClientId: SrpcStream<TMeta> | string, prefix: any, data: any, timeoutMs?: number): Promise<any> {
-        if (typeof streamOrClientId === 'string') {
-            return this.meshClientService.invoke(streamOrClientId, prefix, data, timeoutMs);
+    override async invoke(connectionOrClientId: SrpcConnection<TMeta> | string, prefix: any, data: any, timeoutMs = 30_000): Promise<any> {
+        let connection: SrpcConnection<TMeta> | undefined;
+        try {
+            connection = typeof connectionOrClientId === 'string' ? await this.resolveClient(connectionOrClientId) : connectionOrClientId;
+        } catch (error) {
+            if (typeof connectionOrClientId === 'string') {
+                this.meshLogger.debug('direct sRPC mesh resolution unavailable; using legacy transport', {
+                    clientId: connectionOrClientId,
+                    error
+                });
+                return this.meshClientService.invoke(connectionOrClientId, prefix, data, timeoutMs);
+            }
+            throw error;
         }
-        return super.invoke(streamOrClientId, prefix, data, timeoutMs);
+        if (!connection) {
+            // Legacy rolling-upgrade path for owners that do not advertise a
+            // direct mesh link yet.
+            if (typeof connectionOrClientId === 'string') {
+                return this.meshClientService.invoke(connectionOrClientId, prefix, data, timeoutMs);
+            }
+            throw new ClientDisconnectedError(connectionOrClientId.clientId);
+        }
+        if (!(connection instanceof MeshRemoteSrpcConnection)) {
+            return super.invoke(connection as SrpcStream<TMeta>, prefix, data, timeoutMs);
+        }
+        if (!this.meshLinkController) throw new ClientDisconnectedError(connection.clientId);
+        try {
+            const response = await this.meshLinkController.invoke(connection, prefix, this.encodeMeshInvokeRequest(prefix, data), timeoutMs);
+            const decoded = this.decodeMeshInvokeResponse(prefix, response);
+            if (decoded == null) throw new Error('Invalid response from remote sRPC client');
+            return decoded;
+        } catch (error) {
+            if (error instanceof Error && error.name === 'SrpcError')
+                throw new SrpcError(error.message, 'isUserError' in error && Boolean(error.isUserError));
+            throw error;
+        }
     }
 
     async meshStart(): Promise<void> {
-        await this.meshClientService.start();
+        if (this.meshRunning) return;
+        if (this.meshStartPromise) return this.meshStartPromise;
+        this.meshStartPromise = this.startMesh();
+        try {
+            await this.meshStartPromise;
+        } catch (error) {
+            await this.rollbackMeshStart();
+            throw error;
+        } finally {
+            this.meshStartPromise = undefined;
+        }
+    }
+
+    private async startMesh(): Promise<void> {
+        const linkConfig = this.resolveMeshLinkConfig();
+        if (linkConfig) {
+            this.meshLinkRequestTimeoutMs = linkConfig.requestTimeoutMs;
+            const advertiseUrl = resolveMeshLinkAdvertiseUrl({
+                advertiseUrl: linkConfig.advertiseUrl,
+                path: linkConfig.path,
+                httpServer: this.options.httpServer
+            });
+            this.meshLinkRuntime = acquireMeshLinkRuntime(linkConfig);
+            await this.meshClientService.mesh.updateNodeMetadata({
+                processId: getMeshLinkProcessId(),
+                linkUrl: advertiseUrl,
+                linkProtocolMin: 1,
+                linkProtocolMax: 1,
+                startedAt: Date.now()
+            });
+        }
+
+        try {
+            await this.meshClientService.start();
+        } catch (error) {
+            this.meshLinkRuntime?.close();
+            this.meshLinkRuntime = undefined;
+            throw error;
+        }
+        this.meshRunning = true;
+
+        if (this.meshLinkRuntime) {
+            this.meshLinkController = this.createMeshLinkController(this.meshLinkRuntime);
+            this.unregisterMeshLinkRoute = this.meshLinkRuntime.register(this.meshKey, (peer, frame) => this.meshLinkController!.route(peer, frame));
+        }
 
         // Backfill clients that connected before mesh tracking was running.
         // Route through enqueueClientRegistry so backfill registrations are
@@ -492,8 +654,8 @@ export class MeshSrpcServer<
                 if (currentStream !== stream) return;
 
                 const registered = stream.isActivated
-                    ? await this.meshClientService.registerClient(clientId, metadata, allowSupersede)
-                    : await this.meshClientService.reserveClient(clientId, metadata, allowSupersede);
+                    ? await this.meshClientService.registerClient(clientId, metadata, allowSupersede, stream.id)
+                    : await this.meshClientService.reserveClient(clientId, metadata, allowSupersede, stream.id);
                 if (!registered) {
                     this.meshLogger.warn('Backfill rejected: cross-pod conflict', { clientId });
                     this.cleanupStream(stream, 'conflict');
@@ -506,8 +668,112 @@ export class MeshSrpcServer<
     }
 
     async meshStop(): Promise<void> {
-        await this.meshClientService.stop();
+        if (this.meshStartPromise) await this.meshStartPromise;
+        if (!this.meshRunning) return;
+        this.meshRunning = false;
+        this.meshStopping = true;
+        try {
+            this.unregisterMeshLinkRoute?.();
+            this.unregisterMeshLinkRoute = undefined;
+            this.meshLinkController?.close();
+            await this.meshClientService.stop();
+            this.meshLinkController = undefined;
+            this.meshLinkRuntime = undefined;
+            this.clientMetadata.clear();
+        } finally {
+            this.meshStopping = false;
+        }
+    }
+
+    private async rollbackMeshStart(): Promise<void> {
+        this.meshRunning = false;
+        this.unregisterMeshLinkRoute?.();
+        this.unregisterMeshLinkRoute = undefined;
+        this.meshLinkController?.close();
+        this.meshLinkController = undefined;
+        if (this.meshClientService.instanceId !== 0) await this.meshClientService.stop();
+        this.meshLinkRuntime?.close();
+        this.meshLinkRuntime = undefined;
         this.clientMetadata.clear();
+    }
+
+    override close(): void {
+        for (const unregister of this.unregisterLifecycleHandlers.splice(0)) unregister();
+        if (this.meshRunning) void this.meshStop();
+        super.close();
+    }
+
+    protected override handleByteSubstreamOperation(stream: SrpcStream<TMeta>, operation: NonNullable<TClientOutput['byteStreamOperation']>): void {
+        if (operation.destroy && this.meshLinkController?.forwardClientDestroy(stream.id, operation.streamId, operation.destroy.error)) {
+            return;
+        }
+        super.handleByteSubstreamOperation(stream, operation);
+    }
+
+    private createMeshLinkController(runtime: MeshLinkRuntime): MeshSrpcLinkController<TMeta, TRegistryMeta> {
+        const getLocal = (clientId: string, connectionId?: string): SrpcStream<TMeta> => {
+            const stream = this.streamsByClientId.get(clientId);
+            if (!stream || (connectionId && stream.id !== connectionId)) throw new ClientDisconnectedError(clientId);
+            return stream;
+        };
+        return new MeshSrpcLinkController({
+            meshKey: this.meshKey,
+            requestTimeoutMs: this.meshLinkRequestTimeoutMs,
+            runtime,
+            service: this.meshClientService,
+            getLocalConnection: clientId => this.streamsByClientId.get(clientId),
+            invokeLocal: async (clientId, connectionId, prefix, encoded, timeoutMs) => {
+                const stream = getLocal(clientId, connectionId);
+                const data = this.decodeMeshInvokeRequest(prefix, encoded);
+                const response = await super.invoke(stream, prefix as never, data as never, timeoutMs);
+                return this.encodeMeshInvokeResponse(prefix, response);
+            },
+            reserveLocalSenderIds: (clientId, connectionId, count) => this.reserveByteStreamSenderIds(getLocal(clientId, connectionId), count),
+            writeLocalStream: (clientId, connectionId, streamId, data) =>
+                this.writeByteStreamOperation(getLocal(clientId, connectionId), { streamId, write: { chunk: data } }),
+            finishLocalStream: (clientId, connectionId, streamId) =>
+                this.writeByteStreamOperation(getLocal(clientId, connectionId), { streamId, finish: {} }),
+            destroyLocalStream: (clientId, connectionId, streamId, error) =>
+                this.writeByteStreamOperation(getLocal(clientId, connectionId), { streamId, destroy: { error } }),
+            attachLocalReceiver: (clientId, connectionId, streamId) => SrpcByteStream.createReceiver(getLocal(clientId, connectionId), streamId),
+            disconnectLocal: async (clientId, connectionId, reason) => {
+                const stream = getLocal(clientId, connectionId);
+                await super.disconnectClient(stream, reason);
+            },
+            updateLocalMetadata: async (clientId, connectionId, metadata) => {
+                const stream = getLocal(clientId, connectionId);
+                Object.assign(stream.meta, metadata);
+                await this.clientRegistry.updateMetadata(clientId, metadata, connectionId);
+            }
+        });
+    }
+
+    private resolveMeshLinkConfig() {
+        let config;
+        try {
+            config = getCurrentApp().config;
+        } catch {
+            config = undefined;
+        }
+        const secret = this.meshLinkOptions?.secret ?? config?.MESH_LINK_SECRET;
+        if (!secret) return undefined;
+        const path = this.meshLinkOptions?.path ?? config?.MESH_LINK_PATH ?? '/_tsf/mesh';
+        if (path === this.options.wsPath) throw new Error('sRPC client and mesh-link WebSocket paths must be different');
+        const requestTimeoutMs = this.meshLinkOptions?.requestTimeoutMs ?? config?.MESH_LINK_REQUEST_TIMEOUT_MS ?? 30_000;
+        if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 100) {
+            throw new Error('sRPC mesh-link request timeout must be at least 100ms');
+        }
+        return {
+            advertiseUrl: this.meshLinkOptions?.advertiseUrl ?? config?.MESH_LINK_ADVERTISE_URL,
+            path,
+            secret,
+            httpServer: this.options.httpServer,
+            connectTimeoutMs: this.meshLinkOptions?.connectTimeoutMs ?? config?.MESH_LINK_CONNECT_TIMEOUT_MS ?? 5_000,
+            requestTimeoutMs,
+            idleTimeoutMs: this.meshLinkOptions?.idleTimeoutMs ?? config?.MESH_LINK_IDLE_TIMEOUT_MS ?? 60_000,
+            maxFrameBytes: this.meshLinkOptions?.maxFrameBytes ?? config?.MESH_LINK_MAX_FRAME_BYTES ?? 8 * 1024 * 1024,
+            maxBufferedBytes: this.meshLinkOptions?.maxBufferedBytes ?? config?.MESH_LINK_MAX_BUFFERED_BYTES ?? 16 * 1024 * 1024
+        };
     }
 }
 

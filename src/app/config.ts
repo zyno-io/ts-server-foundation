@@ -77,6 +77,14 @@ export class BaseAppConfig {
     MESH_REDIS_HOST?: string;
     MESH_REDIS_PORT?: number;
     MESH_REDIS_PREFIX?: string;
+    MESH_LINK_ADVERTISE_URL?: string;
+    MESH_LINK_PATH: string = '/_tsf/mesh';
+    MESH_LINK_SECRET?: string;
+    MESH_LINK_CONNECT_TIMEOUT_MS: number = 5_000;
+    MESH_LINK_REQUEST_TIMEOUT_MS: number = 30_000;
+    MESH_LINK_IDLE_TIMEOUT_MS: number = 60_000;
+    MESH_LINK_MAX_FRAME_BYTES: number = 8 * 1024 * 1024;
+    MESH_LINK_MAX_BUFFERED_BYTES: number = 16 * 1024 * 1024;
 
     BULL_REDIS_SENTINEL_HOST?: string;
     BULL_REDIS_SENTINEL_PORT?: number;

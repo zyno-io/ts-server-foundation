@@ -2,6 +2,7 @@ import { createLogger } from '../logger';
 import { MeshService, type MeshBroadcastMap, type MeshBroadcastOptions, type MeshServiceOptions } from '../mesh';
 import { MeshClientRedisRegistry } from './mesh-client-redis-registry';
 import { MeshClientRegistry } from './mesh-client-registry';
+import { getMeshLinkProcessId } from '../mesh-link';
 import { ClientDisconnectedError, ClientInvocationError, ClientNotFoundError, type MeshClientRegistryBackend, type RegisteredClient } from './types';
 
 // --- Internal Mesh Message Types ---
@@ -45,11 +46,14 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
     private clientUpdateMetaFn: MeshClientServiceOptions<TMeta>['clientUpdateMetaFn'];
     private nodeCleanedUpCallbacks: ((nodeId: number, orphaned: RegisteredClient<TMeta>[]) => void | Promise<void>)[] = [];
     private clientSupersededCallbacks: ((clientId: string) => void | Promise<void>)[] = [];
+    private registryRefreshTimer?: ReturnType<typeof setInterval>;
+    private readonly registryRefreshIntervalMs: number;
 
     constructor(options: MeshClientServiceOptions<TMeta>) {
         this.backend = options.registryBackend ?? new MeshClientRedisRegistry<TMeta>(`_mc:${options.key}`);
         this.clientInvokeFn = options.clientInvokeFn;
         this.clientUpdateMetaFn = options.clientUpdateMetaFn;
+        this.registryRefreshIntervalMs = Math.max(1_000, options.meshOptions?.heartbeatIntervalMs ?? 5_000);
 
         this.mesh = new MeshService<ForwardMessages, TBroadcasts>(`_mc:${options.key}`, options.meshOptions);
         this.mesh.registerHandler('forward', async (req: ForwardRequest): Promise<ForwardResponse> => {
@@ -97,7 +101,7 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
         });
 
         // Placeholder registry - will be re-created in start() with the real instanceId
-        this.registry = new MeshClientRegistry<TMeta>(0, this.backend);
+        this.registry = new MeshClientRegistry<TMeta>(0, this.backend, getMeshLinkProcessId());
     }
 
     onNodeClientsOrphaned(cb: (nodeId: number, orphaned: RegisteredClient<TMeta>[]) => void | Promise<void>): void {
@@ -120,12 +124,20 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
 
     async start(): Promise<void> {
         await this.mesh.start();
-        this.registry = new MeshClientRegistry<TMeta>(this.mesh.instanceId, this.backend);
+        this.registry = new MeshClientRegistry<TMeta>(this.mesh.instanceId, this.backend, getMeshLinkProcessId());
         this.running = true;
+        this.registryRefreshTimer = setInterval(() => {
+            void this.registry.refreshNode().catch(error => this.logger.warn('mesh client registry refresh failed', { error }));
+        }, this.registryRefreshIntervalMs);
+        this.registryRefreshTimer.unref?.();
     }
 
     async stop(): Promise<void> {
         this.running = false;
+        if (this.registryRefreshTimer) {
+            clearInterval(this.registryRefreshTimer);
+            this.registryRefreshTimer = undefined;
+        }
         try {
             // Clean up our own clients
             if (this.mesh.instanceId !== 0) {
@@ -140,9 +152,9 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
      * Register a client on this node. Returns true if registered, false if
      * another node owns the client and `allowSupersede` is false (conflict).
      */
-    async registerClient(clientId: string, metadata: TMeta, allowSupersede = true): Promise<boolean> {
+    async registerClient(clientId: string, metadata: TMeta, allowSupersede = true, connectionId?: string): Promise<boolean> {
         if (!this.running) return true;
-        const result = await this.registry.register(clientId, metadata, allowSupersede);
+        const result = await this.registry.register(clientId, metadata, allowSupersede, connectionId);
         if (result.status === 'conflict') {
             return false;
         }
@@ -162,9 +174,9 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
      * Reserve ownership of a clientId without exposing it for lookup/invoke
      * until activation completes.
      */
-    async reserveClient(clientId: string, metadata: TMeta, allowSupersede = true): Promise<boolean> {
+    async reserveClient(clientId: string, metadata: TMeta, allowSupersede = true, connectionId?: string): Promise<boolean> {
         if (!this.running) return true;
-        const result = await this.registry.reserve(clientId, metadata, allowSupersede);
+        const result = await this.registry.reserve(clientId, metadata, allowSupersede, connectionId);
         if (result.status === 'conflict') {
             return false;
         }
@@ -183,14 +195,14 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
     /**
      * Promote a same-node reservation to an active, discoverable client.
      */
-    async activateClient(clientId: string, metadata: TMeta): Promise<boolean> {
+    async activateClient(clientId: string, metadata: TMeta, connectionId?: string): Promise<boolean> {
         if (!this.running) return false;
-        return this.registry.activate(clientId, metadata);
+        return this.registry.activate(clientId, metadata, connectionId);
     }
 
-    async unregisterClient(clientId: string): Promise<boolean> {
+    async unregisterClient(clientId: string, connectionId?: string): Promise<boolean> {
         if (!this.running) return false;
-        return this.registry.unregister(clientId);
+        return this.registry.unregister(clientId, connectionId);
     }
 
     async updateClientMetadata(clientId: string, metadata: TMeta): Promise<boolean> {

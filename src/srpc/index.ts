@@ -13,6 +13,7 @@ export type {
     RequestData,
     ResponseData,
     SrpcDisconnectCause,
+    SrpcConnection,
     SrpcMessageFns,
     SrpcMeta,
     SrpcMessageHandlerFn,
@@ -20,4 +21,14 @@ export type {
     TSrpcMessageHandlerClass,
     TSrpcMessageHandlerFnOrClass
 } from './types';
-export { SrpcError } from './types';
+export {
+    SrpcBackpressureError,
+    SrpcClientNotFoundError,
+    SrpcError,
+    SrpcIndeterminateDeliveryError,
+    SrpcMeshAuthenticationError,
+    SrpcMeshProtocolError,
+    SrpcOwnerUnavailableError,
+    SrpcStaleConnectionError,
+    SrpcStreamClosedError
+} from './types';

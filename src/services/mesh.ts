@@ -19,6 +19,11 @@ export interface MeshNode {
     instanceId: number;
     hostname: string;
     self: boolean;
+    processId?: string;
+    linkUrl?: string;
+    linkProtocolMin?: number;
+    linkProtocolMax?: number;
+    startedAt?: number;
 }
 
 export interface MeshServiceOptions {
@@ -26,6 +31,7 @@ export interface MeshServiceOptions {
     nodeTtlMs?: number;
     requestTimeoutMs?: number;
     leaderOptions?: LeaderServiceOptions;
+    nodeMetadata?: Omit<MeshNode, 'instanceId' | 'hostname' | 'self'>;
 }
 
 export class MeshRequestTimeoutError extends Error {
@@ -165,6 +171,7 @@ export class MeshService<T extends MeshMessageMap, B extends MeshBroadcastMap = 
     private nodeTtlMs: number;
     private requestTimeoutMs: number;
     private leaderOptions?: LeaderServiceOptions;
+    private nodeMetadata: Omit<MeshNode, 'instanceId' | 'hostname' | 'self'>;
 
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private leaderService: LeaderService | null = null;
@@ -186,6 +193,7 @@ export class MeshService<T extends MeshMessageMap, B extends MeshBroadcastMap = 
         this.nodeTtlMs = options?.nodeTtlMs ?? 15000;
         this.requestTimeoutMs = options?.requestTimeoutMs ?? 10000;
         this.leaderOptions = options?.leaderOptions;
+        this.nodeMetadata = options?.nodeMetadata ?? {};
     }
 
     get instanceId(): number {
@@ -213,12 +221,23 @@ export class MeshService<T extends MeshMessageMap, B extends MeshBroadcastMap = 
         const members = await client.zrange(this.heartbeatsKey(), 0, -1);
         if (members.length === 0) return [];
 
-        const hostnames = await client.hmget(this.nodesKey(), ...members);
-        return members.map((id, i) => ({
-            instanceId: parseInt(id, 10),
-            hostname: hostnames[i] ?? 'unknown',
-            self: parseInt(id, 10) === this._instanceId
-        }));
+        const records = await client.hmget(this.nodesKey(), ...members);
+        return members.map((id, i) => this.parseNode(id, records[i]));
+    }
+
+    async getNode(instanceId: number): Promise<MeshNode | undefined> {
+        if (!this.running) throw new Error('MeshService is not running');
+        const { client } = getMeshRedis();
+        const alive = await client.zscore(this.heartbeatsKey(), String(instanceId));
+        if (alive === null) return undefined;
+        return this.parseNode(String(instanceId), await client.hget(this.nodesKey(), String(instanceId)));
+    }
+
+    async updateNodeMetadata(metadata: Omit<MeshNode, 'instanceId' | 'hostname' | 'self'>): Promise<void> {
+        this.nodeMetadata = { ...this.nodeMetadata, ...metadata };
+        if (!this.running) return;
+        const { client } = getMeshRedis();
+        await client.hset(this.nodesKey(), String(this._instanceId), this.serializeNode());
     }
 
     async invoke<K extends keyof T & string>(instanceId: number, type: K, data: T[K]['request'], timeoutMs?: number): Promise<T[K]['response']> {
@@ -323,7 +342,7 @@ export class MeshService<T extends MeshMessageMap, B extends MeshBroadcastMap = 
 
             // Register heartbeat and node metadata
             await client.HEARTBEAT(this.heartbeatsKey(), String(this._instanceId));
-            await client.hset(this.nodesKey(), String(this._instanceId), hostname());
+            await client.hset(this.nodesKey(), String(this._instanceId), this.serializeNode());
         } catch (err) {
             // Clean up subscriber on partial init failure
             try {
@@ -414,6 +433,35 @@ export class MeshService<T extends MeshMessageMap, B extends MeshBroadcastMap = 
 
     private nextIdKey(): string {
         return `${this.prefix}:mesh:${this.key}:next_id`;
+    }
+
+    private serializeNode(): string {
+        return JSON.stringify({
+            hostname: hostname(),
+            ...this.nodeMetadata
+        });
+    }
+
+    private parseNode(id: string, raw: string | null): MeshNode {
+        let metadata: Record<string, unknown> = {};
+        if (raw) {
+            try {
+                const parsed = JSON.parse(raw) as unknown;
+                metadata = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : { hostname: raw };
+            } catch {
+                metadata = { hostname: raw };
+            }
+        }
+        return {
+            instanceId: parseInt(id, 10),
+            hostname: typeof metadata.hostname === 'string' ? metadata.hostname : 'unknown',
+            self: parseInt(id, 10) === this._instanceId,
+            processId: typeof metadata.processId === 'string' ? metadata.processId : undefined,
+            linkUrl: typeof metadata.linkUrl === 'string' ? metadata.linkUrl : undefined,
+            linkProtocolMin: typeof metadata.linkProtocolMin === 'number' ? metadata.linkProtocolMin : undefined,
+            linkProtocolMax: typeof metadata.linkProtocolMax === 'number' ? metadata.linkProtocolMax : undefined,
+            startedAt: typeof metadata.startedAt === 'number' ? metadata.startedAt : undefined
+        };
     }
 
     private heartbeatsKey(): string {

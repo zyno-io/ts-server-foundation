@@ -172,7 +172,7 @@ describe('worker services', () => {
         const app = createApp({
             enableWorker: true,
             providers: [DefaultQueueJob],
-            defaultConfig: { BULL_QUEUE: 'configured' }
+            defaultConfig: { BULL_QUEUE: 'configured', ENABLE_JOB_RUNNER: true }
         });
 
         const queued = (await app.get(WorkerService).queueJob(DefaultQueueJob, { name: 'logged' }, { runInTest: true })) as QueuedWorkerJob;
@@ -269,7 +269,7 @@ describe('worker services', () => {
         const app = createApp({
             enableWorker: true,
             providers: [DefaultQueueJob],
-            defaultConfig: { BULL_QUEUE: 'configured' }
+            defaultConfig: { BULL_QUEUE: 'configured', ENABLE_JOB_RUNNER: true }
         });
 
         const queued = (await app.get(WorkerService).queueJob(DefaultQueueJob, { name: 'Beta' }, { runInTest: true })) as QueuedWorkerJob;
@@ -289,7 +289,8 @@ describe('worker services', () => {
         process.env.APP_ENV = 'test';
         const app = createApp({
             enableWorker: true,
-            providers: [WorkerDependency, ExampleJob]
+            providers: [WorkerDependency, ExampleJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
         });
 
         await app.start();
@@ -307,7 +308,8 @@ describe('worker services', () => {
         process.env.APP_ENV = 'test';
         const app = createApp({
             enableWorker: true,
-            providers: [DailyCronJob]
+            providers: [DailyCronJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
         });
 
         await app.start();
@@ -325,7 +327,8 @@ describe('worker services', () => {
         process.env.APP_ENV = 'test';
         const app = createApp({
             enableWorker: true,
-            providers: [RepeatCronJob]
+            providers: [RepeatCronJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
         });
 
         await app.start();
@@ -352,7 +355,8 @@ describe('worker services', () => {
         process.env.APP_ENV = 'test';
         const app = createApp({
             enableWorker: true,
-            providers: [RepeatCronJob]
+            providers: [RepeatCronJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
         });
 
         await app.start();
@@ -380,7 +384,8 @@ describe('worker services', () => {
         repeatObjectPayloads.length = 0;
         const app = createApp({
             enableWorker: true,
-            providers: [RepeatObjectCronJob]
+            providers: [RepeatObjectCronJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
         });
 
         await app.start();
@@ -762,6 +767,23 @@ describe('worker services', () => {
 
         await app.start();
 
+        await app.stop();
+    });
+
+    it('does not start the job runner in test unless ENABLE_JOB_RUNNER is enabled', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            enableWorker: true,
+            providers: [DefaultQueueJob]
+        });
+        let workerStarts = 0;
+        app.get(WorkerRunnerService).start = async () => {
+            workerStarts++;
+        };
+
+        await app.start();
+
+        assert.equal(workerStarts, 0);
         await app.stop();
     });
 
