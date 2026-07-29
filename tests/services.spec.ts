@@ -436,6 +436,138 @@ describe('services', () => {
         assert.equal(reports.length, 7);
     });
 
+    it('sanitizes Axios error diagnostics without mutating the original error', () => {
+        const reports: { error: DecoratedError }[] = [];
+        setGlobalErrorReporter((_level, error) => reports.push({ error: error as DecoratedError }));
+        class FormData {}
+        class Readable {
+            toJSON(): never {
+                throw new Error('streams must not be serialized');
+            }
+        }
+        const headers = {
+            toJSON: () => ({
+                Authorization: 'Bearer request-token',
+                Cookie: 'session=request-cookie',
+                'x-request-id': 'request-123',
+                'X-Intuit-Tid': 'intuit-123'
+            })
+        };
+        const axiosError = {
+            isAxiosError: true,
+            message: 'provider rejected request',
+            config: {
+                url: 'https://client:password@example.test/path?access_token=top-secret&X-Amz-Signature=signed&code=oauth-code&email=person%40example.test&phone=5551234567&keep=visible#access_token=fragment-token',
+                method: 'post',
+                headers,
+                data: JSON.stringify({ token: 'body-token', keep: 'visible', nested: { apiKey: 'nested-key' }, code: 'provider-error-code' })
+            },
+            response: {
+                status: 401,
+                headers: { 'set-cookie': 'session=response-cookie', traceparent: '00-abc' },
+                data: {
+                    message: 'bad credentials',
+                    refreshToken: 'response-token',
+                    nested: { password: 'secret' },
+                    email: 'person@example.test',
+                    passcode: '123456',
+                    pin: '1234',
+                    ssn: '111-22-3333',
+                    cardNumber: '4111 1111 1111 1111',
+                    code: 'provider-error-code',
+                    form: new FormData(),
+                    stream: new Readable(),
+                    buffer: Buffer.from('secret binary payload')
+                }
+            }
+        };
+
+        new ExtendedLogger('AxiosScope').error('request failed', { err: axiosError });
+
+        const cause = reports[0].error.cause as Record<string, unknown>;
+        assert.deepStrictEqual(cause.request, {
+            url: 'https://example.test/path?access_token=[REDACTED]&X-Amz-Signature=[REDACTED]&code=[REDACTED]&email=[REDACTED]&phone=[REDACTED]&keep=visible',
+            method: 'post',
+            headers: { 'x-request-id': 'request-123', 'X-Intuit-Tid': 'intuit-123' },
+            data: {
+                token: '[REDACTED]',
+                keep: 'visible',
+                nested: { apiKey: '[REDACTED]' },
+                code: 'provider-error-code'
+            }
+        });
+        assert.deepStrictEqual(cause.response, {
+            status: 401,
+            headers: { traceparent: '00-abc' },
+            data: {
+                message: 'bad credentials',
+                refreshToken: '[REDACTED]',
+                nested: { password: '[REDACTED]' },
+                email: '[REDACTED]',
+                passcode: '[REDACTED]',
+                pin: '[REDACTED]',
+                ssn: '[REDACTED]',
+                cardNumber: '[REDACTED]',
+                code: 'provider-error-code',
+                form: '[FormData]',
+                stream: '[Readable]',
+                buffer: '[Buffer]'
+            }
+        });
+        assert.equal((axiosError.config.headers.toJSON() as Record<string, string>).Authorization, 'Bearer request-token');
+        assert.equal(axiosError.config.data.includes('body-token'), true);
+
+        new ExtendedLogger('AxiosScope').error('request failed', {
+            err: { isAxiosError: true, message: 'provider rejected request', config: { url: 'http://[invalid#access_token=fragment-token' } }
+        });
+        const malformedUrlCause = reports[1].error.cause as { request: { url: string } };
+        assert.equal(malformedUrlCause.request.url, 'http://[invalid');
+    });
+
+    it('bounds Axios error payload output without traversing every property', () => {
+        const reports: { error: DecoratedError }[] = [];
+        setGlobalErrorReporter((_level, error) => reports.push({ error: error as DecoratedError }));
+        const payload: Record<string, string> = {};
+        for (let index = 0; index < 1_000; index++) payload[`property-${index}`] = 'x'.repeat(4_096);
+
+        new ExtendedLogger('AxiosScope').error('request failed', {
+            err: { isAxiosError: true, message: 'provider rejected request', response: { data: payload } }
+        });
+
+        const cause = reports[0].error.cause as { response: { data: Record<string, unknown> } };
+        assert.equal(cause.response.data._truncated, 'additional properties');
+        assert.ok(JSON.stringify(cause).length <= 33_000);
+    });
+
+    it('does not retain an unparsed oversized JSON-looking Axios body', () => {
+        const reports: { error: DecoratedError }[] = [];
+        setGlobalErrorReporter((_level, error) => reports.push({ error: error as DecoratedError }));
+        const secret = 'very-sensitive-token';
+        const oversizedJson = `{"token":"${secret}","padding":"${'x'.repeat(33_000)}"}`;
+
+        new ExtendedLogger('AxiosScope').error('request failed', {
+            err: { isAxiosError: true, message: 'provider rejected request', config: { data: oversizedJson } }
+        });
+
+        const cause = reports[0].error.cause as { request: { data: string } };
+        assert.equal(cause.request.data, `[TRUNCATED JSON body: ${oversizedJson.length} chars]`);
+        assert.equal(JSON.stringify(cause).includes(secret), false);
+    });
+
+    it('does not retain malformed JSON-looking Axios bodies', () => {
+        const reports: { error: DecoratedError }[] = [];
+        setGlobalErrorReporter((_level, error) => reports.push({ error: error as DecoratedError }));
+        const malformedJson = '{"password":"very-sensitive-token",';
+
+        new ExtendedLogger('AxiosScope').error('request failed', {
+            err: { isAxiosError: true, message: 'provider rejected request', config: { data: malformedJson } }
+        });
+
+        const cause = reports[0].error.cause as { request: { data: string } };
+        assert.equal(cause.request.data, '[UNPARSEABLE JSON body]');
+        assert.equal(JSON.stringify(cause).includes('very-sensitive-token'), false);
+    });
+
     it('reports logged errors to Sentry and suppresses Slack alerts in test environments', async () => {
         const capture = mock.method(Sentry, 'captureException', () => 'event-id');
         const fetchMock = mock.method(globalThis, 'fetch', async () => new Response('ok'));

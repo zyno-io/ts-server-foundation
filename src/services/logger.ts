@@ -390,22 +390,209 @@ function withoutSelfReferentialErrors(error: LogData): LogData {
 function transformAxiosError(error: LogData): LogData {
     const config = isLogObject(error.config) ? error.config : undefined;
     const response = isLogObject(error.response) ? error.response : undefined;
+    const state = createAxiosSanitizationState();
     return {
         code: error.code,
         message: error.message,
         stack: error.stack,
         request: {
-            url: config?.url,
+            url: sanitizeAxiosUrl(config?.url, state),
             method: config?.method,
-            headers: config?.headers,
-            data: config?.data
+            headers: sanitizeAxiosHeaders(config?.headers, state),
+            data: sanitizeAxiosPayload(config?.data, state)
         },
         response: {
             status: response?.status,
-            headers: response?.headers,
-            data: response?.data
+            headers: sanitizeAxiosHeaders(response?.headers, state),
+            data: sanitizeAxiosPayload(response?.data, state)
         }
     };
+}
+
+const AxiosSensitiveKey =
+    /(?:authorization|cookie|token|secret|password|passwd|passcode|api[-_]?key|credential|private[-_]?key|client[-_]?secret|signature|(?:^|[-_])sig(?:$|[-_])|jwt|(?:^|[-_])pin(?:$|[-_])|ssn|social[-_]?security|e-?mail|card(?:[-_]?number)?|cc[-_]?number|cvv|cvc|phone|address|date[-_]?of[-_]?birth|dob)/i;
+const AxiosSensitiveUrlParameter =
+    /(?:code|authorization|cookie|token|secret|password|passcode|api[-_]?key|credential|private[-_]?key|client[-_]?secret|signature|(?:^|[-_])sig(?:$|[-_])|jwt|(?:^|[-_])pin(?:$|[-_])|ssn|social[-_]?security|e-?mail|card(?:[-_]?number)?|cc[-_]?number|cvv|cvc|phone|address|date[-_]?of[-_]?birth|dob)/i;
+const AxiosSafeHeader =
+    /^(?:x[-_]?)?(?:request|correlation)[-_]?id$|^(?:traceparent|tracestate|b3|x-b3-[a-z-]+|x-amzn-(?:requestid|trace-id)|(?:x-)?intuit[-_]?tid)$/i;
+const AxiosRedacted = '[REDACTED]';
+const AxiosMaxDepth = 5;
+const AxiosMaxProperties = 50;
+const AxiosMaxArrayItems = 50;
+const AxiosMaxQueryParameters = 50;
+const AxiosMaxStringLength = 4_096;
+const AxiosMaxNodes = 200;
+const AxiosMaxOutputLength = 32_768;
+const AxiosJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const AxiosEmail = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const AxiosCardNumber = /(?:\d[ -]?){13,19}/;
+
+interface AxiosSanitizationState {
+    seen: WeakSet<object>;
+    nodes: number;
+    outputLength: number;
+}
+
+/**
+ * Axios errors commonly contain complete request configs. Normalize them into a
+ * useful but safe diagnostic shape; never mutate the error/config owned by Axios.
+ */
+function createAxiosSanitizationState(): AxiosSanitizationState {
+    return { seen: new WeakSet<object>(), nodes: 0, outputLength: 0 };
+}
+
+function sanitizeAxiosHeaders(headers: unknown, state: AxiosSanitizationState): LogData | undefined {
+    const source = toAxiosHeadersObject(headers);
+    if (!source) return undefined;
+
+    const safeHeaders: LogData = {};
+    for (const name in source) {
+        if (!Object.hasOwn(source, name)) continue;
+        if (!AxiosSafeHeader.test(name)) continue;
+        if (!consumeAxiosNode(state) || !consumeAxiosOutput(state, name.length)) break;
+        safeHeaders[name] = sanitizeAxiosHeaderValue(source[name], state);
+    }
+    return Object.keys(safeHeaders).length ? safeHeaders : undefined;
+}
+
+function sanitizeAxiosHeaderValue(value: unknown, state: AxiosSanitizationState): unknown {
+    if (typeof value === 'string') return sanitizeAxiosScalarString(value, state);
+    if (Array.isArray(value))
+        return value
+            .slice(0, AxiosMaxArrayItems)
+            .map(item => (typeof item === 'string' ? sanitizeAxiosScalarString(item, state) : '[non-scalar header]'));
+    return value === undefined ? undefined : '[non-scalar header]';
+}
+
+function sanitizeAxiosUrl(value: unknown, state: AxiosSanitizationState): unknown {
+    if (typeof value !== 'string') return value === undefined ? undefined : '[invalid URL]';
+    if (value.length > AxiosMaxOutputLength) return `[TRUNCATED URL: ${value.length} chars]`;
+
+    try {
+        const isAbsolute = /^[a-z][a-z\d+.-]*:/i.test(value);
+        const url = new URL(value, 'http://axios.invalid');
+        url.username = '';
+        url.password = '';
+        url.search = sanitizeAxiosQuery(url.search.slice(1));
+        // URL fragments are not sent in an HTTP request and commonly carry OAuth credentials.
+        url.hash = '';
+        return sanitizeAxiosScalarString(isAbsolute ? url.toString() : `${url.pathname}${url.search}`, state);
+    } catch {
+        const [path, queryAndHash = ''] = value.split('?', 2);
+        if (!queryAndHash) return sanitizeAxiosScalarString(path.split('#', 1)[0], state);
+        const [query] = queryAndHash.split('#', 1);
+        return sanitizeAxiosScalarString(`${path}?${sanitizeAxiosQuery(query)}`, state);
+    }
+}
+
+function sanitizeAxiosQuery(query: string): string {
+    const parts: string[] = [];
+    let start = 0;
+    for (let count = 0; start <= query.length && count < AxiosMaxQueryParameters; count++) {
+        const end = query.indexOf('&', start);
+        const part = query.slice(start, end === -1 ? undefined : end);
+        const separator = part.indexOf('=');
+        const key = separator === -1 ? part : part.slice(0, separator);
+        let decodedKey = key;
+        try {
+            decodedKey = decodeURIComponent(key.replace(/\+/g, ' '));
+        } catch {
+            // Preserve malformed query strings as-is unless their raw key is sensitive.
+        }
+        parts.push(AxiosSensitiveUrlParameter.test(decodedKey) ? `${key}=${AxiosRedacted}` : part);
+        if (end === -1) return parts.join('&');
+        start = end + 1;
+    }
+    return `${parts.join('&')}&[TRUNCATED]`;
+}
+
+function sanitizeAxiosPayload(value: unknown, state: AxiosSanitizationState): unknown {
+    return sanitizeAxiosValue(value, 0, state);
+}
+
+function sanitizeAxiosValue(value: unknown, depth: number, state: AxiosSanitizationState): unknown {
+    if (!consumeAxiosNode(state)) return '[TRUNCATED: output limit]';
+    if (typeof value === 'string') return sanitizeAxiosString(value, depth, state);
+    if (value === null || typeof value !== 'object') return value;
+    if (depth >= AxiosMaxDepth) return '[TRUNCATED: maximum depth]';
+    if (state.seen.has(value)) return '[CIRCULAR]';
+    state.seen.add(value);
+    if (isOpaqueAxiosPayload(value)) return `[${value.constructor?.name ?? 'opaque payload'}]`;
+
+    if (Array.isArray(value)) {
+        const items: unknown[] = [];
+        for (let index = 0; index < Math.min(value.length, AxiosMaxArrayItems); index++)
+            items.push(sanitizeAxiosValue(value[index], depth + 1, state));
+        if (value.length > AxiosMaxArrayItems) items.push(`[TRUNCATED: ${value.length - AxiosMaxArrayItems} items]`);
+        return items;
+    }
+
+    const source = isLogObject(value) ? value : undefined;
+    if (!source) return `[${value.constructor?.name ?? 'object'}]`;
+    const result: LogData = {};
+    let propertyCount = 0;
+    for (const key in source) {
+        if (!Object.hasOwn(source, key)) continue;
+        if (propertyCount++ >= AxiosMaxProperties || !consumeAxiosOutput(state, key.length)) {
+            result._truncated = 'additional properties';
+            break;
+        }
+        result[key] = AxiosSensitiveKey.test(key) ? AxiosRedacted : sanitizeAxiosValue(source[key], depth + 1, state);
+    }
+    return result;
+}
+
+function sanitizeAxiosString(value: string, depth: number, state: AxiosSanitizationState): unknown {
+    const trimmed = value.trimStart();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        if (value.length > AxiosMaxOutputLength) return `[TRUNCATED JSON body: ${value.length} chars]`;
+        try {
+            return sanitizeAxiosValue(JSON.parse(value), depth + 1, state);
+        } catch {
+            return '[UNPARSEABLE JSON body]';
+        }
+    }
+    if (value.includes('=') && !/[\r\n]/.test(value)) return sanitizeAxiosScalarString(sanitizeAxiosQuery(value), state);
+    return sanitizeAxiosScalarString(value, state);
+}
+
+function sanitizeAxiosScalarString(value: string, state: AxiosSanitizationState): string {
+    if (AxiosJwt.test(value) || AxiosEmail.test(value) || AxiosCardNumber.test(value)) return AxiosRedacted;
+    const remaining = AxiosMaxOutputLength - state.outputLength;
+    if (remaining <= 0) return '[TRUNCATED: output limit]';
+    const length = Math.min(value.length, AxiosMaxStringLength, remaining);
+    state.outputLength += length;
+    return length === value.length ? value : `${value.slice(0, length)}[TRUNCATED]`;
+}
+
+function consumeAxiosNode(state: AxiosSanitizationState): boolean {
+    return ++state.nodes <= AxiosMaxNodes;
+}
+
+function consumeAxiosOutput(state: AxiosSanitizationState, length: number): boolean {
+    if (state.outputLength + length > AxiosMaxOutputLength) return false;
+    state.outputLength += length;
+    return true;
+}
+
+function isOpaqueAxiosPayload(value: object): boolean {
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return true;
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return true;
+    return /(?:formdata|stream|readable|writable|duplex|blob|file)/i.test(value.constructor?.name ?? '');
+}
+
+function toAxiosHeadersObject(value: unknown): LogData | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    if (isOpaqueAxiosPayload(value)) return undefined;
+    if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
+        try {
+            const json = (value as { toJSON: () => unknown }).toJSON();
+            return isLogObject(json) ? json : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+    return isLogObject(value) ? value : undefined;
 }
 
 function isLogObject(value: unknown): value is LogData {

@@ -561,6 +561,7 @@ describe('worker services', () => {
         process.env.APP_ENV = 'development';
         const registry = new WorkerQueueRegistry({ APP_ENV: 'development', BULL_QUEUE: 'default' } as never);
         const removedByQueue = new Map<string, string[]>();
+        const removedJobsByQueue = new Map<string, string[]>();
         const queues = new Map<string, object>([
             [
                 'default',
@@ -578,7 +579,7 @@ describe('worker services', () => {
                     }),
                     getJobSchedulers: async () => [
                         {
-                            key: 'legacy-repeat-key',
+                            key: 'a7bfd56788a5ed98a0e8de14761f0c27',
                             name: 'DefaultLegacyCronJob',
                             pattern: '0 5 * * *'
                         }
@@ -586,7 +587,16 @@ describe('worker services', () => {
                     removeRepeatableByKey: async (key: string) => {
                         removedByQueue.set('default', [key]);
                         return true;
-                    }
+                    },
+                    getJobs: async () => [
+                        fakeBullRepeatJob(
+                            'DefaultLegacyCronJob',
+                            'a7bfd56788a5ed98a0e8de14761f0c27',
+                            'default-legacy-job',
+                            removedJobsByQueue,
+                            'default'
+                        )
+                    ]
                 }
             ],
             [
@@ -605,7 +615,11 @@ describe('worker services', () => {
                             template: { data: { source: 'external' } }
                         }
                     ],
-                    removedByQueue
+                    removedByQueue,
+                    [
+                        fakeBullRepeatJob('DeletedJob', 'DeletedJob:0 2 * * *', 'deleted-job', removedJobsByQueue, 'critical'),
+                        fakeBullRepeatJob('ExampleJob', 'ExampleJob:* * * * *', 'desired-job', removedJobsByQueue, 'critical', true)
+                    ]
                 )
             ],
             ['abandoned', fakeBullQueue('abandoned', [fakeTsfScheduler('MovedJob', '0 4 * * *')], removedByQueue)]
@@ -634,7 +648,14 @@ describe('worker services', () => {
             new Map([
                 ['abandoned', ['MovedJob:0 4 * * *']],
                 ['critical', ['ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']],
-                ['default', ['legacy-repeat-key']]
+                ['default', ['a7bfd56788a5ed98a0e8de14761f0c27']]
+            ])
+        );
+        assert.deepEqual(
+            removedJobsByQueue,
+            new Map([
+                ['critical', ['deleted-job']],
+                ['default', ['default-legacy-job']]
             ])
         );
         assert.deepEqual(
@@ -644,9 +665,87 @@ describe('worker services', () => {
                 { queue: 'critical', key: 'ExampleJob:*/5 * * * *' },
                 { queue: 'critical', key: 'DeletedJob:0 2 * * *' },
                 { queue: 'critical', key: 'ExampleJob:wrong-key' },
-                { queue: 'default', key: 'legacy-repeat-key' }
+                { queue: 'default', key: 'a7bfd56788a5ed98a0e8de14761f0c27' }
             ]
         );
+    });
+
+    it('removes only the materialized jobs from an unregistered repeat chain', async () => {
+        process.env.APP_ENV = 'development';
+        const registry = new WorkerQueueRegistry({ APP_ENV: 'development' } as never);
+        const calls: string[] = [];
+        const queue = {
+            removeJobScheduler: async (key: string) => {
+                calls.push(`scheduler:${key}`);
+                return true;
+            },
+            removeRepeatableByKey: async (key: string) => {
+                calls.push(`repeatable:${key}`);
+                return true;
+            },
+            getJobs: async () => [
+                {
+                    name: 'RemovedJob',
+                    repeatJobKey: 'RemovedJob:0 2 * * *',
+                    remove: async () => calls.push('job:removed')
+                },
+                {
+                    name: 'OtherJob',
+                    repeatJobKey: 'OtherJob:0 2 * * *',
+                    remove: async () => calls.push('job:other')
+                }
+            ]
+        };
+        registry.getBullQueue = (() => queue) as never;
+
+        await registry.removeBullMqRepeatChain('default', 'RemovedJob:0 2 * * *');
+
+        assert.deepEqual(calls, ['scheduler:RemovedJob:0 2 * * *', 'repeatable:RemovedJob:0 2 * * *', 'job:removed']);
+    });
+
+    it('removes an orphaned framework repeat job after its scheduler metadata was already removed', async () => {
+        process.env.APP_ENV = 'development';
+        const registry = new WorkerQueueRegistry({ APP_ENV: 'development' } as never);
+        const removedJobsByQueue = new Map<string, string[]>();
+        const queue = {
+            client: Promise.resolve({
+                scan: async () => ['0', ['test:default:repeat']]
+            }),
+            getJobSchedulers: async () => [],
+            getJobs: async () => [
+                fakeBullRepeatJob('RetiredJob', 'RetiredJob:0 2 * * *', 'orphaned-job', removedJobsByQueue, 'default', true),
+                fakeBullRepeatJob('ExternalJob', 'external-repeat-key', 'external-job', removedJobsByQueue, 'default')
+            ]
+        };
+        registry.getBullMqOptions = (() => ({ prefix: 'test' })) as never;
+        registry.getBullQueue = (() => queue) as never;
+
+        await registry.removeStaleBullMqJobSchedulers([]);
+
+        assert.deepEqual(removedJobsByQueue, new Map([['default', ['orphaned-job']]]));
+    });
+
+    it('stops an unregistered BullMQ repeat chain before reporting the failed job', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            enableWorker: true,
+            providers: [DefaultQueueJob]
+        });
+        const registry = app.get(WorkerQueueRegistry);
+        const removedChains: Array<{ queue: string; key: string }> = [];
+        registry.removeBullMqRepeatChain = async (queue, key) => {
+            removedChains.push({ queue, key });
+        };
+
+        await assert.rejects(
+            (app.get(WorkerRunnerService) as unknown as { executeBullMqJob(job: unknown): Promise<unknown> }).executeBullMqJob({
+                name: 'RetiredJob',
+                queueName: 'default',
+                repeatJobKey: 'RetiredJob:0 2 * * *'
+            }),
+            /Job handler is not registered as a provider: RetiredJob/
+        );
+        assert.deepEqual(removedChains, [{ queue: 'default', key: 'RetiredJob:0 2 * * *' }]);
     });
 
     it('reconciles BullMQ schedules only for cron jobs registered in the app', async () => {
@@ -910,9 +1009,31 @@ function fakeTsfScheduler(name: string, pattern: string, key = `${name}:${patter
     };
 }
 
-function fakeBullQueue(queueName: string, schedulers: object[], removedByQueue: Map<string, string[]>): object {
+function fakeBullRepeatJob(
+    name: string,
+    repeatJobKey: string,
+    id: string,
+    removedJobsByQueue: Map<string, string[]>,
+    queueName: string,
+    tsfPayload = false
+): object {
+    return {
+        id,
+        name,
+        repeatJobKey,
+        data: tsfPayload ? { data: {}, options: { repeatKey: repeatJobKey } } : {},
+        remove: async () => {
+            const removed = removedJobsByQueue.get(queueName) ?? [];
+            removed.push(id);
+            removedJobsByQueue.set(queueName, removed);
+        }
+    };
+}
+
+function fakeBullQueue(queueName: string, schedulers: object[], removedByQueue: Map<string, string[]>, jobs: object[] = []): object {
     return {
         getJobSchedulers: async () => schedulers,
+        getJobs: async () => jobs,
         removeJobScheduler: async (key: string) => {
             const removed = removedByQueue.get(queueName) ?? [];
             removed.push(key);

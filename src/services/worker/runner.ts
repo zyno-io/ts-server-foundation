@@ -44,6 +44,10 @@ export class WorkerRunnerService {
         }
 
         if (this.queueRegistry.usesBullMq()) {
+            // A deployment migration may have run while an old worker was still active. Reconcile
+            // again before this worker starts consuming jobs so a materialized stale repeat job
+            // cannot reach this process and perpetuate its own chain.
+            await this.removeStaleBullMqCronJobs();
             await this.startBullMqWorkers();
             await this.scheduleBullMqCronJobs();
             this.logger.info('Worker started', {
@@ -313,15 +317,19 @@ export class WorkerRunnerService {
     }
 
     private async executeBullMqJob<I, O>(job: BullJob<BullMqWorkerJobData<I>>): Promise<WorkerExecutionResult<I, O>> {
-        const jobClass = this.resolveJobClassByName<I, O>(job.name);
+        const jobClass = this.findRegisteredJobClass<I, O>(job.name);
+        if (!jobClass) {
+            if (job.repeatJobKey) {
+                await this.queueRegistry.removeBullMqRepeatChain(job.queueName, job.repeatJobKey);
+            }
+            throw new Error(`Job handler is not registered as a provider: ${job.name}`);
+        }
         const queuedJob = this.queueRegistry.fromBullJob(job, jobClass);
         return this.executeJob<I, O>(queuedJob, queuedJob.options, false);
     }
 
-    private resolveJobClassByName<I, O>(name: string): JobClass<I, O> {
-        const jobClass = getRegisteredWorkerJobs().find(candidate => candidate.name === name && this.isRegisteredJob(candidate));
-        if (!jobClass) throw new Error(`Job handler is not registered as a provider: ${name}`);
-        return jobClass as JobClass<I, O>;
+    private findRegisteredJobClass<I, O>(name: string): JobClass<I, O> | undefined {
+        return getRegisteredWorkerJobs().find(candidate => candidate.name === name && this.isRegisteredJob(candidate)) as JobClass<I, O> | undefined;
     }
 
     private getRegisteredQueueNames(): string[] {

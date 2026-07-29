@@ -154,6 +154,7 @@ export class WorkerQueueRegistry {
         for (const queueName of await this.discoverBullMqJobSchedulerQueueNames()) {
             const queue = this.getBullQueue(queueName);
             const desiredQueueSchedules = desiredByQueue.get(queueName);
+            const staleRepeatKeys = new Set<string>();
             for (const scheduler of await queue.getJobSchedulers()) {
                 const isTsfScheduler = isTsfBullMqJobScheduler(scheduler);
                 const isLegacyRepeatable = queueName === defaultQueueName && isLegacyBullMqCronRepeatable(scheduler);
@@ -164,6 +165,8 @@ export class WorkerQueueRegistry {
                 // Legacy repeatables use a different key and rescheduling mechanism. Remove even
                 // matching definitions so the runner can replace them with one Job Scheduler.
                 if (isTsfScheduler && matchesDesiredSchedule) continue;
+
+                staleRepeatKeys.add(scheduler.key);
 
                 const wasRemoved = isLegacyRepeatable
                     ? await queue.removeRepeatableByKey(scheduler.key)
@@ -177,8 +180,27 @@ export class WorkerQueueRegistry {
                     });
                 }
             }
+
+            // BullMQ materializes the next occurrence before it invokes the worker handler. Removing
+            // only a scheduler therefore leaves an already-created legacy occurrence able to keep an
+            // orphaned chain alive. Reconcile pending occurrences after definitions are gone as well.
+            await this.removePendingBullMqRepeatJobs(queue, desiredQueueSchedules, staleRepeatKeys);
         }
         return removed;
+    }
+
+    /**
+     * Stops a repeat chain after a worker has received an unregistered repeat job. This is a
+     * defensive backstop for a job that was materialized while a stale scheduler was being removed.
+     */
+    async removeBullMqRepeatChain(queueName: string, repeatKey: string): Promise<void> {
+        if (!this.usesBullMq()) return;
+
+        const queue = this.getBullQueue(queueName);
+        // The key format identifies either a Job Scheduler or a legacy repeatable job. Attempt
+        // both removals so an unsupported/absent format cannot prevent the compatible cleanup.
+        await Promise.allSettled([queue.removeJobScheduler(repeatKey), queue.removeRepeatableByKey(repeatKey)]);
+        await this.removePendingBullMqRepeatJobs(queue, undefined, new Set([repeatKey]));
     }
 
     normalizeJobData<I>(data: I | null | undefined): I {
@@ -274,6 +296,25 @@ export class WorkerQueueRegistry {
 
         return [...queueNames].sort();
     }
+
+    private async removePendingBullMqRepeatJobs(
+        queue: Queue<BullMqWorkerJobData>,
+        desiredSchedules: ReadonlyMap<string, BullMqCronJobSchedule> | undefined,
+        staleRepeatKeys: ReadonlySet<string>
+    ): Promise<void> {
+        const jobs = await queue.getJobs(['wait', 'paused', 'delayed', 'prioritized', 'waiting-children']);
+        for (const job of jobs) {
+            const repeatKey = job.repeatJobKey;
+            if (!repeatKey) continue;
+
+            const desired = desiredSchedules?.get(job.name);
+            const matchesDesiredSchedule = desired !== undefined && repeatKey === `${desired.name}:${desired.pattern}`;
+            const isTsfRepeatJob = isTsfBullMqRepeatJob(job);
+            if (!staleRepeatKeys.has(repeatKey) && (!isTsfRepeatJob || matchesDesiredSchedule)) continue;
+
+            await job.remove();
+        }
+    }
 }
 
 async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> {
@@ -330,8 +371,14 @@ function isLegacyBullMqCronRepeatable(scheduler: unknown): scheduler is {
         typeof scheduler.key === 'string' &&
         typeof scheduler.name === 'string' &&
         typeof scheduler.pattern === 'string' &&
-        scheduler.iterationCount === undefined
+        scheduler.iterationCount === undefined &&
+        /^[a-f\d]{32}$/i.test(scheduler.key)
     );
+}
+
+function isTsfBullMqRepeatJob(job: BullJob<BullMqWorkerJobData>): boolean {
+    const data = job.data;
+    return isRecord(data) && isWorkerPayloadWrapper(data) && data.options.repeatKey === job.repeatJobKey;
 }
 
 function escapeRedisGlob(value: string): string {
