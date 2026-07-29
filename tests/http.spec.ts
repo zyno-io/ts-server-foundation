@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { EventEmitter, once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { request as nodeHttpRequest } from 'node:http';
+import { request as nodeHttpRequest, type ServerResponse } from 'node:http';
 import { Socket, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +25,7 @@ import {
     HttpQuery,
     HttpRequest,
     LoggerHttpContextProps,
+    NodeHttpResponse,
     HttpRequestStream,
     HttpUserError,
     HttpMiddleware,
@@ -3572,6 +3574,42 @@ describe('http router', () => {
             await secondApp.stop();
             await firstApp.stop();
         }
+    });
+
+    it('destroys the response wrapper when the native response closes', async () => {
+        const outgoing = Object.assign(new EventEmitter(), {
+            statusCode: 200,
+            destroyed: false,
+            writableEnded: false
+        }) as unknown as ServerResponse;
+        const response = new NodeHttpResponse(outgoing);
+        const closed = once(response, 'close');
+
+        outgoing.emit('close');
+
+        await closed;
+        assert.equal(response.destroyed, true);
+    });
+
+    it('does not write to an already destroyed native response', async () => {
+        let writes = 0;
+        const outgoing = Object.assign(new EventEmitter(), {
+            statusCode: 200,
+            destroyed: true,
+            writableEnded: false,
+            write: () => {
+                writes++;
+                return false;
+            }
+        }) as unknown as ServerResponse;
+        const response = new NodeHttpResponse(outgoing);
+        const closed = once(response, 'close');
+
+        await new Promise<void>(resolve => response.write('late data', () => resolve()));
+        await closed;
+
+        assert.equal(writes, 0);
+        assert.equal(response.destroyed, true);
     });
 
     it('lets a controller claim a Node response before piping a delayed stream', async () => {

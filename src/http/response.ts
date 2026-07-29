@@ -103,7 +103,9 @@ export class NodeHttpResponse extends HttpResponse {
         this.statusCode = outgoing.statusCode || 200;
         outgoing.once('finish', () => this.emit('finish'));
         outgoing.once('close', () => {
-            this.emit('close');
+            // A client disconnect destroys the native response without ending this wrapper.
+            // Destroy it as well so piped sources are unpiped before they can write again.
+            this.destroy();
         });
     }
 
@@ -152,6 +154,11 @@ export class NodeHttpResponse extends HttpResponse {
             callback();
             return;
         }
+        if (this.outgoing.destroyed || this.outgoing.writableEnded) {
+            this.destroy();
+            callback();
+            return;
+        }
         this.commitHeaders();
         this.outgoing.write(chunk, encoding, callback);
     }
@@ -161,7 +168,7 @@ export class NodeHttpResponse extends HttpResponse {
             callback();
             return;
         }
-        if (this.outgoing.writableEnded) {
+        if (this.outgoing.destroyed || this.outgoing.writableEnded) {
             callback();
             return;
         }
