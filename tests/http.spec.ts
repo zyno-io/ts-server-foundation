@@ -1507,6 +1507,146 @@ describe('http router', () => {
         }
     });
 
+    it('uses a request-scoped fallback controller after static assets and concrete routes', async () => {
+        const staticDir = mkdtempSync(join(tmpdir(), 'tsf-fallback-controller-'));
+        mkdirSync(join(staticDir, 'assets'));
+        writeFileSync(join(staticDir, 'index.html'), '<main>Static index</main>');
+        writeFileSync(join(staticDir, 'assets', 'app.js'), 'console.log("asset");');
+
+        class PageRenderer {
+            render(url: string, middlewareRan: boolean) {
+                return `<main data-url="${url}" data-middleware="${middlewareRan}">SSR</main>`;
+            }
+        }
+
+        @http.controller('/api')
+        class ApiController {
+            @http.GET('/status')
+            status() {
+                return { source: 'api' };
+            }
+        }
+
+        @http.middleware(request => {
+            request.context.fallbackMiddleware = 'true';
+        })
+        @http.fallback()
+        class FallbackController {
+            constructor(
+                private readonly renderer: PageRenderer,
+                private readonly injectedRequest: HttpRequest
+            ) {}
+
+            handle(request: HttpRequest) {
+                return rawResponse(
+                    this.renderer.render(request.url, request === this.injectedRequest && request.context.fallbackMiddleware === 'true'),
+                    {
+                        contentType: 'text/html; charset=utf-8',
+                        headers: { 'x-rendered-by': 'fallback' }
+                    }
+                );
+            }
+        }
+
+        try {
+            process.env.APP_ENV = 'test';
+            const app = createApp({
+                controllers: [ApiController],
+                providers: [PageRenderer],
+                fallbackController: FallbackController,
+                staticFiles: { directory: staticDir }
+            });
+
+            const root = await app.request(HttpRequest.GET('/'));
+            const page = await app.request(HttpRequest.GET('/products/alpha/reviews?tab=recent'));
+            const asset = await app.request(HttpRequest.GET('/assets/app.js'));
+            const api = await app.request(HttpRequest.GET('/api/status'));
+            const post = await app.request(HttpRequest.POST('/products/alpha'));
+            const head = await app.request(HttpRequest.HEAD('/products/alpha'));
+
+            assert.equal(root.text, '<main data-url="/" data-middleware="true">SSR</main>');
+            assert.equal(page.text, '<main data-url="/products/alpha/reviews?tab=recent" data-middleware="true">SSR</main>');
+            assert.equal(root.getHeader('x-rendered-by'), 'fallback');
+            assert.equal(asset.text, 'console.log("asset");');
+            assert.deepStrictEqual(api.json, { source: 'api' });
+            assert.equal(post.statusCode, 404);
+            assert.equal(head.statusCode, 200);
+            assert.equal(head.text, '');
+            assert.equal(head.getHeader('x-rendered-by'), 'fallback');
+        } finally {
+            rmSync(staticDir, { recursive: true, force: true });
+        }
+    });
+
+    it('lets existing not-found workflows complete a response before the fallback controller', async () => {
+        let fallbackCalls = 0;
+
+        @http.fallback()
+        class FallbackController {
+            handle() {
+                fallbackCalls++;
+                return rawResponse('fallback', { contentType: 'text/plain' });
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ fallbackController: FallbackController });
+        app.on(httpWorkflow.onRouteNotFound, (event: typeof httpWorkflow.onRouteNotFound.event) => {
+            event.response.writeHead(410, { 'content-type': 'text/plain' });
+            event.response.end('workflow');
+        });
+
+        const response = await app.request(HttpRequest.GET('/missing'));
+
+        assert.equal(response.statusCode, 410);
+        assert.equal(response.text, 'workflow');
+        assert.equal(fallbackCalls, 0);
+    });
+
+    it('allows a fallback controller to stream an SSR response', async () => {
+        @http.fallback()
+        class StreamingFallbackController {
+            handle(_request: HttpRequest, response: HttpResponse) {
+                response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                response.write('<main>');
+                setImmediate(() => response.end('SSR</main>'));
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ fallbackController: StreamingFallbackController });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+
+        try {
+            const response = await fetch(`http://127.0.0.1:${address.port}/streamed/page`);
+
+            assert.equal(response.status, 200);
+            assert.match(response.headers.get('content-type') ?? '', /text\/html/);
+            assert.equal(await response.text(), '<main>SSR</main>');
+        } finally {
+            await app.stop();
+        }
+    });
+
+    it('rejects SPA fallbacks when a fallback controller owns unmatched pages', () => {
+        @http.fallback()
+        class FallbackController {
+            handle() {
+                return rawResponse('fallback', { contentType: 'text/plain' });
+            }
+        }
+
+        assert.throws(
+            () =>
+                createApp({
+                    fallbackController: FallbackController,
+                    staticFiles: { spaFallback: 'index.html' }
+                }),
+            /staticFiles\.spaFallback cannot be used with fallbackController/
+        );
+    });
+
     it('observes completed requests safely and exposes the actual ephemeral port on the Node server', async () => {
         @http.controller('/observed')
         class ObservedController {

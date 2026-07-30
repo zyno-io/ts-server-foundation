@@ -17,8 +17,10 @@ import { getJwtFromRequest } from './auth';
 import { getRequestHeaderForParameter } from './headers';
 import {
     getControllerMetadata,
+    getFallbackControllerMetadata,
     getRouteMetadata,
     getRouteParameterResolverMetadata,
+    type HttpFallbackController,
     type RouteParameterResolverContext,
     type RouteParameterResolverFunction,
     type RouteParameterResolverInput,
@@ -100,13 +102,16 @@ export class HttpRouter {
     private restrictedControllers?: Set<ClassType>;
     private readonly unregisteredMiddlewareInstances = new WeakMap<ClassType<HttpMiddleware>, HttpMiddleware>();
     private readonly httpResolvers: CompiledRouteParameterResolver[];
+    private readonly fallbackController?: ClassType<HttpFallbackController>;
 
     constructor(
         private container: Container,
         private events?: EventBus,
-        httpResolvers?: RouteParameterResolverRegistry
+        httpResolvers?: RouteParameterResolverRegistry,
+        fallbackController?: ClassType<HttpFallbackController>
     ) {
         this.httpResolvers = normalizeGlobalRouteParameterResolvers(httpResolvers);
+        this.fallbackController = fallbackController;
     }
 
     registerController(controllerClass: ClassType, moduleId?: number): void {
@@ -159,6 +164,10 @@ export class HttpRouter {
         return this.routes.some(route => route.method === request.method && !!matchRoutePath(route, request.path));
     }
 
+    hasFallbackController(): boolean {
+        return !!this.fallbackController;
+    }
+
     async handle(request: HttpRequest, response: HttpResponse = new MemoryHttpResponse()): Promise<HttpResponse> {
         let route: HttpRoutePlan | undefined;
         let matchedRoute = false;
@@ -170,18 +179,19 @@ export class HttpRouter {
             if (!route) {
                 await this.dispatchWorkflow(httpWorkflow.onRouteNotFound, request, response);
                 if (response.writableEnded) return response;
+                if (this.fallbackController && (request.method === 'GET' || request.method === 'HEAD')) {
+                    await this.handleFallback(request, response);
+                    if (response.writableEnded || response.headersSent) return response;
+                }
                 throw new HttpNotFoundError();
             }
 
-            const context = this.container.createRequestContext();
-            context.instances.set(HttpRequest, request);
-            context.instances.set(HttpRequestStream, request);
-            context.instances.set(HttpResponse, response);
+            const context = this.createRequestContext(request, response);
             await this.dispatchWorkflow(httpWorkflow.onRoute, request, response, route);
             if (response.writableEnded) return response;
             if (route.bodyMode === 'stream') request.enableBodyGuardBypass();
             else await this.guardRequestBody(route, request);
-            await this.runMiddlewares(route, context, request, response);
+            await this.runMiddlewares(route.middlewares, context, request, response, route.moduleId);
             if (response.writableEnded) return response;
             await this.dispatchWorkflow(httpWorkflow.onController, request, response, route);
             if (response.writableEnded) return response;
@@ -215,6 +225,34 @@ export class HttpRouter {
         return response;
     }
 
+    private async handleFallback(request: HttpRequest, response: HttpResponse): Promise<void> {
+        const FallbackController = this.fallbackController;
+        if (!FallbackController) return;
+
+        const fallback = getFallbackControllerMetadata(FallbackController);
+        if (!fallback) return;
+
+        const context = this.createRequestContext(request, response);
+        await this.dispatchWorkflow(httpWorkflow.onRoute, request, response);
+        if (response.writableEnded) return;
+        await this.runMiddlewares(fallback.middlewares, context, request, response);
+        if (response.writableEnded) return;
+        await this.dispatchWorkflow(httpWorkflow.onController, request, response);
+        if (response.writableEnded) return;
+
+        const controller = this.container.get(FallbackController, context);
+        const result = await controller.handle(request, response);
+        if (!response.writableEnded && !response.headersSent) this.writeResult(response, result);
+    }
+
+    private createRequestContext(request: HttpRequest, response: HttpResponse): RequestContext {
+        const context = this.container.createRequestContext();
+        context.instances.set(HttpRequest, request);
+        context.instances.set(HttpRequestStream, request);
+        context.instances.set(HttpResponse, response);
+        return context;
+    }
+
     private match(request: HttpRequest, onMatchedRoute: () => void): HttpRoutePlan | undefined {
         for (const route of this.routes) {
             if (route.method !== request.method) continue;
@@ -235,10 +273,16 @@ export class HttpRouter {
         }
     }
 
-    private async runMiddlewares(route: HttpRoutePlan, context: RequestContext, request: HttpRequest, response: HttpResponse): Promise<void> {
-        for (const input of route.middlewares) {
+    private async runMiddlewares(
+        middlewares: readonly HttpMiddlewareInput[],
+        context: RequestContext,
+        request: HttpRequest,
+        response: HttpResponse,
+        moduleId?: number
+    ): Promise<void> {
+        for (const input of middlewares) {
             const result = isHttpMiddlewareClass(input)
-                ? await this.resolveMiddleware(input, context, route.moduleId).handle(request, response)
+                ? await this.resolveMiddleware(input, context, moduleId).handle(request, response)
                 : await input(request, response);
             if (isHttpResponseResult(result)) result.writeTo(response);
             if (response.writableEnded) return;
@@ -490,16 +534,16 @@ export class HttpRouter {
         return allFiles.length === 1 ? allFiles[0] : undefined;
     }
 
-    private writeResult(response: HttpResponse, result: unknown, route: HttpRoutePlan): void {
+    private writeResult(response: HttpResponse, result: unknown, route?: HttpRoutePlan): void {
         if (isHttpResponseResult(result)) {
             result.writeTo(response);
             return;
         }
 
-        const apiResponseStatus = getApiResponseStatus(route.returnType);
+        const apiResponseStatus = route ? getApiResponseStatus(route.returnType) : undefined;
         if (result === undefined) {
             if (apiResponseStatus !== undefined) response.statusCode = apiResponseStatus;
-            else if (isEmptyResponseReturnType(route.returnType)) response.statusCode = 204;
+            else if (route && isEmptyResponseReturnType(route.returnType)) response.statusCode = 204;
             response.end();
             return;
         }

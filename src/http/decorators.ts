@@ -11,6 +11,14 @@ export interface ControllerMetadata {
     middlewares: HttpMiddlewareInput[];
 }
 
+export interface FallbackControllerMetadata {
+    middlewares: HttpMiddlewareInput[];
+}
+
+export interface HttpFallbackController {
+    handle(request: HttpRequest, response: HttpResponse): unknown | Promise<unknown>;
+}
+
 export interface RouteMetadata {
     method: HttpMethod;
     path: string;
@@ -51,12 +59,17 @@ export interface RouteParameterResolverMetadata {
 export type RouteParameterResolverRegistry = Record<string, RouteParameterResolverInput>;
 
 const controllerMetadata = new WeakMap<ClassType, ControllerMetadata>();
+const fallbackControllerMetadata = new WeakMap<ClassType, FallbackControllerMetadata>();
 const routeMetadata = new WeakMap<object, RouteMetadata[]>();
 const controllerMiddlewareMetadata = new WeakMap<ClassType, HttpMiddlewareInput[]>();
 const routeMiddlewareMetadata = new WeakMap<object, Map<string | symbol, HttpMiddlewareInput[]>>();
 const routeParameterResolverMetadata = new WeakMap<ClassType, RouteParameterResolverMetadata[]>();
 
 type ControllerDecorator = ClassDecorator & {
+    middleware: (..._middlewares: HttpMiddlewareInput[]) => ClassDecorator;
+};
+
+type FallbackControllerDecorator = ClassDecorator & {
     middleware: (..._middlewares: HttpMiddlewareInput[]) => ClassDecorator;
 };
 
@@ -74,6 +87,22 @@ function controller(path = ''): ControllerDecorator {
             middlewares: [...(controllerMiddlewareMetadata.get(Controller) ?? []), ...middlewares]
         });
     }) as ControllerDecorator;
+
+    decorator.middleware = (...items: HttpMiddlewareInput[]) => {
+        middlewares.push(...items);
+        return decorator;
+    };
+    return decorator;
+}
+
+function fallback(): FallbackControllerDecorator {
+    const middlewares: HttpMiddlewareInput[] = [];
+    const decorator = ((target: Function) => {
+        const Controller = target as ClassType;
+        fallbackControllerMetadata.set(Controller, {
+            middlewares: [...(controllerMiddlewareMetadata.get(Controller) ?? []), ...middlewares]
+        });
+    }) as FallbackControllerDecorator;
 
     decorator.middleware = (...items: HttpMiddlewareInput[]) => {
         middlewares.push(...items);
@@ -111,6 +140,8 @@ function middleware(...items: HttpMiddlewareInput[]): ClassDecorator & MethodDec
             controllerMiddlewareMetadata.set(Controller, [...existing, ...items]);
             const metadata = controllerMetadata.get(Controller);
             if (metadata) metadata.middlewares.push(...items);
+            const fallbackMetadata = fallbackControllerMetadata.get(Controller);
+            if (fallbackMetadata) fallbackMetadata.middlewares.push(...items);
             return;
         }
 
@@ -132,6 +163,7 @@ function resolveParameter(type: ClassType, resolver: RouteParameterResolverInput
 
 export const http = {
     controller,
+    fallback,
     middleware,
     resolveParameter,
     GET: (path?: string) => route('GET', path),
@@ -145,6 +177,10 @@ export const http = {
 
 export function getControllerMetadata(controllerClass: ClassType): ControllerMetadata | undefined {
     return controllerMetadata.get(controllerClass);
+}
+
+export function getFallbackControllerMetadata(controllerClass: ClassType): FallbackControllerMetadata | undefined {
+    return fallbackControllerMetadata.get(controllerClass);
 }
 
 export function getRouteMetadata(controllerClass: ClassType): RouteMetadata[] {

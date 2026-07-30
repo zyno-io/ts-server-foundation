@@ -33,7 +33,7 @@ Controller and method paths are joined with one `/`; leading, repeated, and fina
 
 Methods match exactly. A `GET` route does not implicitly handle `HEAD`; declare `@http.HEAD()` when the endpoint supports it. Matching also follows declaration and registration order rather than preferring literal paths over parameters, so place `/fixed` before `/:id` when both can match the same request. Controllers exported by imported modules join the same route table and retain module-local DI resolution. If no exact route matches, the router runs `onRouteNotFound` and then returns the normalized `404` response unless a listener has completed the response.
 
-When the app listens outside `APP_ENV=test`, startup output includes the registered HTTP route count, routes grouped by controller, the bound URL, and a final started line. This makes silent server starts easier to diagnose.
+When the app listens outside `APP_ENV=test`, startup output includes the registered HTTP route count, routes grouped by controller, the bound URL, and a final started line. This makes silent server starts easier to diagnose. A configured fallback controller is intentionally not included in that route count because it runs only after normal route matching fails.
 
 ## HTTP Runtime
 
@@ -75,6 +75,7 @@ The request pipeline is:
 CORS preflight short circuit
   -> prepare CORS response headers
   -> static GET handling when no registered route matches
+  -> onRouteNotFound workflow and GET/HEAD fallback controller when no route or static file handled the request
   -> onRoute workflow
   -> multipart guard, or raw-stream bypass
   -> controller middleware, then route middleware
@@ -452,3 +453,39 @@ const app = createApp({
 ```
 
 `staticFiles: true` uses the default `static/` directory. `directory` defaults to `static`, `index` to `index.html`, and `spaFallback` to the selected index. A custom fallback is served when no concrete file exists. Static handling is GET-only and never shadows a registered route; unsafe decoded paths return `400`.
+
+Set `spaFallback: false` to serve only concrete files and leave a missing path to the normal router `404` flow.
+
+## Fallback Controllers And SSR
+
+An app can register one request-scoped fallback controller for frontend SSR or another default HTML response. It receives every unmatched `GET` or `HEAD` request, including nested paths, without declaring a route for each frontend page:
+
+```typescript
+import { HttpRequest, HttpResponse, createApp, http, rawResponse } from '@zyno-io/ts-server-foundation';
+
+@http.fallback()
+class WebController {
+    constructor(private readonly renderer: WebRenderer) {}
+
+    async handle(request: HttpRequest, _response: HttpResponse) {
+        const page = await this.renderer.render(request.url);
+        return rawResponse(page.html, {
+            statusCode: page.status,
+            contentType: 'text/html; charset=utf-8',
+            headers: page.headers
+        });
+    }
+}
+
+const app = createApp({
+    controllers: [ApiController],
+    fallbackController: WebController,
+    staticFiles: { directory: 'dist/client' }
+});
+```
+
+Concrete controller routes always win. If `staticFiles` is configured, real files such as Vite assets are served before the fallback controller. The controller is then responsible for routing `/`, `/products/a`, and other frontend URLs through its React or Vue SSR bundle. It can return a `404` response when the frontend router has no matching page. `HEAD` runs the same handler, while the runtime suppresses the response body.
+
+`fallbackController` implicitly disables static `index.html` and SPA-fallback handling so Vite's browser entrypoint cannot bypass SSR. Supplying `staticFiles.spaFallback` together with `fallbackController` fails startup because both would answer the same unmatched request. Existing `onRouteNotFound` workflow listeners run first and can end the response before the fallback controller runs.
+
+The framework does not depend on React, Vue, or Vite. Build the browser bundle into `dist/client`, load the framework-specific SSR bundle from the fallback controller, and hydrate it with the matching browser entrypoint. Render data should be intentionally public and safely serialized before it is embedded into the HTML.

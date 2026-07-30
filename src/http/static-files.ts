@@ -7,24 +7,32 @@ import type { HttpResponse } from './response';
 export interface StaticFilesOptions {
     directory?: string;
     index?: string;
-    spaFallback?: string;
+    spaFallback?: string | false;
 }
 
 export interface ResolvedStaticFilesOptions {
     directory: string;
     index: string;
-    spaFallback: string;
+    spaFallback?: string;
+    serveIndex: boolean;
 }
 
-export function resolveStaticFilesOptions(options: boolean | StaticFilesOptions | undefined): ResolvedStaticFilesOptions | undefined {
+export function resolveStaticFilesOptions(
+    options: boolean | StaticFilesOptions | undefined,
+    fallbackControllerEnabled = false
+): ResolvedStaticFilesOptions | undefined {
     if (!options) return undefined;
     const config = options === true ? {} : options;
+    if (fallbackControllerEnabled && 'spaFallback' in config) {
+        throw new Error('staticFiles.spaFallback cannot be used with fallbackController');
+    }
     const index = config.index ?? 'index.html';
-    const spaFallback = config.spaFallback ?? index;
+    const spaFallback = fallbackControllerEnabled || config.spaFallback === false ? undefined : (config.spaFallback ?? index);
     return {
         directory: config.directory ?? 'static',
         index,
-        spaFallback
+        spaFallback,
+        serveIndex: !fallbackControllerEnabled
     };
 }
 
@@ -43,6 +51,8 @@ export async function serveStaticFile(
         return response;
     }
 
+    if (path === '/' && !options.serveIndex) return undefined;
+
     const relative = path === '/' ? options.index : path.replace(/^\/+/, '');
     let file = resolve(base, relative);
     if (!isPathInside(base, file)) {
@@ -56,6 +66,7 @@ export async function serveStaticFile(
         if (!details.isFile()) throw Object.assign(new Error('Not a file'), { code: 'ENOENT' });
     } catch (error) {
         if (!isNotFoundError(error)) throw error;
+        if (!options.spaFallback) return undefined;
         file = resolve(base, options.spaFallback);
         if (!isPathInside(base, file)) {
             response.writeHead(400, { 'content-type': 'text/plain' });

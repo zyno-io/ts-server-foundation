@@ -195,6 +195,7 @@ interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> extends Modu
     cors?: HttpCorsConfig<C>;
     staticFiles?: boolean | StaticFilesOptions;
     httpResolvers?: RouteParameterResolverRegistry;
+    fallbackController?: ClassType<HttpFallbackController>;
     enableHealthcheck?: boolean;
     enableWorker?: boolean;
     enableDkRpc?: boolean;
@@ -203,26 +204,27 @@ interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> extends Modu
 
 Common fields:
 
-| Option              | Description                                                                                   |
-| ------------------- | --------------------------------------------------------------------------------------------- |
-| `config`            | Config class. Defaults to `BaseAppConfig`.                                                    |
-| `defaultConfig`     | Default values applied before env files and `Env`.                                            |
-| `envPassthrough`    | Patterns for dynamic resolved config keys that should be copied into `process.env`.           |
-| `db`                | Database class from `createDatabase`, `createMySQLDatabase`, or `createPostgresDatabase`.     |
-| `controllers`       | HTTP controllers registered with the owned router.                                            |
-| `providers`         | DI providers. Classes, `useValue`, `useClass`, `useExisting`, and `useFactory` are supported. |
-| `imports`           | Imported modules. Exported providers from imported modules become globally injectable.        |
-| `exports`           | Providers exported by this module for global injection.                                       |
-| `listeners`         | Lifecycle/event listener classes.                                                             |
-| `commands`          | Classes decorated with `@cli.command()` or `@cli.controller()`.                               |
-| `frameworkConfig`   | HTTP runtime options; `port` overrides `config.PORT`.                                         |
-| `serverConfig`      | Secondary HTTP runtime options; `frameworkConfig` takes precedence for `port`.                |
-| `cors`              | Static CORS options or a config-driven factory.                                               |
-| `staticFiles`       | Static-file options, or `true` for the default `static/` directory with SPA fallback.         |
-| `httpResolvers`     | App-wide custom HTTP parameter resolvers keyed by reflected class name.                       |
-| `enableHealthcheck` | Set to `false` to skip the default `/healthz` endpoint.                                       |
-| `enableWorker`      | Registers worker services and job runners.                                                    |
-| `enableDkRpc`       | Legacy compatibility flag; the current runtime does not act on it.                            |
+| Option               | Description                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------- |
+| `config`             | Config class. Defaults to `BaseAppConfig`.                                                          |
+| `defaultConfig`      | Default values applied before env files and `Env`.                                                  |
+| `envPassthrough`     | Patterns for dynamic resolved config keys that should be copied into `process.env`.                 |
+| `db`                 | Database class from `createDatabase`, `createMySQLDatabase`, or `createPostgresDatabase`.           |
+| `controllers`        | HTTP controllers registered with the owned router.                                                  |
+| `providers`          | DI providers. Classes, `useValue`, `useClass`, `useExisting`, and `useFactory` are supported.       |
+| `imports`            | Imported modules. Exported providers from imported modules become globally injectable.              |
+| `exports`            | Providers exported by this module for global injection.                                             |
+| `listeners`          | Lifecycle/event listener classes.                                                                   |
+| `commands`           | Classes decorated with `@cli.command()` or `@cli.controller()`.                                     |
+| `frameworkConfig`    | HTTP runtime options; `port` overrides `config.PORT`.                                               |
+| `serverConfig`       | Secondary HTTP runtime options; `frameworkConfig` takes precedence for `port`.                      |
+| `cors`               | Static CORS options or a config-driven factory.                                                     |
+| `staticFiles`        | Static-file options, or `true` for the default `static/` directory with SPA fallback.               |
+| `httpResolvers`      | App-wide custom HTTP parameter resolvers keyed by reflected class name.                             |
+| `fallbackController` | Request-scoped controller for unmatched `GET` and `HEAD` requests, such as a frontend SSR renderer. |
+| `enableHealthcheck`  | Set to `false` to skip the default `/healthz` endpoint.                                             |
+| `enableWorker`       | Registers worker services and job runners.                                                          |
+| `enableDkRpc`        | Legacy compatibility flag; the current runtime does not act on it.                                  |
 
 ## Application And HTTP Runtime
 

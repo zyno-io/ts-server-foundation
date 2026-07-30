@@ -66,7 +66,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
 
     constructor(private readonly options: HttpServerRuntimeOptions<C>) {
         this.corsOptions = resolveCorsOptions(options.config, options.cors);
-        this.staticFiles = resolveStaticFilesOptions(options.staticFiles);
+        this.staticFiles = resolveStaticFilesOptions(options.staticFiles, options.router.hasFallbackController());
         this.appLogger = options.logger.scoped('app');
         this.requestLogger = new HttpRequestLogger(options.config, options.logger.scoped('http'), options.requestLogging);
     }

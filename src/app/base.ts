@@ -13,7 +13,9 @@ import {
     HttpRouter,
     MemoryHttpResponse,
     getControllerMetadata,
+    getFallbackControllerMetadata,
     type HttpCorsConfig,
+    type HttpFallbackController,
     type HttpRequestLoggingOptions,
     type RouteParameterResolverRegistry,
     type StaticFilesOptions
@@ -63,6 +65,7 @@ export interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> exten
     staticFiles?: boolean | StaticFilesOptions;
     requestLogging?: HttpRequestLoggingOptions;
     httpResolvers?: RouteParameterResolverRegistry;
+    fallbackController?: ClassType<HttpFallbackController>;
     enableHealthcheck?: boolean;
     enableWorker?: boolean;
     enableDkRpc?: boolean;
@@ -117,6 +120,8 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         if (isOtelMetricsEndpointEnabled()) defaultControllers.push(MetricsController);
         const rootControllers = uniqueClasses([...(options.controllers ?? []), ...defaultControllers]);
         assertHttpControllerClasses(rootControllers);
+        const fallbackController = options.fallbackController;
+        if (fallbackController) assertHttpFallbackControllerClass(fallbackController);
         const rootCommands = uniqueClasses([...(options.commands ?? [])]);
         const imports = addFrameworkProvidersToImports(options.imports ?? []);
         const controllers = uniqueClasses([...rootControllers, ...collectImportedControllers(imports)]);
@@ -146,14 +151,15 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
             ...(options.providers ?? [])
         ]);
         const controllerProviders: Provider[] = rootControllers.map(controller => createControllerProvider(controller, this));
+        const fallbackControllerProviders: Provider[] = fallbackController ? [createControllerProvider(fallbackController, this)] : [];
         const commandProviders: Provider[] = rootCommands.map(command => createCommandProvider(command));
         this.container = new Container({
             ...options,
             imports,
-            providers: [...appProviders, ...controllerProviders, ...commandProviders]
+            providers: [...appProviders, ...controllerProviders, ...fallbackControllerProviders, ...commandProviders]
         });
         const rootLogger = this.container.get(ScopedLogger);
-        this.router = new HttpRouter(this.container, this.events, options.httpResolvers);
+        this.router = new HttpRouter(this.container, this.events, options.httpResolvers, fallbackController);
         this.http = new HttpServerRuntime({
             config: this.config,
             router: this.router,
@@ -689,6 +695,18 @@ function assertHttpControllerClasses(controllers: readonly ClassType[]): void {
     for (const controller of controllers) {
         if (typeof controller === 'function' && getControllerMetadata(controller)) continue;
         throw new Error(`Controller ${getClassName(controller)} passed to controllers must be decorated with @http.controller()`);
+    }
+}
+
+function assertHttpFallbackControllerClass(controller: ClassType<HttpFallbackController>): void {
+    if (getControllerMetadata(controller)) {
+        throw new Error(`Fallback controller ${getClassName(controller)} must not also be decorated with @http.controller()`);
+    }
+    if (!getFallbackControllerMetadata(controller)) {
+        throw new Error(`Fallback controller ${getClassName(controller)} must be decorated with @http.fallback()`);
+    }
+    if (typeof controller.prototype.handle !== 'function') {
+        throw new Error(`Fallback controller ${getClassName(controller)} must define handle(request, response)`);
     }
 }
 
