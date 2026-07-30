@@ -158,8 +158,7 @@ import { SrpcClient, SrpcConflictError } from '@zyno-io/ts-server-foundation';
 import { ClientMessage, ServerMessage } from './generated/proto/service';
 
 const client = new SrpcClient(logger, 'wss://api.example.com/srpc', ClientMessage, ServerMessage, 'worker-1', { role: 'worker' }, 'shared-secret', {
-    enableReconnect: true,
-    protocolVersion: 2
+    enableReconnect: true
 });
 
 client.registerConnectionHandler(() => {
@@ -191,18 +190,16 @@ Client options:
 | Option            | Default | Description                              |
 | ----------------- | ------- | ---------------------------------------- |
 | `enableReconnect` | `true`  | Reconnects after unexpected disconnects. |
-| `protocolVersion` | `2`     | Protocol version sent during handshake.  |
 
 The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
 
-With protocol version 2, duplicate `clientId` connections are rejected unless `connect({ supersede: true })` is used.
-Protocol version 1 retains the legacy behavior: a new connection replaces the existing connection with the same client ID even without the supersede flag. Prefer version 2 when duplicate ownership must be explicit.
+Duplicate `clientId` connections are rejected unless `connect({ supersede: true })` is used.
 
 After the initial ping handshake, the client sends a ping every 55 seconds. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate ping-based liveness check.
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256. The client sends `authv`, `appv`, `ts`, `id`, `cid`, `signature`, `_v`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters.
+Clients sign connection metadata with HMAC-SHA256. Raw clients must send `authv=2`, `_v=2`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters.
 
 By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
 
@@ -267,7 +264,16 @@ receiver.on('data', chunk => {
 
 Byte stream operations are carried in the SRPC envelope `byteStreamOperation` field. Pending receiver data is bounded and expires if a receiver is never attached.
 
-Data that arrives before `createReceiver()` is buffered for at most five seconds. A pending receiver is limited to 2 MiB, all pending receivers on one parent stream share a 2 MiB total limit, and at most 1,024 pending receiver IDs are retained. Exceeding a byte limit turns that pending receiver into an error; exceeding the count limit drops data for additional unknown IDs. These are protocol safety limits, not configurable application buffering.
+Data that arrives before `createReceiver()` is buffered for at most five
+seconds. A pending receiver is limited to 2 MiB, all pending receivers on one
+parent stream share a 2 MiB total limit, and at most 1,024 pending receiver IDs
+are retained. Exceeding a byte limit turns that pending receiver into an error.
+An operation for a 1,025th unknown ID is a deterministic resource/protocol
+failure that fences the parent SRPC transport; write, finish, and destroy are
+never silently dropped. A remote `destroy` is retained independently from its
+optional reason, so `destroy(undefined)` remains a clean terminal operation
+when the receiver later attaches and is not echoed back to the peer. These are
+protocol safety limits, not configurable application buffering.
 
 ## Observers
 
@@ -283,9 +289,26 @@ Observers receive connection entries with `{ type, stream, at }`, disconnection 
 
 ## Errors And Timeouts
 
-On the server, `SrpcError(message, true)` sets `userError` on the reply envelope. The current client rejects that reply as a plain `Error`, so callers can observe the message but not the user-error flag or `SrpcError` class. Errors thrown by client-side handlers are likewise sent without `userError`. Other thrown values are serialized as ordinary remote errors.
+Throw `new SrpcError(message, true)` from either a server handler or a
+client-side handler to mark an expected user-facing failure. The reply envelope
+preserves the message and `userError` flag in both directions, and the invoking
+peer rejects with an `SrpcError` whose `isUserError` value is retained. Other
+thrown values are serialized as ordinary remote errors and do not acquire the
+user-error flag.
 
-`invoke()` defaults to a 30-second timeout on both client and server; a per-call timeout overrides it. The server closes with `badArg` for unknown or missing request IDs and decode failures. After the initial handshake, the client also closes for unknown or missing request IDs, while an undecodable server payload is logged and ignored.
+`invoke()` defaults to a 30-second timeout on both client and server; a
+per-call timeout overrides it. Both peers close with `badArg` for unknown or
+missing request IDs, decode failures, invalid protocol frames, and outgoing
+WebSocket backpressure. Before initiating that close, the peer synchronously
+revokes the affected stream generation: buffered frames can no longer dispatch,
+delayed handlers and byte-stream writes cannot respond, request and pressure
+accounting is cleared, `stream.connected` becomes false, new byte streams are
+rejected, and close-event cleanup is idempotent. The server applies
+`maxMessageBytes` to outbound synchronous responses, asynchronous responses,
+and byte-stream frames as well as inbound frames. A definitive WebSocket send
+throw or callback error also revokes before closing. Normal graceful
+disconnects retain their ordinary close-event semantics and carry the supplied
+bounded close reason.
 
 ## Telemetry Boundary
 

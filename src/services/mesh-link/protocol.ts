@@ -1,16 +1,26 @@
 import { SrpcMeshProtocolError } from '../../srpc/types';
 
-export const MeshLinkProtocolVersion = 1;
+export const MeshLinkProtocolVersion = 2;
 const HeaderLengthBytes = 4;
 const MaxHeaderBytes = 64 * 1024;
 
 export type MeshLinkFrameType =
     | 'invoke'
     | 'reserveStreamIds'
+    | 'confirmStreamIds'
+    | 'releaseStreamIds'
     | 'streamWrite'
     | 'streamFinish'
     | 'streamDestroy'
+    | 'streamActivate'
     | 'streamAttach'
+    | 'revokeCapability'
+    /** Generic MeshClientService request delivery over an authenticated link. */
+    | 'clientInvoke'
+    /** Exact-generation client close/fence. */
+    | 'fenceClient'
+    /** Generic MeshClientService metadata mutation. */
+    | 'clientUpdateMetadata'
     | 'disconnect'
     | 'updateMetadata'
     | 'accepted'
@@ -29,14 +39,21 @@ export interface MeshLinkFrameHeader {
     connectionId?: string;
     prefix?: string;
     timeoutMs?: number;
+    /** Authenticated end-to-end invocation deadline (epoch milliseconds). */
+    deadlineAt?: number;
     streamId?: number;
     count?: number;
     ids?: number[];
+    /** Opaque, per-requester handle capability (v2). */
+    capability?: string;
+    /** Caller-generated idempotency key for a sender-ID reservation (v2). */
+    reservationId?: string;
     ok?: boolean;
     error?: string;
     errorName?: string;
     userError?: boolean;
     reason?: string;
+    closeCapability?: boolean;
 }
 
 export interface MeshLinkFrame {
@@ -44,10 +61,18 @@ export interface MeshLinkFrame {
     body: Buffer;
 }
 
-export function encodeMeshLinkFrame(header: Omit<MeshLinkFrameHeader, 'version'>, body: Uint8Array = new Uint8Array()): Buffer {
+export function encodeMeshLinkFrame(
+    header: Omit<MeshLinkFrameHeader, 'version'>,
+    body: Uint8Array = new Uint8Array(),
+    maxFrameBytes?: number
+): Buffer {
     const encodedHeader = Buffer.from(JSON.stringify({ version: MeshLinkProtocolVersion, ...header }));
     if (encodedHeader.length > MaxHeaderBytes) throw new SrpcMeshProtocolError('sRPC mesh frame header is too large');
-    const result = Buffer.allocUnsafe(HeaderLengthBytes + encodedHeader.length + body.byteLength);
+    const frameLength = HeaderLengthBytes + encodedHeader.length + body.byteLength;
+    if (!Number.isSafeInteger(frameLength) || (maxFrameBytes !== undefined && frameLength > maxFrameBytes)) {
+        throw new SrpcMeshProtocolError('sRPC mesh frame exceeds the configured limit');
+    }
+    const result = Buffer.allocUnsafe(frameLength);
     result.writeUInt32BE(encodedHeader.length, 0);
     encodedHeader.copy(result, HeaderLengthBytes);
     Buffer.from(body).copy(result, HeaderLengthBytes + encodedHeader.length);

@@ -1,5 +1,13 @@
 export { detectMeshIpAddress, resolveMeshLinkAdvertiseUrl, type MeshLinkAddressOptions } from './address';
-export { MeshLinkAuthenticator, type MeshLinkAuthIdentity } from './auth';
+export {
+    createMeshLinkEndpointKeyPair,
+    MeshLinkAuthenticator,
+    signMeshLinkEndpointProof,
+    verifyMeshLinkEndpointProof,
+    type MeshLinkAuthIdentity,
+    type MeshLinkAuthPurpose,
+    type MeshLinkEndpointKeyPair
+} from './auth';
 export { MeshLinkPeer, type MeshLinkRequestHandler } from './peer';
 export {
     decodeMeshLinkFrame,
@@ -9,4 +17,11 @@ export {
     type MeshLinkFrameHeader,
     type MeshLinkFrameType
 } from './protocol';
-export { acquireMeshLinkRuntime, getMeshLinkProcessId, MeshLinkRuntime, type MeshLinkRuntimeOptions } from './runtime';
+export {
+    acquireMeshLinkRuntime,
+    getMeshLinkProcessId,
+    MeshLinkRuntime,
+    type MeshLinkEndpointPinResolver,
+    type MeshLinkResolvedEndpointPin,
+    type MeshLinkRuntimeOptions
+} from './runtime';

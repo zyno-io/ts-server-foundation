@@ -3,8 +3,8 @@ import type { IncomingMessage } from 'node:http';
 import WebSocket from 'ws';
 
 import { getCurrentApp } from '../app';
-import { uuid7 } from '../helpers';
-import { SrpcByteStream } from './SrpcByteStream';
+import { assertSafeTimerMs, MAX_SAFE_TIMER_MS, uuid7 } from '../helpers';
+import { byteStreamDestroyReason, SrpcByteStream } from './SrpcByteStream';
 import { notifySrpcObservers } from './observer';
 import {
     BaseMessage,
@@ -19,25 +19,46 @@ import {
     ResponseData,
     SrpcDisconnectCause,
     SrpcConnection,
+    SrpcBackpressureError,
     SrpcError,
+    SrpcIndeterminateDeliveryError,
     SrpcMeta,
     SrpcStream,
     TSrpcMessageHandlerFnOrClass,
     encodeSrpcMessage,
-    isSrpcMessageHandlerClass
+    isSrpcMessageHandlerClass,
+    serializeSrpcError
 } from './types';
 import { createWebSocketUpgradeHandler, installWebSocketUpgradeHandler, removeWebSocketUpgradeHandler } from '../http';
 
 const StreamInfoSymbol = Symbol('srpc-info');
 const DefaultLateReplyTombstoneTtlMs = 60_000;
 const MaxLateReplyTombstonesPerStream = 256;
+const DefaultMaxPendingClientRequests = 128;
+const DefaultMaxInFlightClientRequests = 64;
+const DefaultMaxPendingClientRequestBytes = 8 * 1024 * 1024;
+const DefaultMaxInFlightClientRequestBytes = 8 * 1024 * 1024;
+const DefaultMaxBufferedBytes = 8 * 1024 * 1024;
+const DefaultMaxMessageBytes = 8 * 1024 * 1024;
+const DefaultMaxPendingServerRequests = 128;
+const DefaultMaxPendingServerRequestBytes = 8 * 1024 * 1024;
+const DefaultMaxPendingHandshakes = 128;
+const DefaultMaxActiveStreams = 10_000;
+const DefaultMaxClientIdBytes = 1_024;
+const DefaultMaxClientMetadataBytes = 64 * 1024;
+const DefaultMaxAuthReplayPrincipals = 256;
+const MaxBackpressuredByteStreamsPerStream = 1_024;
+const MaxBackpressuredByteStreamBytesPerStream = DefaultMaxBufferedBytes;
+const MaxByteStreamId = 0x7fffffff;
+const MaxAuthReplayNoncesPerPrincipal = 256;
 
 interface StreamInfo {
     clientStreamId: string;
     clientId: string;
     appVersion: string;
     configureTs: number;
-    protocolVersion: number;
+    protocolVersion: 2;
+    features: ReadonlySet<string>;
     supersede: boolean;
     address: string;
     meta: Record<string, unknown>;
@@ -53,10 +74,11 @@ const noopLogger: ISrpcLogger = {
 export class SrpcServer<
     TMeta extends SrpcMeta = SrpcMeta,
     TClientOutput extends BaseMessage = BaseMessage,
-    TServerOutput extends BaseMessage = BaseMessage
+    TServerOutput extends BaseMessage = BaseMessage,
+    TResolvedMeta = TMeta
 > {
     private readonly logger: ISrpcLogger;
-    private readonly wsServer = new WebSocket.Server({ noServer: true });
+    private readonly wsServer: WebSocket.Server;
     private readonly streamConnectionHandlers = new Set<(stream: SrpcStream<TMeta>) => void | Promise<void>>();
     private readonly streamDisconnectionHandlers = new Set<(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause) => void>();
     private readonly streamMessageHandlers = new Map<
@@ -68,10 +90,21 @@ export class SrpcServer<
     >();
     private readonly broadcastHandlers = new Map<string, Set<(data: unknown, senderInstanceId: number) => void | Promise<void>>>();
     private readonly blockedClientRequests = new WeakSet<SrpcStream<TMeta>>();
-    private readonly pendingClientRequests = new WeakMap<SrpcStream<TMeta>, TClientOutput[]>();
+    private readonly pendingClientRequests = new WeakMap<SrpcStream<TMeta>, Array<{ data: TClientOutput; retainedBytes: number }>>();
+    private readonly pendingClientRequestBytes = new WeakMap<SrpcStream<TMeta>, number>();
+    private readonly inFlightClientRequests = new WeakMap<SrpcStream<TMeta>, number>();
+    private readonly inFlightClientRequestBytes = new WeakMap<SrpcStream<TMeta>, number>();
+    private readonly pendingServerRequestBytes = new WeakMap<SrpcStream<TMeta>, number>();
     private readonly lateReplyTombstonesByStream = new WeakMap<SrpcStream<TMeta>, Map<string, number>>();
+    private readonly backpressuredByteStreams = new WeakMap<SrpcStream<TMeta>, Set<number>>();
+    private readonly backpressuredByteStreamBytes = new WeakMap<SrpcStream<TMeta>, Map<number, number>>();
+    private readonly publishedStreams = new WeakSet<SrpcStream<TMeta>>();
+    private readonly authReplayNoncesByPrincipal = new Map<string, Map<string, number>>();
+    private authNonceConsumer?: (principal: string, nonce: string, expiresAt: number) => boolean | Promise<boolean>;
+    private readonly initialPongWaiters = new WeakMap<SrpcStream<TMeta>, { resolve: () => void; timer: ReturnType<typeof setTimeout> }>();
     private readonly cleanupUpgradeHandler?: () => void;
     private readonly inactivityCheckInterval: ReturnType<typeof setInterval>;
+    private pendingHandshakeCount = 0;
     private clientAuthorizer?: (
         metadata: Record<string, unknown>,
         req: IncomingMessage
@@ -83,7 +116,9 @@ export class SrpcServer<
     protected readonly pendingStreamsByClientId = new Map<string, SrpcStream<TMeta>>();
 
     constructor(protected readonly options: ISrpcServerOptions<TClientOutput, TServerOutput>) {
+        validateServerResourceOptions(options);
         this.logger = createLogger(options.logger, options.logLevel);
+        this.wsServer = new WebSocket.Server({ noServer: true, maxPayload: this.maxMessageBytes });
         this.wsServer.on('connection', (ws, request) => this.attachConnection(ws, request));
 
         if (options.httpServer) {
@@ -118,47 +153,86 @@ export class SrpcServer<
         const { id: clientStreamId, cid: clientId, appv: appVersion } = query;
         const address = this.getRemoteAddress(info.req);
 
-        if (!clientStreamId || !clientId || !appVersion) {
+        const protocolVersion = Number(query._v);
+        if (!clientStreamId || !clientId || !appVersion || protocolVersion !== 2) {
             cb(false, 400, 'Missing required query parameters');
             return;
         }
+        if (Buffer.byteLength(clientId) > this.maxClientIdBytes) {
+            cb(false, 400, 'Client ID exceeds the configured limit');
+            return;
+        }
+        if (this.pendingHandshakeCount >= this.maxPendingHandshakes) {
+            cb(false, 503, 'Too many pending client handshakes');
+            return;
+        }
+        if (this.streamsById.size >= this.maxActiveStreams) {
+            cb(false, 503, 'Too many active client streams');
+            return;
+        }
 
-        this.validateClientAuth(query, info.req).then(
-            result => {
-                if (!result) {
+        this.pendingHandshakeCount++;
+        this.validateClientAuth(query, info.req)
+            .then(
+                result => {
+                    if (!result) {
+                        cb(false, 403, 'Failed authentication');
+                        return;
+                    }
+
+                    const queryMeta = Object.fromEntries(
+                        Object.entries(query)
+                            .filter(([key]) => key.startsWith('m--'))
+                            .map(([key, value]) => [key.slice(3), value])
+                    );
+                    const authMeta = result === true ? {} : result;
+                    const mergedMeta = { ...queryMeta, ...authMeta };
+                    let metadataBytes: number;
+                    try {
+                        metadataBytes = encodedJsonBytes(mergedMeta);
+                    } catch {
+                        cb(false, 400, 'Client metadata must be JSON-serializable');
+                        return;
+                    }
+                    if (metadataBytes > this.maxClientMetadataBytes) {
+                        cb(false, 400, 'Client metadata exceeds the configured limit');
+                        return;
+                    }
+                    (info.req as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol] = {
+                        clientStreamId,
+                        clientId,
+                        appVersion,
+                        configureTs: Number(query.ts ?? 0),
+                        protocolVersion: 2,
+                        features: new Set(
+                            normalizeFeatures((query._f ?? '').split(',').filter(feature => feature.length > 0))
+                                .split(',')
+                                .filter(Boolean)
+                        ),
+                        supersede: query._supersede === '1',
+                        address,
+                        meta: mergedMeta
+                    };
+                    cb(true);
+                },
+                error => {
+                    this.logger.warn('Error validating SRPC client auth', error);
                     cb(false, 403, 'Failed authentication');
-                    return;
                 }
-
-                const queryMeta = Object.fromEntries(
-                    Object.entries(query)
-                        .filter(([key]) => key.startsWith('m--'))
-                        .map(([key, value]) => [key.slice(3), value])
-                );
-                const authMeta = result === true ? {} : result;
-                (info.req as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol] = {
-                    clientStreamId,
-                    clientId,
-                    appVersion,
-                    configureTs: Number(query.ts ?? 0),
-                    protocolVersion: Number(query._v ?? 1),
-                    supersede: query._supersede === '1',
-                    address,
-                    meta: { ...queryMeta, ...authMeta }
-                };
-                cb(true);
-            },
-            error => {
-                this.logger.warn('Error validating SRPC client auth', error);
-                cb(false, 403, 'Failed authentication');
-            }
-        );
+            )
+            .finally(() => {
+                this.pendingHandshakeCount = Math.max(0, this.pendingHandshakeCount - 1);
+            });
     };
 
     private attachConnection(ws: WebSocket, request: IncomingMessage): void {
         const info = (request as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol];
         if (!info) {
             ws.close(4000, 'Missing stream info');
+            return;
+        }
+        if (this.streamsById.size >= this.maxActiveStreams) {
+            ws.close(1013, 'Too many active client streams');
             return;
         }
 
@@ -171,6 +245,7 @@ export class SrpcServer<
 
     private createStream(ws: WebSocket, info: StreamInfo): SrpcStream<TMeta> {
         const streamId = uuid7();
+        const thisServer = this;
         const stream: SrpcStream<TMeta> = {
             $ws: ws,
             $queue: new Map<string, IQueuedRequest>(),
@@ -181,24 +256,25 @@ export class SrpcServer<
             appVersion: info.appVersion,
             configureTs: info.configureTs,
             protocolVersion: info.protocolVersion,
+            features: info.features,
             supersede: info.supersede,
             meta: info.meta as TMeta,
             connectedAt: Date.now(),
             isActivated: false,
             lastPingAt: Date.now(),
             get connected() {
-                return ws.readyState === WebSocket.OPEN;
+                return stream.lastPingAt >= 0 && thisServer.isCurrentStream(stream) && ws.readyState === WebSocket.OPEN;
             },
-            close: async reason => {
-                if (stream.lastPingAt < 0) return;
-                this.cleanupStream(stream, 'disconnect');
-                if (reason && ws.readyState === WebSocket.OPEN) ws.close(1000, reason.slice(0, 123));
-            },
+            close: async reason => this.closeStreamGracefully(stream, reason),
             byteStream: {
                 parentStreamId: streamId,
+                remoteSenderIdParity: 1,
                 write: (substreamId, chunk) =>
                     this.writeToStreamAsync(stream, {
-                        byteStreamOperation: { streamId: substreamId, write: { chunk: chunk as Uint8Array } }
+                        byteStreamOperation: {
+                            streamId: substreamId,
+                            write: { chunk: new Uint8Array(chunk as ArrayLike<number>) }
+                        }
                     } as TServerOutput),
                 finish: substreamId =>
                     this.writeToStream(stream, {
@@ -208,12 +284,19 @@ export class SrpcServer<
                     this.writeToStream(stream, {
                         byteStreamOperation: {
                             streamId: substreamId,
-                            destroy: { error: error ? String(error) : undefined }
+                            destroy: { error: byteStreamDestroyReason(error) }
                         }
                     } as TServerOutput),
+                receiverBufferChanged: (substreamId, bufferedBytes) => {
+                    this.updateByteStreamBufferedBytes(stream, substreamId, bufferedBytes);
+                },
                 attachDisconnectHandler: handler => ws.on('close', handler),
                 detachDisconnectHandler: handler => ws.off('close', handler),
                 getBufferedAmount: () => ws.bufferedAmount
+            },
+            resolveByteStream: () => {
+                if (!this.isStreamDispatchAvailable(stream)) throw new Error('SRPC stream generation is revoked');
+                return stream.byteStream;
             }
         };
         SrpcByteStream.init(stream, { startId: 2, step: 2 });
@@ -223,8 +306,7 @@ export class SrpcServer<
     private handleStreamEstablished(stream: SrpcStream<TMeta>): void {
         const conflictingStream = this.getCurrentStreamByClientId(stream.clientId);
         if (conflictingStream) {
-            if (stream.protocolVersion >= 2 && !stream.supersede) {
-                stream.lastPingAt = -1;
+            if (!stream.supersede) {
                 this.closeStreamWithError(stream, 'conflict', 'Client ID already connected');
                 return;
             }
@@ -237,12 +319,26 @@ export class SrpcServer<
         this.postEstablishCheck(stream)
             .then(async rejected => {
                 if (rejected || stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
+                // The protocol listener is installed before user callbacks. A
+                // throwing callback therefore cannot leave a live socket without
+                // a message consumer.
                 stream.$ws.on('message', data => this.handleWsMessage(stream, data));
-                this.writeToStream(stream, { pingPong: {} } as TServerOutput);
+                if (!this.writeToStream(stream, { pingPong: {} } as TServerOutput)) {
+                    this.cleanupStream(stream, 'disconnect');
+                    return;
+                }
+                await this.waitForInitialPong(stream);
+                if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
+                await this.onStreamWillActivate(stream);
+                if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
                 await this.onStreamConnected(stream);
-                if (stream.lastPingAt < 0) return;
+                if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
                 this.activateStream(stream);
                 if (!stream.isActivated) return;
+                if (!this.writeToStream(stream, { pingPong: {} } as TServerOutput)) {
+                    this.cleanupStream(stream, 'disconnect');
+                    return;
+                }
                 await this.onStreamActivated(stream);
                 if (stream.lastPingAt >= 0 && stream.isActivated) this.openClientRequests(stream);
             })
@@ -256,12 +352,42 @@ export class SrpcServer<
         return Promise.resolve(false);
     }
 
+    /**
+     * Hook for private/cluster CAS work after liveness is proven but before
+     * user connection handlers and public local publication.
+     */
+    protected onStreamWillActivate(_stream: SrpcStream<TMeta>): void | Promise<void> {}
+
+    /**
+     * Allows a transport extension to recognize a locally-owned sender whose
+     * state is maintained outside the core SrpcByteStream sender map.
+     * Core remains strict by default.
+     */
+    protected hasExternalByteStreamSender(_stream: SrpcStream<TMeta>, _streamId: number): boolean {
+        return false;
+    }
+
     protected getCurrentStreamByClientId(clientId: string): SrpcStream<TMeta> | undefined {
         return this.pendingStreamsByClientId.get(clientId) ?? this.streamsByClientId.get(clientId);
     }
 
     protected isCurrentStream(stream: SrpcStream<TMeta>): boolean {
+        // Lightweight embedders and focused unit tests may invoke the protocol
+        // methods without the registry layer; normal servers always have both.
+        if (!this.pendingStreamsByClientId || !this.streamsByClientId) return true;
         return this.getCurrentStreamByClientId(stream.clientId) === stream;
+    }
+
+    private waitForInitialPong(stream: SrpcStream<TMeta>): Promise<void> {
+        return new Promise(resolve => {
+            const timer = setTimeout(() => {
+                this.initialPongWaiters.delete(stream);
+                this.cleanupStream(stream, 'timeout');
+                resolve();
+            }, 10_000);
+            timer.unref?.();
+            this.initialPongWaiters.set(stream, { resolve, timer });
+        });
     }
 
     private activateStream(stream: SrpcStream<TMeta>): void {
@@ -269,29 +395,44 @@ export class SrpcServer<
         this.pendingStreamsByClientId.delete(stream.clientId);
         stream.isActivated = true;
         this.streamsByClientId.set(stream.clientId, stream);
+        this.publishedStreams.add(stream);
         notifySrpcObservers({ type: 'connection', stream, at: Date.now() });
     }
 
     private handleWsMessage(stream: SrpcStream<TMeta>, data: WebSocket.RawData): void {
+        if (!this.isStreamDispatchAvailable(stream)) return;
         try {
-            const decoded = this.options.clientMessage.decode(toBuffer(data));
-            this.handleStreamDataReceived(stream, decoded);
+            const encoded = toBuffer(data);
+            const decoded = this.options.clientMessage.decode(encoded);
+            this.handleStreamDataReceived(stream, decoded, encoded.length);
         } catch (error) {
             this.logger.warn('Failed to decode SRPC message', error);
             this.closeStreamWithError(stream, 'badArg', 'Invalid message format');
         }
     }
 
-    private handleStreamDataReceived(stream: SrpcStream<TMeta>, data: TClientOutput): void {
+    private handleStreamDataReceived(stream: SrpcStream<TMeta>, data: TClientOutput, retainedBytes = estimateMessageBytes(data)): void {
+        if (!this.isStreamDispatchAvailable(stream)) return;
         notifySrpcObservers({ type: 'message', stream, direction: 'inbound', data, at: Date.now() });
         if (data.pingPong) {
             stream.lastPingAt = Date.now();
+            const waiter = this.initialPongWaiters.get(stream);
+            if (waiter) {
+                clearTimeout(waiter.timer);
+                this.initialPongWaiters.delete(stream);
+                waiter.resolve();
+                return;
+            }
             this.writeToStream(stream, { pingPong: {} } as TServerOutput);
             return;
         }
 
         if (data.byteStreamOperation) {
-            this.handleByteSubstreamOperation(stream, data.byteStreamOperation);
+            if (!this.validRemoteByteStreamOperation(stream, data.byteStreamOperation)) {
+                this.closeStreamWithError(stream, 'badArg', 'Invalid byte stream ID');
+                return;
+            }
+            this.handleByteSubstreamOperation(stream, data.byteStreamOperation, data.requestId);
             return;
         }
 
@@ -311,18 +452,38 @@ export class SrpcServer<
                 return;
             }
             stream.$queue.delete(data.requestId);
-            if (data.error) queueItem.reject(new SrpcError(data.error, data.userError));
+            if (data.error !== undefined) queueItem.reject(new SrpcError(data.error, data.userError));
             else queueItem.resolve(data);
             return;
         }
 
         if (!stream.isActivated || this.blockedClientRequests.has(stream)) {
             const pending = this.pendingClientRequests.get(stream) ?? [];
-            pending.push(data);
+            if (pending.length >= this.maxPendingClientRequests) {
+                this.closeStreamWithError(stream, 'badArg', 'Too many pending client requests');
+                return;
+            }
+            if ((this.pendingClientRequestBytes.get(stream) ?? 0) + retainedBytes > this.maxPendingClientRequestBytes) {
+                this.closeStreamWithError(stream, 'badArg', 'Too many pending client request bytes');
+                return;
+            }
+            pending.push({ data, retainedBytes });
             this.pendingClientRequests.set(stream, pending);
+            this.pendingClientRequestBytes.set(stream, (this.pendingClientRequestBytes.get(stream) ?? 0) + retainedBytes);
             return;
         }
 
+        const inFlight = this.inFlightClientRequests.get(stream) ?? 0;
+        if (inFlight >= this.maxInFlightClientRequests) {
+            this.closeStreamWithError(stream, 'badArg', 'Too many in-flight client requests');
+            return;
+        }
+        if ((this.inFlightClientRequestBytes.get(stream) ?? 0) + retainedBytes > this.maxInFlightClientRequestBytes) {
+            this.closeStreamWithError(stream, 'badArg', 'Too many in-flight client request bytes');
+            return;
+        }
+        this.inFlightClientRequests.set(stream, inFlight + 1);
+        this.inFlightClientRequestBytes.set(stream, (this.inFlightClientRequestBytes.get(stream) ?? 0) + retainedBytes);
         this.handleClientRequest(stream, data.requestId, data)
             .then(response =>
                 this.writeToStream(stream, {
@@ -332,13 +493,19 @@ export class SrpcServer<
                 } as TServerOutput)
             )
             .catch(error => {
-                const isUserError = error instanceof SrpcError && error.isUserError;
                 this.writeToStream(stream, {
                     requestId: data.requestId,
                     reply: true,
-                    error: isUserError ? error.message : String(error),
-                    userError: isUserError
+                    ...serializeSrpcError(error)
                 } as TServerOutput);
+            })
+            .finally(() => {
+                const remaining = (this.inFlightClientRequests.get(stream) ?? 1) - 1;
+                if (remaining > 0) this.inFlightClientRequests.set(stream, remaining);
+                else this.inFlightClientRequests.delete(stream);
+                const remainingBytes = Math.max(0, (this.inFlightClientRequestBytes.get(stream) ?? retainedBytes) - retainedBytes);
+                if (remainingBytes) this.inFlightClientRequestBytes.set(stream, remainingBytes);
+                else this.inFlightClientRequestBytes.delete(stream);
             });
     }
 
@@ -348,13 +515,85 @@ export class SrpcServer<
         if (!pending?.length) return;
 
         this.pendingClientRequests.delete(stream);
-        for (const message of pending) this.handleStreamDataReceived(stream, message);
+        // The pending accounting is deliberately cleared only after removing the
+        // retained queue; activated request accounting starts from each message's
+        // decoded size and cannot inherit stale pre-activation totals.
+        this.pendingClientRequestBytes.delete(stream);
+        for (const message of pending) this.handleStreamDataReceived(stream, message.data, message.retainedBytes);
     }
 
-    protected handleByteSubstreamOperation(stream: SrpcStream<TMeta>, op: NonNullable<TClientOutput['byteStreamOperation']>): void {
-        if (op.write) SrpcByteStream.writeReceiver(stream, op.streamId, op.write.chunk);
-        else if (op.finish) SrpcByteStream.finishReceiver(stream, op.streamId);
-        else if (op.destroy) SrpcByteStream.destroySubstream(stream, op.streamId, op.destroy.error);
+    protected handleByteSubstreamOperation(
+        stream: SrpcStream<TMeta>,
+        op: NonNullable<TClientOutput['byteStreamOperation']>,
+        requestId?: string
+    ): void {
+        if (op.destroy != null && SrpcByteStream.consumeTerminalSender(stream, op.streamId)) return;
+        if (op.write != null) {
+            const backpressured = this.backpressuredByteStreams.get(stream);
+            const wasBackpressured = backpressured?.has(op.streamId) ?? false;
+            const accepted = SrpcByteStream.writeReceiver(stream, op.streamId, op.write.chunk);
+            this.updateByteStreamBufferedBytes(stream, op.streamId, SrpcByteStream.getReceiverBufferedBytes(stream, op.streamId));
+            if (!accepted) {
+                if (wasBackpressured) {
+                    SrpcByteStream.abortReceiver(stream, op.streamId, new Error(`SRPC byte stream ${op.streamId} receiver is not draining`));
+                    this.clearByteStreamState(stream, op.streamId);
+                    return;
+                }
+                const ids = backpressured ?? new Set<number>();
+                if (ids.size >= MaxBackpressuredByteStreamsPerStream) {
+                    SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many backpressured SRPC byte streams'));
+                    this.clearByteStreamState(stream, op.streamId);
+                    return;
+                }
+                ids.add(op.streamId);
+                this.backpressuredByteStreams.set(stream, ids);
+            } else if (wasBackpressured) {
+                this.clearByteStreamBackpressureFlag(stream, op.streamId);
+            }
+            if (this.totalBackpressuredByteStreamBytes(stream) > MaxBackpressuredByteStreamBytesPerStream) {
+                SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many buffered SRPC byte stream bytes'));
+                this.clearByteStreamState(stream, op.streamId);
+            }
+        } else if (op.finish != null) {
+            this.clearByteStreamBackpressureFlag(stream, op.streamId);
+            SrpcByteStream.finishReceiver(stream, op.streamId);
+        } else if (op.destroy != null) {
+            this.clearByteStreamState(stream, op.streamId);
+            SrpcByteStream.destroySubstream(stream, op.streamId, op.destroy.error);
+        }
+    }
+
+    private clearByteStreamBackpressureFlag(stream: SrpcStream<TMeta>, streamId: number): void {
+        const ids = this.backpressuredByteStreams.get(stream);
+        if (!ids) return;
+        ids.delete(streamId);
+        if (!ids.size) this.backpressuredByteStreams.delete(stream);
+    }
+
+    private clearByteStreamState(stream: SrpcStream<TMeta>, streamId: number): void {
+        this.clearByteStreamBackpressureFlag(stream, streamId);
+        this.updateByteStreamBufferedBytes(stream, streamId, 0);
+    }
+
+    private updateByteStreamBufferedBytes(stream: SrpcStream<TMeta>, streamId: number, bufferedBytes: number): void {
+        const bytes = this.backpressuredByteStreamBytes.get(stream);
+        const previousBytes = bytes?.get(streamId) ?? 0;
+        if (bufferedBytes < previousBytes) this.clearByteStreamBackpressureFlag(stream, streamId);
+        if (bufferedBytes <= 0) {
+            if (!bytes) return;
+            bytes.delete(streamId);
+            if (!bytes.size) this.backpressuredByteStreamBytes.delete(stream);
+            return;
+        }
+        const next = bytes ?? new Map<number, number>();
+        next.set(streamId, bufferedBytes);
+        this.backpressuredByteStreamBytes.set(stream, next);
+    }
+
+    private totalBackpressuredByteStreamBytes(stream: SrpcStream<TMeta>): number {
+        let total = 0;
+        for (const bytes of this.backpressuredByteStreamBytes.get(stream)?.values() ?? []) total += bytes;
+        return total;
     }
 
     private async handleClientRequest(stream: SrpcStream<TMeta>, _requestId: string, message: TClientOutput): Promise<Partial<TServerOutput>> {
@@ -386,24 +625,68 @@ export class SrpcServer<
     protected onStreamActivated(_stream: SrpcStream<TMeta>): void | Promise<void> {}
 
     protected onStreamDisconnected(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause): void {
-        for (const handler of this.streamDisconnectionHandlers) handler(stream, cause);
+        if (!this.publishedStreams?.has(stream)) return;
+        for (const handler of this.streamDisconnectionHandlers) {
+            try {
+                handler(stream, cause);
+            } catch (error) {
+                this.logger.error('SRPC disconnect handler failed', error);
+            }
+        }
+    }
+
+    private revokeStream(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause): boolean {
+        if (stream.lastPingAt < 0) return false;
+        stream.lastPingAt = -1;
+        for (const queueItem of stream.$queue?.values() ?? []) {
+            queueItem.reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error('Stream disconnected')));
+        }
+        stream.$queue?.clear();
+        const initialPong = this.initialPongWaiters?.get(stream);
+        if (initialPong) {
+            clearTimeout(initialPong.timer);
+            this.initialPongWaiters.delete(stream);
+            initialPong.resolve();
+        }
+        this.blockedClientRequests?.delete(stream);
+        this.pendingClientRequests?.delete(stream);
+        this.pendingClientRequestBytes?.delete(stream);
+        this.inFlightClientRequests?.delete(stream);
+        this.inFlightClientRequestBytes?.delete(stream);
+        this.pendingServerRequestBytes?.delete(stream);
+        this.backpressuredByteStreams?.delete(stream);
+        this.backpressuredByteStreamBytes?.delete(stream);
+        this.streamsById?.delete(stream.id);
+        if (this.pendingStreamsByClientId?.get(stream.clientId) === stream) this.pendingStreamsByClientId.delete(stream.clientId);
+        if (this.streamsByClientId?.get(stream.clientId) === stream) this.streamsByClientId.delete(stream.clientId);
+        const wasPublished = this.publishedStreams?.has(stream) ?? false;
+        try {
+            this.onStreamDisconnected(stream, cause);
+        } catch (error) {
+            this.logger.error('SRPC disconnect callback failed', error);
+        }
+        if (wasPublished) {
+            try {
+                notifySrpcObservers({ type: 'disconnection', stream, cause, at: Date.now() });
+            } catch (error) {
+                this.logger.error('SRPC observer failed', error);
+            }
+            this.publishedStreams.delete(stream);
+        }
+        return true;
     }
 
     protected cleanupStream(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause = 'disconnect'): void {
-        if (stream.lastPingAt < 0) return;
-        stream.lastPingAt = -1;
-        for (const queueItem of stream.$queue.values()) queueItem.reject(new Error('Stream disconnected'));
-        stream.$queue.clear();
-        this.lateReplyTombstonesByStream.delete(stream);
-        this.blockedClientRequests.delete(stream);
-        this.pendingClientRequests.delete(stream);
-        this.streamsById.delete(stream.id);
-        if (this.pendingStreamsByClientId.get(stream.clientId) === stream) this.pendingStreamsByClientId.delete(stream.clientId);
-        if (this.streamsByClientId.get(stream.clientId) === stream) this.streamsByClientId.delete(stream.clientId);
-        this.onStreamDisconnected(stream, cause);
-        notifySrpcObservers({ type: 'disconnection', stream, cause, at: Date.now() });
+        if (!this.revokeStream(stream, cause)) return;
         if (stream.$ws.readyState === WebSocket.OPEN || stream.$ws.readyState === WebSocket.CONNECTING) {
             stream.$ws.close(closeCodeForCause(cause), `Stream terminated with cause: ${cause}`);
+        }
+    }
+
+    private closeStreamGracefully(stream: SrpcStream<TMeta>, reason?: string): void {
+        if (!this.revokeStream(stream, 'disconnect')) return;
+        if (stream.$ws.readyState === WebSocket.OPEN || stream.$ws.readyState === WebSocket.CONNECTING) {
+            stream.$ws.close(1000, reason ? reason.slice(0, 123) : 'Stream terminated with cause: disconnect');
         }
     }
 
@@ -439,15 +722,63 @@ export class SrpcServer<
 
         const config = getOptionalAppConfig();
         const driftMs = config?.SRPC_AUTH_CLOCK_DRIFT_MS ?? 30_000;
+        if (!Number.isSafeInteger(driftMs) || driftMs <= 0 || driftMs > MAX_SAFE_TIMER_MS) return false;
         if (Math.abs(Date.now() - tsInt) > driftMs) return false;
+
+        if (authv !== '2') return false;
+        if (!isAuthToken(meta.nonce) || !meta.aud || !Number.isSafeInteger(Number(meta._v)) || Number(meta._v) !== 2) return false;
 
         const clientKey = await this.fetchClientKey(cid);
         if (clientKey === false) return false;
 
-        const computedSignature = createHmac('sha256', clientKey).update(`${authv}\n${appv}\n${ts}\n${id}\n${cid}\n`).digest('hex');
+        const url = new URL(request.url ?? '', 'http://localhost');
+        const metadata = normalizeMetadata(
+            Object.fromEntries(
+                Object.entries(meta)
+                    .filter(([key]) => key.startsWith('m--'))
+                    .map(([key, value]) => [key.slice(3), String(value)])
+            )
+        );
+        const features = normalizeFeatures(
+            String(meta._f ?? '')
+                .split(',')
+                .filter(Boolean)
+        );
+        const supersede = meta._supersede === '1' ? '1' : '0';
+        const computedSignature = createHmac('sha256', clientKey)
+            .update(
+                canonicalAuthV2({
+                    path: url.pathname,
+                    audience: String(meta.aud),
+                    appv,
+                    ts,
+                    nonce: String(meta.nonce),
+                    id,
+                    cid,
+                    protocol: String(meta._v),
+                    supersede,
+                    features,
+                    metadata
+                })
+            )
+            .digest('hex');
         const signatureBuffer = Buffer.from(signature);
         const computedBuffer = Buffer.from(computedSignature);
-        return signatureBuffer.length === computedBuffer.length && timingSafeEqual(signatureBuffer, computedBuffer);
+        if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer)) return false;
+        if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return false;
+        const nonce = String(meta.nonce);
+        const expiresAt = tsInt + driftMs;
+        if (this.isLocalAuthNonceReplay(cid, nonce)) return false;
+        if (this.authNonceConsumer) {
+            if (!(await this.authNonceConsumer(cid, nonce, expiresAt))) return false;
+            // The shared consumer is authoritative under saturation. Keep the
+            // local duplicate fast path bounded by evicting its least-recent
+            // principal/nonce entries instead of imposing a service-wide CID cap.
+            if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, true)) return false;
+        } else if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, false)) {
+            return false;
+        }
+        return true;
     }
 
     private async fetchClientKey(clientId: string): Promise<false | string> {
@@ -465,34 +796,74 @@ export class SrpcServer<
     }
 
     protected writeToStream(stream: SrpcStream<TMeta>, data: TServerOutput): boolean {
-        if (stream.$ws.readyState !== WebSocket.OPEN) return false;
-        stream.$ws.send(encodeSrpcMessage(this.options.serverMessage, data));
+        if (!this.isStreamDispatchAvailable(stream) || stream.$ws.readyState !== WebSocket.OPEN) return false;
+        const encoded = encodeSrpcMessage(this.options.serverMessage, data);
+        return this.writeEncodedToStream(stream, data, encoded);
+    }
+
+    private writeEncodedToStream(stream: SrpcStream<TMeta>, data: TServerOutput, encoded: Buffer): boolean {
+        if (!this.isStreamDispatchAvailable(stream) || stream.$ws.readyState !== WebSocket.OPEN) return false;
+        if (!this.canWriteToStream(stream, encoded.byteLength)) return false;
+        try {
+            stream.$ws.send(encoded);
+        } catch {
+            this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
+            return false;
+        }
         notifySrpcObservers({ type: 'message', stream, direction: 'outbound', data, at: Date.now() });
         return true;
     }
 
     protected writeToStreamAsync(stream: SrpcStream<TMeta>, data: TServerOutput): Promise<void> {
-        if (stream.$ws.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Failed to send SRPC message: not connected'));
+        if (!this.isStreamDispatchAvailable(stream) || stream.$ws.readyState !== WebSocket.OPEN) {
+            return Promise.reject(new Error('Failed to send SRPC message: not connected'));
+        }
         const encoded = encodeSrpcMessage(this.options.serverMessage, data);
+        if (!this.canWriteToStream(stream, encoded.byteLength))
+            return Promise.reject(new SrpcBackpressureError('sRPC stream outgoing buffer limit exceeded'));
         return new Promise((resolve, reject) => {
-            stream.$ws.send(encoded, error => {
-                if (error) reject(error);
-                else {
-                    notifySrpcObservers({
-                        type: 'message',
-                        stream,
-                        direction: 'outbound',
-                        data,
-                        at: Date.now()
-                    });
-                    resolve();
-                }
-            });
+            try {
+                stream.$ws.send(encoded, error => {
+                    if (error) {
+                        this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
+                        reject(error);
+                    } else if (!this.isStreamDispatchAvailable(stream)) reject(new Error('Failed to send SRPC message: stream revoked'));
+                    else {
+                        notifySrpcObservers({
+                            type: 'message',
+                            stream,
+                            direction: 'outbound',
+                            data,
+                            at: Date.now()
+                        });
+                        resolve();
+                    }
+                });
+            } catch (error) {
+                this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
+                reject(error instanceof Error ? error : new Error(String(error)));
+            }
         });
     }
 
+    private canWriteToStream(stream: SrpcStream<TMeta>, bytes: number): boolean {
+        if (!this.isStreamDispatchAvailable(stream)) return false;
+        if (bytes > this.maxMessageBytes) {
+            this.closeStreamWithError(stream, 'badArg', 'sRPC stream outgoing message limit exceeded');
+            return false;
+        }
+        if ((stream.$ws.bufferedAmount ?? 0) + bytes <= this.maxBufferedBytes) return true;
+        this.closeStreamWithError(stream, 'badArg', 'sRPC stream outgoing buffer limit exceeded');
+        return false;
+    }
+
     private closeStreamWithError(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause, message: string): void {
+        if (!this.revokeStream(stream, cause)) return;
         stream.$ws.close(closeCodeForCause(cause), message.slice(0, 123));
+    }
+
+    private isStreamDispatchAvailable(stream: SrpcStream<TMeta>): boolean {
+        return !(stream.lastPingAt < 0) && this.isCurrentStream(stream);
     }
 
     setClientAuthorizer(
@@ -503,6 +874,15 @@ export class SrpcServer<
 
     setClientKeyFetcher(fetcher: (clientId: string) => Promise<false | string> | false | string): void {
         this.clientKeyFetcher = fetcher;
+    }
+
+    /**
+     * Installs an atomic service-wide auth-v2 nonce consumer. It must return
+     * true only for the first `(principal, nonce)` consumption through
+     * `expiresAt`; false rejects a replay. Core retains its fair local guard.
+     */
+    setAuthNonceConsumer(consumer: (principal: string, nonce: string, expiresAt: number) => boolean | Promise<boolean>): void {
+        this.authNonceConsumer = consumer;
     }
 
     registerConnectionHandler(handler: (stream: SrpcStream<TMeta>) => void | Promise<void>): void {
@@ -539,11 +919,11 @@ export class SrpcServer<
         await Promise.all([...handlers].map(handler => handler(data, 0)));
     }
 
-    async resolveClient(clientId: string): Promise<SrpcConnection<TMeta> | undefined> {
+    async resolveClient(clientId: string): Promise<SrpcConnection<TMeta | TResolvedMeta> | undefined> {
         return this.streamsByClientId.get(clientId);
     }
 
-    async listClients(): Promise<SrpcConnection<TMeta>[]> {
+    async listClients(): Promise<SrpcConnection<TMeta | TResolvedMeta>[]> {
         return [...this.streamsByClientId.values()];
     }
 
@@ -567,28 +947,64 @@ export class SrpcServer<
         data: RequestData<TServerOutput, P>,
         timeoutMs = 30_000
     ): Promise<ResponseData<TClientOutput, P>> {
+        return this.invokeWithRequestId(stream, prefix, data, timeoutMs, uuid7());
+    }
+
+    protected invokeWithRequestId<P extends InvokePrefixes<TServerOutput, TClientOutput>>(
+        stream: SrpcStream<TMeta>,
+        prefix: P,
+        data: RequestData<TServerOutput, P>,
+        timeoutMs: number,
+        requestId: string
+    ): Promise<ResponseData<TClientOutput, P>> {
+        assertTimeout(timeoutMs);
         const requestType = `${prefix}Request`;
         const resultType = `${prefix}Response`;
-        const requestId = uuid7();
+        const message = { requestId, [requestType]: data } as unknown as TServerOutput;
+        if (stream.$queue.has(requestId)) return Promise.reject(new Error(`Duplicate SRPC request ID ${requestId}`));
+        let encoded: Buffer;
+        try {
+            encoded = encodeSrpcMessage(this.options.serverMessage, message);
+        } catch (error) {
+            return Promise.reject(error);
+        }
+        if (stream.$queue.size >= this.maxPendingServerRequests) {
+            return Promise.reject(new SrpcBackpressureError('Too many pending server SRPC requests'));
+        }
+        if ((this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength > this.maxPendingServerRequestBytes) {
+            return Promise.reject(new SrpcBackpressureError('Too many pending server SRPC request bytes'));
+        }
+        this.pendingServerRequestBytes.set(stream, (this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength);
+        let retained = true;
+        const releaseRetainedBytes = () => {
+            if (!retained) return;
+            retained = false;
+            const remaining = Math.max(0, (this.pendingServerRequestBytes.get(stream) ?? encoded.byteLength) - encoded.byteLength);
+            if (remaining) this.pendingServerRequestBytes.set(stream, remaining);
+            else this.pendingServerRequestBytes.delete(stream);
+        };
 
         return new Promise<ResponseData<TClientOutput, P>>((resolve, reject) => {
             const timeout = setTimeout(() => {
                 if (!stream.$queue.has(requestId)) return;
                 stream.$queue.delete(requestId);
                 this.addLateReplyTombstone(stream, requestId);
-                reject(new Error(`Request timeout after ${timeoutMs}ms`));
+                releaseRetainedBytes();
+                reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
             }, timeoutMs);
 
             const queueItem: IQueuedRequest = {
                 exp: Date.now() + timeoutMs,
                 resolve: response => {
                     clearTimeout(timeout);
+                    releaseRetainedBytes();
                     const result = (response as Record<string, unknown>)[resultType];
                     if (result == null) reject(new Error('Invalid response from client'));
                     else resolve(result as ResponseData<TClientOutput, P>);
                 },
                 reject: error => {
                     clearTimeout(timeout);
+                    releaseRetainedBytes();
                     reject(error);
                 }
             };
@@ -596,19 +1012,18 @@ export class SrpcServer<
 
             let sent: boolean;
             try {
-                sent = this.writeToStream(stream, {
-                    requestId,
-                    [requestType]: data
-                } as unknown as TServerOutput);
+                sent = this.writeEncodedToStream(stream, message, encoded);
             } catch (error) {
                 if (stream.$queue.get(requestId) === queueItem) stream.$queue.delete(requestId);
                 clearTimeout(timeout);
+                releaseRetainedBytes();
                 reject(error);
                 return;
             }
             if (!sent) {
                 stream.$queue.delete(requestId);
                 clearTimeout(timeout);
+                releaseRetainedBytes();
                 reject(new Error('Failed to send request: not connected'));
             }
         });
@@ -652,11 +1067,13 @@ export class SrpcServer<
     }
 
     private isLateReply(stream: SrpcStream<TMeta>, requestId: string): boolean {
-        const tombstones = this.lateReplyTombstonesByStream.get(stream);
+        const tombstonesByStream = this.lateReplyTombstonesByStream;
+        if (!tombstonesByStream) return false;
+        const tombstones = tombstonesByStream.get(stream);
         if (!tombstones) return false;
         const now = Date.now();
         this.pruneLateReplyTombstones(tombstones, now);
-        if (!tombstones.size) this.lateReplyTombstonesByStream.delete(stream);
+        if (!tombstones.size) tombstonesByStream.delete(stream);
         return (tombstones.get(requestId) ?? 0) > now;
     }
 
@@ -667,8 +1084,127 @@ export class SrpcServer<
     }
 
     private get lateReplyTombstoneTtlMs(): number {
-        const configured = this.options.lateReplyTombstoneTtlMs;
-        return configured != null && Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DefaultLateReplyTombstoneTtlMs;
+        return configuredPositiveInteger(this.options.lateReplyTombstoneTtlMs, DefaultLateReplyTombstoneTtlMs);
+    }
+
+    private get maxPendingClientRequests(): number {
+        return configuredPositiveInteger(this.options.maxPendingClientRequests, DefaultMaxPendingClientRequests);
+    }
+
+    private get maxPendingClientRequestBytes(): number {
+        return configuredPositiveInteger(this.options.maxPendingClientRequestBytes, DefaultMaxPendingClientRequestBytes);
+    }
+
+    private get maxInFlightClientRequests(): number {
+        return configuredPositiveInteger(this.options.maxInFlightClientRequests, DefaultMaxInFlightClientRequests);
+    }
+
+    private get maxInFlightClientRequestBytes(): number {
+        return configuredPositiveInteger(this.options.maxInFlightClientRequestBytes, DefaultMaxInFlightClientRequestBytes);
+    }
+
+    private get maxBufferedBytes(): number {
+        return configuredPositiveInteger(this.options.maxBufferedBytes, DefaultMaxBufferedBytes);
+    }
+
+    private get maxMessageBytes(): number {
+        return configuredPositiveInteger(this.options.maxMessageBytes, DefaultMaxMessageBytes);
+    }
+
+    private get maxPendingServerRequests(): number {
+        return configuredPositiveInteger(this.options.maxPendingServerRequests, DefaultMaxPendingServerRequests);
+    }
+
+    private get maxPendingServerRequestBytes(): number {
+        return configuredPositiveInteger(this.options.maxPendingServerRequestBytes, DefaultMaxPendingServerRequestBytes);
+    }
+
+    private get maxPendingHandshakes(): number {
+        return configuredPositiveInteger(this.options.maxPendingHandshakes, DefaultMaxPendingHandshakes);
+    }
+
+    private get maxActiveStreams(): number {
+        return configuredPositiveInteger(this.options.maxActiveStreams, DefaultMaxActiveStreams);
+    }
+
+    private get maxClientIdBytes(): number {
+        return configuredPositiveInteger(this.options.maxClientIdBytes, DefaultMaxClientIdBytes);
+    }
+
+    private get maxClientMetadataBytes(): number {
+        return configuredPositiveInteger(this.options.maxClientMetadataBytes, DefaultMaxClientMetadataBytes);
+    }
+
+    private get maxAuthReplayPrincipals(): number {
+        return configuredPositiveInteger(this.options.maxAuthReplayPrincipals, DefaultMaxAuthReplayPrincipals);
+    }
+
+    private validRemoteByteStreamOperation(stream: SrpcStream<TMeta>, op: NonNullable<TClientOutput['byteStreamOperation']>): boolean {
+        const id = op.streamId;
+        if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0 || id > MaxByteStreamId) return false;
+        const hasWrite = op.write != null;
+        const hasFinish = op.finish != null;
+        const hasDestroy = op.destroy != null;
+        const operationCount = Number(hasWrite) + Number(hasFinish) + Number(hasDestroy);
+        if (operationCount !== 1) return false;
+        if (hasWrite && (!isPlainObject(op.write) || !(op.write.chunk instanceof Uint8Array))) return false;
+        if (hasFinish && !isPlainObject(op.finish)) return false;
+        if (hasDestroy && (!isPlainObject(op.destroy) || (op.destroy.error != null && typeof op.destroy.error !== 'string'))) return false;
+        if (hasDestroy) {
+            return (
+                id % 2 === 1 ||
+                SrpcByteStream.hasSender(stream, id) ||
+                SrpcByteStream.hasTerminalSender(stream, id) ||
+                this.hasExternalByteStreamSender(stream, id)
+            );
+        }
+        return id % 2 === 1;
+    }
+
+    private isLocalAuthNonceReplay(principal: string, nonce: string): boolean {
+        const now = Date.now();
+        const nonces = this.authReplayNoncesByPrincipal.get(principal);
+        if (!nonces) return false;
+        pruneExpiredEntries(nonces, now);
+        if (!nonces.size) {
+            this.authReplayNoncesByPrincipal.delete(principal);
+            return false;
+        }
+        return (nonces.get(nonce) ?? 0) > now;
+    }
+
+    private consumeLocalAuthNonce(principal: string, nonce: string, expiresAt: number, allowEviction: boolean): boolean {
+        const now = Date.now();
+        if (expiresAt <= now) return false;
+        let nonces = this.authReplayNoncesByPrincipal.get(principal);
+        if (!nonces) {
+            if (this.authReplayNoncesByPrincipal.size >= this.maxAuthReplayPrincipals) {
+                for (const [candidate, candidateNonces] of this.authReplayNoncesByPrincipal) {
+                    pruneExpiredEntries(candidateNonces, now);
+                    if (!candidateNonces.size) this.authReplayNoncesByPrincipal.delete(candidate);
+                }
+            }
+            if (this.authReplayNoncesByPrincipal.size >= this.maxAuthReplayPrincipals) {
+                if (!allowEviction) return false;
+                const oldestPrincipal = this.authReplayNoncesByPrincipal.keys().next().value;
+                if (oldestPrincipal != null) this.authReplayNoncesByPrincipal.delete(oldestPrincipal);
+            }
+            nonces = new Map();
+            this.authReplayNoncesByPrincipal.set(principal, nonces);
+        }
+        pruneExpiredEntries(nonces, now);
+        if ((nonces.get(nonce) ?? 0) > now) return false;
+        if (nonces.size >= MaxAuthReplayNoncesPerPrincipal) {
+            if (!allowEviction) return false;
+            const oldestNonce = nonces.keys().next().value;
+            if (oldestNonce != null) nonces.delete(oldestNonce);
+        }
+        nonces.set(nonce, expiresAt);
+        // Refresh principal insertion order so the bounded shared-authority mode
+        // evicts the least recently consumed principal.
+        this.authReplayNoncesByPrincipal.delete(principal);
+        this.authReplayNoncesByPrincipal.set(principal, nonces);
+        return true;
     }
 
     close(): void {
@@ -702,6 +1238,97 @@ function toBuffer(data: WebSocket.RawData): Buffer {
     if (Buffer.isBuffer(data)) return data;
     if (Array.isArray(data)) return Buffer.concat(data);
     return Buffer.from(data);
+}
+
+function configuredPositiveInteger(value: number | undefined, defaultValue: number): number {
+    return value != null && Number.isSafeInteger(value) && value > 0 ? value : defaultValue;
+}
+
+function assertTimeout(value: number): void {
+    assertSafeTimerMs(value, 'Request timeout');
+}
+
+function encodedJsonBytes(value: unknown): number {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('Value must be JSON-serializable');
+    return Buffer.byteLength(encoded);
+}
+
+function validateServerResourceOptions(options: ISrpcServerOptions<BaseMessage, BaseMessage>): void {
+    for (const [name, value] of [
+        ['maxPendingClientRequests', options.maxPendingClientRequests],
+        ['maxPendingClientRequestBytes', options.maxPendingClientRequestBytes],
+        ['maxInFlightClientRequests', options.maxInFlightClientRequests],
+        ['maxInFlightClientRequestBytes', options.maxInFlightClientRequestBytes],
+        ['maxBufferedBytes', options.maxBufferedBytes],
+        ['maxMessageBytes', options.maxMessageBytes],
+        ['maxPendingServerRequests', options.maxPendingServerRequests],
+        ['maxPendingServerRequestBytes', options.maxPendingServerRequestBytes],
+        ['maxPendingHandshakes', options.maxPendingHandshakes],
+        ['maxActiveStreams', options.maxActiveStreams],
+        ['maxClientIdBytes', options.maxClientIdBytes],
+        ['maxClientMetadataBytes', options.maxClientMetadataBytes],
+        ['maxAuthReplayPrincipals', options.maxAuthReplayPrincipals]
+    ] as const) {
+        if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) {
+            throw new Error(`sRPC server ${name} must be a positive integer`);
+        }
+    }
+    validateTimerOption('sRPC server lateReplyTombstoneTtlMs', options.lateReplyTombstoneTtlMs);
+}
+
+function validateTimerOption(name: string, value: number | undefined): void {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > MAX_SAFE_TIMER_MS)) {
+        throw new Error(`${name} must be a safe positive integer between 1 and ${MAX_SAFE_TIMER_MS}`);
+    }
+}
+
+function normalizeFeatures(features: string[]): string {
+    return [...new Set(features)].sort().join(',');
+}
+
+function normalizeMetadata(meta: Record<string, string>): Record<string, string> {
+    return Object.fromEntries(Object.entries(meta).sort(([a], [b]) => compareCodeUnits(a, b)));
+}
+
+function canonicalAuthV2(fields: {
+    path: string;
+    audience: string;
+    appv: string;
+    ts: string;
+    nonce: string;
+    id: string;
+    cid: string;
+    protocol: string;
+    supersede: string;
+    features: string;
+    metadata: Record<string, string>;
+}): string {
+    return JSON.stringify({ version: 2, ...fields });
+}
+
+function isAuthToken(value: unknown): value is string {
+    return typeof value === 'string' && value.length >= 16 && value.length <= 256 && /^[A-Za-z0-9._-]+$/.test(value);
+}
+
+function compareCodeUnits(a: string, b: string): number {
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function pruneExpiredEntries(entries: Map<string, number>, now: number): void {
+    for (const [key, expiresAt] of entries) if (expiresAt <= now) entries.delete(key);
+}
+
+function estimateMessageBytes(message: unknown): number {
+    try {
+        return Buffer.byteLength(JSON.stringify(message));
+    } catch {
+        return DefaultMaxMessageBytes;
+    }
 }
 
 function closeCodeForCause(cause: SrpcDisconnectCause): number {

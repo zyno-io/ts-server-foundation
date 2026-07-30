@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { PassThrough } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { after, before, describe, it, mock } from 'node:test';
 
@@ -17,9 +19,6 @@ import {
     MeshClientRedisRegistry,
     MeshClientRegistry,
     MeshClientService,
-    MeshHandlerError,
-    MeshNoHandlerError,
-    MeshRequestTimeoutError,
     MeshService,
     MeshSrpcServer,
     setCurrentApp,
@@ -39,12 +38,6 @@ const redisEnv = {
 
 const redisSkip = redisEnv.REDIS_HOST ? false : 'set REDIS_HOST to run Redis-backed service integration tests';
 
-type MeshTestMessages = {
-    echo: { request: { text: string }; response: { text: string } };
-    fail: { request: { message: string }; response: never };
-    missing: { request: Record<string, never>; response: never };
-};
-
 type MeshTestBroadcasts = {
     refresh: { key: string };
 };
@@ -52,7 +45,6 @@ type MeshTestBroadcasts = {
 const meshOptions = {
     heartbeatIntervalMs: 100,
     nodeTtlMs: 500,
-    requestTimeoutMs: 500,
     leaderOptions: {
         ttlMs: 500,
         renewalIntervalMs: 150,
@@ -141,75 +133,161 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             await leader.stop();
         }
     });
-
-    it('routes mesh requests between Redis-backed nodes', async () => {
-        const key = `test-${Date.now()}-${process.pid}`;
-        const manualCleanupOptions = {
-            ...meshOptions,
-            heartbeatIntervalMs: 60_000,
-            nodeTtlMs: 60_000
-        };
-        const first = new MeshService<MeshTestMessages, MeshTestBroadcasts>(key, manualCleanupOptions);
-        const second = new MeshService<MeshTestMessages, MeshTestBroadcasts>(key, manualCleanupOptions);
-        first.registerHandler('echo', data => ({ text: `first:${data.text}` }));
-        second.registerHandler('echo', data => ({ text: `second:${data.text}` }));
-        first.registerHandler('fail', data => {
-            throw new Error(data.message);
-        });
-        const firstBroadcasts: Array<{ key: string; sender: number }> = [];
-        const secondBroadcasts: Array<{ key: string; sender: number }> = [];
-        first.registerBroadcastHandler('refresh', (data, sender) => {
-            firstBroadcasts.push({ ...data, sender });
-        });
-        second.registerBroadcastHandler('refresh', (data, sender) => {
-            secondBroadcasts.push({ ...data, sender });
+    it('bounds each expired-member cleanup and recovery pass and completes through later passes', async () => {
+        const key = `bounded-mesh-cleanup-${Date.now()}-${process.pid}`;
+        const service = new MeshService(key, {
+            heartbeatIntervalMs: 100,
+            nodeTtlMs: 1_000,
+            cleanupBatchSize: 2
+        }) as any;
+        const { client, prefix } = createRedis('MESH');
+        service.prefix = prefix;
+        const heartbeatsKey = `${prefix}:mesh:${key}:heartbeats`;
+        const nodesKey = `${prefix}:mesh:${key}:nodes`;
+        const cleanupKey = `${prefix}:mesh:${key}:cleanup`;
+        const processingKey = `${cleanupKey}:processing`;
+        const cleaned: number[] = [];
+        service.setNodeCleanedUpCallback((nodeId: number) => {
+            cleaned.push(nodeId);
         });
 
+        // Recovery of a prior leader's in-flight obligations is bounded too.
+        await client.lpush(processingKey, '103', '102', '101');
+        await service.doCleanup();
+        assert.equal(await client.llen(processingKey), 1);
+        assert.equal(cleaned.length, 2);
+        await service.doCleanup();
+        assert.equal(await client.llen(processingKey), 0);
+        assert.equal(cleaned.length, 3);
+
+        for (let index = 0; index < 5; index++) {
+            const nodeId = 200 + index;
+            await client.zadd(heartbeatsKey, Date.now() - 10_000, String(nodeId));
+            await client.hset(nodesKey, String(nodeId), JSON.stringify({ hostname: `stale-${nodeId}` }));
+        }
+        await service.doCleanup();
+        assert.equal(await client.zcard(heartbeatsKey), 3);
+        assert.equal(cleaned.length, 5);
+        await service.doCleanup();
+        assert.equal(await client.zcard(heartbeatsKey), 1);
+        assert.equal(cleaned.length, 7);
+        await service.doCleanup();
+        assert.equal(await client.zcard(heartbeatsKey), 0);
+        assert.equal(await client.hlen(nodesKey), 0);
+        assert.equal(cleaned.length, 8);
+
+        const callbackOrder: number[] = [];
+        service.setNodeCleanedUpCallback((nodeId: number) => {
+            callbackOrder.push(nodeId);
+            if (nodeId === 301) throw new Error('retry this obligation later');
+        });
+        await client.rpush(cleanupKey, '302', '301');
+        await service.doCleanup();
+        assert.deepEqual(callbackOrder, [301]);
+        await service.doCleanup();
+        assert.deepEqual(callbackOrder, [301, 302, 301]);
+    });
+
+    it('leaves a blocked cleanup obligation recoverable when its leader generation is fenced', async () => {
+        const key = `fenced-mesh-cleanup-${Date.now()}-${process.pid}`;
+        const service = new MeshService(key, { ...meshOptions, cleanupBatchSize: 1 }) as any;
+        const { client, prefix } = createRedis('MESH');
+        service.prefix = prefix;
+        service.running = true;
+        service.generation = 1;
+        service.leaseSafeUntil = Number.POSITIVE_INFINITY;
+        service.leaderService = { isLeader: true };
+        const cleanupKey = `${prefix}:mesh:${key}:cleanup`;
+        const processingKey = `${cleanupKey}:processing`;
+        await client.lpush(cleanupKey, '712');
+        let release!: () => void;
+        const blocked = new Promise<void>(resolve => {
+            release = resolve;
+        });
+        service.setNodeCleanedUpCallback(async () => blocked);
+        const cleanup = service.doCleanup();
+        await waitFor(async () => (await client.llen(processingKey)) === 1);
+        service.generation++;
+        service.leaderEpoch++;
+        const recoveredByHealthyEpoch = service.doCleanup();
+        release();
+        await Promise.all([cleanup, recoveredByHealthyEpoch]);
+        assert.equal(await client.llen(processingKey), 0);
+        assert.equal(await client.llen(cleanupKey), 0);
+    });
+
+    it('uses exact cleanup claim tokens so stale ACK and NACK cannot affect a reclaimed node ID', async () => {
+        const key = `token-cleanup-${Date.now()}-${process.pid}`;
+        const service = new MeshService(key, meshOptions) as any;
+        const { client, prefix } = createRedis('MESH');
+        service.prefix = prefix;
+        service.running = true;
+        service.generation = 1;
+        service.leaseSafeUntil = Number.POSITIVE_INFINITY;
+        service.leaderService = { isLeader: true };
+        const cleanupKey = `${prefix}:mesh:${key}:cleanup`;
+        const processingKey = `${cleanupKey}:processing`;
+        await client.lpush(cleanupKey, '811');
+
+        let callbackCount = 0;
+        let releaseOld!: () => void;
+        const oldBlocked = new Promise<void>(resolve => {
+            releaseOld = resolve;
+        });
+        let releaseNew!: () => void;
+        const newBlocked = new Promise<void>(resolve => {
+            releaseNew = resolve;
+        });
+        service.setNodeCleanedUpCallback(async () => {
+            callbackCount++;
+            await (callbackCount === 1 ? oldBlocked : newBlocked);
+        });
+
+        const oldCleanup = service.doCleanup();
+        await waitFor(async () => (await client.llen(processingKey)) === 1);
+        const oldClaim = await client.lindex(processingKey, 0);
+        assert.ok(oldClaim?.startsWith('811|'));
+
+        service.generation++;
+        service.leaderEpoch++;
+        const newCleanup = service.doCleanup();
+        await waitFor(async () => {
+            const claim = await client.lindex(processingKey, 0);
+            return claim !== null && claim !== oldClaim;
+        });
+        const newClaim = await client.lindex(processingKey, 0);
+        assert.ok(newClaim?.startsWith('811|'));
+        assert.notEqual(oldClaim, newClaim);
+
+        // ACK and NACK both begin with an exact-token LREM. A delayed old
+        // claimant therefore cannot remove or requeue the successor claim.
+        assert.equal(await client.lrem(processingKey, 1, oldClaim!), 0);
+        const staleNackRemoved = await client.lrem(processingKey, 1, oldClaim!);
+        if (staleNackRemoved > 0) await client.lpush(cleanupKey, '811');
+        assert.equal(staleNackRemoved, 0);
+        assert.deepEqual(await client.lrange(processingKey, 0, -1), [newClaim]);
+
+        releaseOld();
+        await oldCleanup;
+        releaseNew();
+        await newCleanup;
+        assert.equal(await client.llen(processingKey), 0);
+        assert.equal(await client.llen(cleanupKey), 0);
+    });
+
+    it('does not recreate node metadata after a concurrent deregistration', async () => {
+        const key = `metadata-cas-${Date.now()}-${process.pid}`;
+        const service = new MeshService(key, meshOptions);
+        await service.start();
         try {
-            await first.start();
-            await second.start();
-            await sleepMs(100);
-
-            assert.deepStrictEqual(await second.invoke(first.instanceId, 'echo', { text: 'hello' }), {
-                text: 'first:hello'
-            });
-            assert.deepStrictEqual(await first.invoke(second.instanceId, 'echo', { text: 'world' }), {
-                text: 'second:world'
-            });
-            await assert.rejects(second.invoke(first.instanceId, 'fail', { message: 'remote boom' }), MeshHandlerError);
-            await assert.rejects(second.invoke(first.instanceId, 'missing', {}), MeshNoHandlerError);
-            await assert.rejects(second.invoke(999_999, 'echo', { text: 'missing' }, 25), MeshRequestTimeoutError);
-
-            await first.broadcast('refresh', { key: 'all' });
-            await waitFor(() => secondBroadcasts.length === 1);
-            assert.deepStrictEqual(firstBroadcasts, [{ key: 'all', sender: first.instanceId }]);
-            assert.deepStrictEqual(secondBroadcasts, [{ key: 'all', sender: first.instanceId }]);
-
-            await first.broadcast('refresh', { key: 'remote-only' }, { skipSelf: true });
-            await waitFor(() => secondBroadcasts.length === 2);
-            assert.equal(firstBroadcasts.length, 1);
-
-            const cleanedNodes: number[] = [];
-            first.setNodeCleanedUpCallback(instanceId => {
-                cleanedNodes.push(instanceId);
-            });
             const { client, prefix } = createRedis('MESH');
-            const staleNodeId = 987_654;
-            await client.zadd(`${prefix}:mesh:${key}:heartbeats`, Date.now() - manualCleanupOptions.nodeTtlMs - 1_000, String(staleNodeId));
-            await client.hset(`${prefix}:mesh:${key}:nodes`, String(staleNodeId), 'stale-host');
-            assert.equal(
-                (await first.getNodes()).some(node => node.instanceId === staleNodeId),
-                true
-            );
-            await (first as unknown as { doCleanup(): Promise<void> }).doCleanup();
-            assert.equal(
-                (await first.getNodes()).some(node => node.instanceId === staleNodeId),
-                false
-            );
-            assert.deepStrictEqual(cleanedNodes, [staleNodeId]);
+            const id = service.instanceId;
+            await client.multi().zrem(`${prefix}:mesh:${key}:heartbeats`, String(id)).hdel(`${prefix}:mesh:${key}:nodes`, String(id)).exec();
+            await assert.rejects(service.updateNodeMetadata({ processId: 'late-metadata' }), /membership disappeared/);
+            assert.equal(await client.zscore(`${prefix}:mesh:${key}:heartbeats`, String(id)), null);
+            assert.equal(await client.hget(`${prefix}:mesh:${key}:nodes`, String(id)), null);
         } finally {
-            await second.stop();
-            await first.stop();
+            await service.stop();
         }
     });
 
@@ -218,28 +296,27 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         const first = new MeshClientRegistry(1, backend);
         const second = new MeshClientRegistry(2, backend);
 
-        await first.register('client-1', { role: 'admin' });
+        await first.register('client-1', { role: 'admin' }, true, 'connection-1');
         assert.equal((await first.getClient('client-1'))?.nodeId, 1);
 
-        const moved = await second.register('client-1', { role: 'user' });
-        assert.deepStrictEqual(moved, { status: 'ok', supersededNodeId: 1 });
-        assert.deepStrictEqual(await first.listClientsForNode(1), []);
-        assert.equal((await first.getClient('client-1'))?.metadata.role, 'user');
+        const moved = await second.register('client-1', { role: 'user' }, true, 'connection-2');
+        assert.deepStrictEqual(moved, { status: 'conflict', ownerNodeId: 1 });
+        assert.equal((await first.getClient('client-1'))?.metadata.role, 'admin');
 
-        const removed = await second.cleanupNode(2);
+        const removed = await first.cleanupNode(1);
         assert.deepStrictEqual(
             removed.map(client => client.clientId),
             ['client-1']
         );
 
-        await first.register('conflict-client', { role: 'first' });
-        assert.deepStrictEqual(await second.register('conflict-client', { role: 'second' }, false), {
+        await first.register('conflict-client', { role: 'first' }, true, 'conflict-connection-1');
+        assert.deepStrictEqual(await second.register('conflict-client', { role: 'second' }, false, 'conflict-connection-2'), {
             status: 'conflict',
             ownerNodeId: 1
         });
         assert.equal((await first.getClient('conflict-client'))?.metadata.role, 'first');
 
-        assert.deepStrictEqual(await first.reserve('pending-client', { role: 'pending' }), {
+        assert.deepStrictEqual(await first.reserve('pending-client', { role: 'pending' }, false, 'pending-connection'), {
             status: 'ok',
             supersededNodeId: null
         });
@@ -248,16 +325,427 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             (await first.listClients()).some(client => client.clientId === 'pending-client'),
             false
         );
-        assert.equal(await first.activate('pending-client', { role: 'active' }), true);
+        assert.equal(await first.activate('pending-client', { role: 'active' }, 'pending-connection'), true);
         assert.equal((await first.getClient('pending-client'))?.metadata.role, 'active');
 
         await first.register('fenced-client', { role: 'old' }, true, 'connection-old');
-        await first.register('fenced-client', { role: 'current' }, true, 'connection-current');
-        assert.equal(await first.unregister('fenced-client', 'connection-old'), false);
-        assert.equal(await first.updateMetadata('fenced-client', { role: 'stale-update' }, 'connection-old'), false);
-        assert.equal((await first.getClient('fenced-client'))?.connectionId, 'connection-current');
-        assert.equal((await first.getClient('fenced-client'))?.metadata.role, 'current');
-        assert.equal(await first.unregister('fenced-client', 'connection-current'), true);
+        assert.deepEqual(await first.register('fenced-client', { role: 'current' }, true, 'connection-current'), {
+            status: 'conflict',
+            ownerNodeId: 1
+        });
+        assert.equal(await first.updateMetadata('fenced-client', { role: 'stale-update' }, 'connection-current'), false);
+        assert.equal((await first.getClient('fenced-client'))?.connectionId, 'connection-old');
+        assert.equal((await first.getClient('fenced-client'))?.metadata.role, 'old');
+        assert.equal(await first.unregister('fenced-client', 'connection-old'), true);
+    });
+
+    it('commits a takeover after the fenced owner unregisters before claim commit', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`claim-unregister-${Date.now()}-${process.pid}`);
+        const oldOwner = new MeshClientRegistry(31, backend);
+        const claimant = new MeshClientRegistry(32, backend);
+        await oldOwner.register('handoff-client', { role: 'old' }, false, 'connection-old');
+
+        const claim = await claimant.claim('handoff-client', { role: 'new' }, 'active', true, 'connection-new');
+        assert.equal(claim?.status, 'ok');
+        assert.equal(claim?.status === 'ok' && claim.previous?.connectionId, 'connection-old');
+        assert.equal(await oldOwner.unregister('handoff-client', 'connection-old'), true);
+        assert.equal(claim?.status === 'ok' && (await claimant.commitClaim('handoff-client', claim.claimId)), true);
+        const current = await claimant.getClient('handoff-client');
+        assert.equal(current?.nodeId, 32);
+        assert.equal(current?.connectionId, 'connection-new');
+        assert.deepEqual(current?.metadata, { role: 'new' });
+    });
+
+    it('exactly serializes pending claim preimages that stay pending, activate, or disappear', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`pending-preimage-${Date.now()}-${process.pid}`);
+        const oldOwner = new MeshClientRegistry(41, backend);
+        const claimant = new MeshClientRegistry(42, backend);
+
+        for (const outcome of ['pending', 'activated', 'absent'] as const) {
+            const clientId = `pending-preimage-${outcome}`;
+            await oldOwner.reserve(clientId, { role: 'old-pending' }, false, 'connection-old');
+            const claim = await claimant.claim(clientId, { role: 'new-active' }, 'active', true, 'connection-new');
+            assert.equal(claim?.status, 'ok');
+            assert.equal(claim?.status === 'ok' && claim.previous?.state, 'pending');
+            assert.ok(claim?.status === 'ok' && claim.previous?.claimId);
+            if (!claim || claim.status !== 'ok') continue;
+
+            if (outcome === 'activated') {
+                assert.equal(await oldOwner.activate(clientId, { role: 'old-active' }, 'connection-old'), true);
+                assert.equal(await claimant.commitClaim(clientId, claim.claimId), 'previous-changed');
+                assert.equal(await claimant.removeClaimPrevious(clientId, claim.claimId), true);
+            } else if (outcome === 'absent') {
+                assert.equal(await oldOwner.unregister(clientId, 'connection-old'), true);
+            }
+            assert.equal(await claimant.commitClaim(clientId, claim.claimId), true);
+            const current = await claimant.getClientIncludingPending(clientId);
+            assert.equal(current?.nodeId, 42);
+            assert.equal(current?.connectionId, 'connection-new');
+            assert.equal(current?.state, 'active');
+        }
+    });
+
+    it('idempotently reconciles and exactly removes a committed claim', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`claim-idempotent-${Date.now()}-${process.pid}`);
+        const registry = new MeshClientRegistry(33, backend);
+        const claim = await registry.claim('pending-client', { role: 'pending' }, 'pending', true, 'pending-connection');
+        assert.equal(claim?.status, 'ok');
+        assert.equal(claim?.status === 'ok' && (await registry.commitClaim('pending-client', claim.claimId)), true);
+        // Models a retry after Redis committed but the first response was lost.
+        assert.equal(claim?.status === 'ok' && (await registry.commitClaim('pending-client', claim.claimId)), true);
+        const raw = await registry.getClientIncludingPending('pending-client');
+        assert.equal(raw?.claimId, claim?.status === 'ok' ? claim.claimId : undefined);
+        assert.equal(claim?.status === 'ok' && (await registry.removeClaimResult('pending-client', claim.claimId)), true);
+        assert.equal(await registry.getClientIncludingPending('pending-client'), undefined);
+    });
+
+    it('deduplicates concurrent Redis claims only for the exact caller operation and payload', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`claim-operation-${Date.now()}-${process.pid}`);
+        const first = new MeshClientRegistry(34, backend, 'process-a');
+        const second = new MeshClientRegistry(34, backend, 'process-a');
+        const operationId = randomUUID();
+        const identical = await Promise.all([
+            first.claim('same-operation', { role: 'identical' }, 'pending', true, 'connection', operationId),
+            second.claim('same-operation', { role: 'identical' }, 'pending', true, 'connection', operationId)
+        ]);
+        assert.equal(
+            identical.every(result => result?.status === 'ok'),
+            true
+        );
+        assert.equal(identical[0]?.status === 'ok' && identical[1]?.status === 'ok' && identical[0].claimId === identical[1].claimId, true);
+
+        const conflictingOperationId = randomUUID();
+        const differing = await Promise.all([
+            first.claim('different-payload', { role: 'first' }, 'pending', true, 'connection', conflictingOperationId),
+            second.claim('different-payload', { role: 'second' }, 'pending', true, 'connection', conflictingOperationId)
+        ]);
+        assert.equal(differing.filter(result => result?.status === 'ok').length, 1);
+        assert.equal(differing.filter(result => result?.status === 'conflict').length, 1);
+
+        const distinctOperations = await Promise.all([
+            first.claim('different-operation', { role: 'identical' }, 'pending', true, 'connection', randomUUID()),
+            second.claim('different-operation', { role: 'identical' }, 'pending', true, 'connection', randomUUID())
+        ]);
+        assert.equal(distinctOperations.filter(result => result?.status === 'ok').length, 1);
+        assert.equal(distinctOperations.filter(result => result?.status === 'conflict').length, 1);
+    });
+
+    it('retries a response-lost claim with one byte-identical metadata snapshot', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`claim-snapshot-${Date.now()}-${process.pid}`);
+        const originalClaim = backend.claim.bind(backend);
+        let claimCalls = 0;
+        backend.claim = async (...args) => {
+            const result = await originalClaim(...args);
+            claimCalls++;
+            if (claimCalls === 1) throw new Error('claim response lost after Redis mutation');
+            return result;
+        };
+        let serializations = 0;
+        const metadata = {
+            toJSON() {
+                serializations++;
+                return { role: `snapshot-${serializations}` };
+            }
+        } as unknown as { role: string };
+        const service = new MeshClientService<{ role: string }>({
+            key: `claim-snapshot-service-${Date.now()}-${process.pid}`,
+            meshOptions,
+            registryBackend: backend,
+            clientInvokeFn: async () => undefined
+        });
+
+        try {
+            await service.start();
+            assert.equal(await service.registerClient('snapshot-client', metadata, true, 'snapshot-connection'), true);
+            const registered = await service.clientRegistry.getClientIncludingPending('snapshot-client');
+            assert.equal(registered?.connectionId, 'snapshot-connection');
+            assert.equal(claimCalls, 2);
+        } finally {
+            await service.stop();
+        }
+    });
+
+    it('enforces registry record limits and paginates listings and dead-node cleanup', async () => {
+        const backend = new MeshClientRedisRegistry<{ value: string }>(`bounded-registry-${Date.now()}-${process.pid}`, {
+            maxClientIdBytes: 16,
+            maxMetadataBytes: 32,
+            maxClientsPerNode: 3,
+            scanBatchSize: 1,
+            cleanupBatchSize: 1
+        });
+        const registry = new MeshClientRegistry(41, backend);
+        await registry.register('client-a', { value: 'a' }, false, 'connection-a');
+        await registry.register('client-b', { value: 'b' }, false, 'connection-b');
+        await registry.register('client-c', { value: 'c' }, false, 'connection-c');
+        await assert.rejects(registry.register('client-d', { value: 'd' }, false, 'connection-d'), /per-node registration limit/);
+        await assert.rejects(registry.register('client-id-is-too-long', { value: 'x' }, false, 'connection-x'), /client ID/i);
+        await assert.rejects(registry.updateMetadata('client-a', { value: 'x'.repeat(40) }, 'connection-a'), /metadata exceeds/i);
+
+        assert.deepEqual((await registry.listClients()).map(client => client.clientId).sort(), ['client-a', 'client-b', 'client-c']);
+        assert.deepEqual((await registry.listClientsForNode()).map(client => client.clientId).sort(), ['client-a', 'client-b', 'client-c']);
+        const paged: string[] = [];
+        let cursor: string | undefined = '0';
+        do {
+            const page = await registry.listClientsPage(cursor);
+            paged.push(...page.clients.map(client => client.clientId));
+            cursor = page.cursor;
+        } while (cursor !== undefined);
+        assert.deepEqual([...new Set(paged)].sort(), ['client-a', 'client-b', 'client-c']);
+        await assert.rejects(registry.listClientsPage('not-a-cursor'), /cursor is invalid/);
+
+        const removed = await backend.cleanupNodeAndEnqueueOrphaned?.(41);
+        assert.deepEqual(removed?.map(client => client.clientId).sort(), ['client-a', 'client-b', 'client-c']);
+        const delivered: string[] = [];
+        for (;;) {
+            const orphan = await backend.claimOrphaned?.('bounded-cleanup-worker');
+            if (!orphan) break;
+            assert.equal(orphan.clients.length, 1);
+            delivered.push(orphan.clients[0].clientId);
+            assert.equal(await backend.ackOrphaned?.(orphan.id, orphan.claimToken), true);
+        }
+        assert.deepEqual(delivered.sort(), ['client-a', 'client-b', 'client-c']);
+    });
+
+    it('durably claims, nacks, recovers, and acknowledges orphan snapshots', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`orphans-${Date.now()}-${process.pid}`);
+        const client = { clientId: 'orphan-1', nodeId: 7, connectionId: 'connection-1', connectedAt: Date.now(), metadata: { role: 'orphan' } };
+        await backend.enqueueOrphaned?.(7, [client]);
+        const first = await backend.claimOrphaned?.('worker-a');
+        assert.ok(first);
+        assert.equal(first.clients[0].clientId, client.clientId);
+        assert.equal(await backend.nackOrphaned?.(first.id, first.claimToken), true);
+        const recovered = await backend.claimOrphaned?.('worker-b');
+        assert.ok(recovered);
+        assert.notEqual(recovered.claimToken, first.claimToken);
+        assert.equal(await backend.ackOrphaned?.(recovered.id, recovered.claimToken), true);
+        assert.equal(await backend.claimOrphaned?.('worker-c'), undefined);
+    });
+
+    it('bounds durable orphan admission globally and resumes after acknowledgement', async () => {
+        const key = `bounded-orphans-${Date.now()}-${process.pid}`;
+        const backend = new MeshClientRedisRegistry<{ role: string }>(key, {
+            maxOrphanItems: 2,
+            maxOrphanBytes: 700
+        });
+        const firstClient = {
+            clientId: 'first',
+            nodeId: 7,
+            connectionId: 'first-connection',
+            connectedAt: Date.now(),
+            metadata: { role: 'first'.repeat(80) }
+        };
+        const secondClient = {
+            clientId: 'second',
+            nodeId: 8,
+            connectionId: 'second-connection',
+            connectedAt: Date.now(),
+            metadata: { role: 'second'.repeat(40) }
+        };
+        await backend.enqueueOrphaned?.(7, [firstClient]);
+
+        const claimed = await backend.claimOrphaned?.('bounded-worker');
+        assert.ok(claimed);
+        assert.equal(claimed.clients[0].clientId, 'first');
+        const { client: accountingClient, prefix: accountingPrefix } = createRedis('MESH');
+        const orphanKey = `${accountingPrefix}:mesh:${key}:orphaned`;
+        const accounted = Number(await accountingClient.hget(`${accountingPrefix}:mesh:${key}:orphaned:accounting`, 'bytes'));
+        assert.ok(accounted <= 700);
+        assert.ok((await accountingClient.hstrlen(orphanKey, claimed.id)) <= 700);
+        assert.equal(await backend.nackOrphaned?.(claimed.id, claimed.claimToken), true);
+        // Claim/NACK rewrites the snapshot; the byte counter must track that
+        // exact mutation and still reject a second large admission.
+        await assert.rejects(backend.enqueueOrphaned?.(8, [secondClient]), /orphan queue is full/);
+        const reclaimed = await backend.claimOrphaned?.('bounded-worker');
+        assert.ok(reclaimed);
+        assert.equal(await backend.ackOrphaned?.(reclaimed.id, reclaimed.claimToken), true);
+
+        await backend.enqueueOrphaned?.(8, [secondClient]);
+        const resumed = await backend.claimOrphaned?.('bounded-worker-2');
+        assert.equal(resumed?.clients[0].clientId, 'second');
+        assert.equal(await backend.ackOrphaned?.(resumed!.id, resumed!.claimToken), true);
+    });
+
+    it('drains malformed accounted orphan state and reopens bounded admission', async () => {
+        const key = `malformed-orphans-${Date.now()}-${process.pid}`;
+        const backend = new MeshClientRedisRegistry<{ role: string }>(key, { maxOrphanItems: 1, maxOrphanBytes: 2_048 });
+        const { client, prefix } = createRedis('MESH');
+        const orphanKey = `${prefix}:mesh:${key}:orphaned`;
+        const indexKey = `${orphanKey}:index`;
+        const accountingKey = `${orphanKey}:accounting`;
+        const malformed = ['{bad json', '"string"', '1', 'true', 'null', '[]'];
+        for (let index = 0; index < malformed.length; index++) {
+            await client.hset(orphanKey, `malformed-${index}`, malformed[index]);
+            await client.zadd(indexKey, 0, `malformed-${index}`);
+        }
+        await client.hset(
+            accountingKey,
+            'items',
+            String(malformed.length),
+            'bytes',
+            String(malformed.reduce((total, item) => total + Buffer.byteLength(item), 0))
+        );
+        assert.equal(await backend.claimOrphaned?.('migration-worker'), undefined);
+        assert.equal(await client.hlen(orphanKey), 0);
+        await backend.enqueueOrphaned?.(1, [
+            { clientId: 'new', nodeId: 1, connectionId: 'new-connection', connectedAt: 1, metadata: { role: 'new' } }
+        ]);
+        assert.ok(await backend.claimOrphaned?.('healthy-worker'));
+    });
+
+    it('atomically removes active clients into a redeliverable orphan snapshot', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`atomic-orphans-${Date.now()}-${process.pid}`);
+        const registry = new MeshClientRegistry(17, backend);
+        await registry.register('active-client', { role: 'active' }, false, 'connection-active');
+        await registry.reserve('pending-client', { role: 'pending' }, false, 'connection-pending');
+
+        const removed = await backend.cleanupNodeAndEnqueueOrphaned?.(17);
+        assert.deepEqual(
+            removed?.map(client => client.clientId),
+            ['active-client']
+        );
+        assert.equal(await registry.getClient('active-client'), undefined);
+
+        const first = await backend.claimOrphaned?.('worker-a');
+        assert.ok(first);
+        assert.deepEqual(
+            first.clients.map(client => client.clientId),
+            ['active-client']
+        );
+        assert.equal(await backend.nackOrphaned?.(first.id, first.claimToken), true);
+        const retry = await backend.claimOrphaned?.('worker-b');
+        assert.ok(retry);
+        assert.equal(retry.id, first.id);
+        assert.equal(await backend.ackOrphaned?.(retry.id, retry.claimToken), true);
+    });
+
+    it('rejects dead-node orphan cleanup without mutating node state when the orphan queue is full', async () => {
+        const key = `full-cleanup-orphans-${Date.now()}-${process.pid}`;
+        const backend = new MeshClientRedisRegistry<{ role: string }>(key, { maxOrphanItems: 1 });
+        const registry = new MeshClientRegistry(17, backend);
+        await backend.enqueueOrphaned?.(99, [
+            {
+                clientId: 'existing-orphan',
+                nodeId: 99,
+                connectionId: 'existing-orphan-connection',
+                connectedAt: Date.now(),
+                metadata: { role: 'held' }
+            }
+        ]);
+        await registry.register('active-client', { role: 'active' }, false, 'connection-active');
+        await registry.reserve('pending-client', { role: 'pending' }, false, 'connection-pending');
+
+        const { client, prefix } = createRedis('MESH');
+        const clientsKey = `${prefix}:mesh:${key}:clients`;
+        const nodeSetKey = `${prefix}:mesh:${key}:node:17:clients`;
+        const nodeClaimsKey = `${prefix}:mesh:${key}:node:17:claims`;
+        assert.equal(await client.scard(nodeSetKey), 2);
+        assert.equal(await client.scard(nodeClaimsKey), 1);
+        assert.ok((await client.ttl(clientsKey)) > 0);
+        assert.ok((await client.ttl(nodeSetKey)) > 0);
+
+        await assert.rejects(backend.cleanupNodeAndEnqueueOrphaned?.(17), /orphan queue is full/);
+
+        assert.equal((await registry.getClient('active-client'))?.connectionId, 'connection-active');
+        const pending = await registry.getClientIncludingPending('pending-client');
+        assert.equal(pending?.state, 'pending');
+        assert.equal(pending?.connectionId, 'connection-pending');
+        assert.equal(await client.sismember(nodeSetKey, 'active-client'), 1);
+        assert.equal(await client.sismember(nodeSetKey, 'pending-client'), 1);
+        assert.equal(await client.sismember(nodeClaimsKey, 'pending-client'), 1);
+        assert.ok((await client.ttl(clientsKey)) > 0);
+        assert.ok((await client.ttl(nodeSetKey)) > 0);
+    });
+
+    it('atomically rejects cross-instance auth nonce replay and enforces per-principal quota', async () => {
+        const key = `auth-nonces-${Date.now()}-${process.pid}`;
+        const first = new MeshClientRedisRegistry<object>(key);
+        const second = new MeshClientRedisRegistry<object>(key);
+        const expiresAt = Date.now() + 60_000;
+
+        assert.equal(await first.consumeAuthNonce?.('principal-a', 'shared-nonce', expiresAt), true);
+        assert.equal(await second.consumeAuthNonce?.('principal-a', 'shared-nonce', expiresAt), false);
+        assert.equal(await second.consumeAuthNonce?.('principal-b', 'shared-nonce', expiresAt), true);
+        for (let index = 1; index < 256; index++) {
+            assert.equal(await first.consumeAuthNonce?.('quota-principal', `nonce-${index}`, expiresAt), true);
+        }
+        assert.equal(await second.consumeAuthNonce?.('quota-principal', 'nonce-0', expiresAt), true);
+        assert.equal(await second.consumeAuthNonce?.('quota-principal', 'over-quota', expiresAt), false);
+    });
+
+    it('bounds the global Redis authentication principal budget', async () => {
+        const key = `auth-principal-budget-${Date.now()}-${process.pid}`;
+        const first = new MeshClientRedisRegistry<object>(key, {
+            maxAuthReplayPrincipals: 2,
+            maxAuthNoncesPerPrincipal: 4
+        });
+        const second = new MeshClientRedisRegistry<object>(key, {
+            maxAuthReplayPrincipals: 2,
+            maxAuthNoncesPerPrincipal: 4
+        });
+        const expiresAt = Date.now() + 60_000;
+        assert.equal(await first.consumeAuthNonce?.('principal-a', 'nonce-a', expiresAt), true);
+        assert.equal(await second.consumeAuthNonce?.('principal-b', 'nonce-b', expiresAt), true);
+        assert.equal(await first.consumeAuthNonce?.('principal-c', 'nonce-c', expiresAt), false);
+        assert.equal(await second.consumeAuthNonce?.('principal-a', 'nonce-a-2', expiresAt), true);
+    });
+
+    it('does not shorten the global authentication-principal index to a near-expiry nonce', async () => {
+        const key = `auth-principal-ttl-${Date.now()}-${process.pid}`;
+        const registry = new MeshClientRedisRegistry<object>(key, {
+            maxAuthReplayPrincipals: 2,
+            maxAuthNoncesPerPrincipal: 4
+        });
+        const now = Date.now();
+        assert.equal(await registry.consumeAuthNonce?.('principal-long', 'nonce-long', now + 2_000), true);
+        assert.equal(await registry.consumeAuthNonce?.('principal-short', 'nonce-short', now + 250), true);
+        assert.equal(await registry.consumeAuthNonce?.('principal-blocked', 'nonce-blocked', now + 2_000), false);
+
+        const globalIndexKey = (registry as any).authNoncePrincipalsKey() as string;
+        const { client } = createRedis('MESH_CLIENT');
+        assert.ok((await client.pttl(globalIndexKey)) > 1_000);
+
+        await sleepMs(300);
+        // The expired short principal frees one slot; the still-live long
+        // principal remains indexed, so admitting one replacement fills the cap.
+        assert.equal(await registry.consumeAuthNonce?.('principal-replacement', 'nonce-replacement', Date.now() + 2_000), true);
+        assert.equal(await registry.consumeAuthNonce?.('principal-over-cap', 'nonce-over-cap', Date.now() + 2_000), false);
+    });
+
+    it('uses Redis server time for claim and orphan delivery leases', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`redis-time-${Date.now()}-${process.pid}`);
+        const registry = new MeshClientRegistry(23, backend);
+        const originalNow = Date.now;
+        Date.now = () => 1;
+        try {
+            const claim = await registry.claim('clock-skewed-client', { role: 'claimed' }, 'active', true, 'connection-1');
+            assert.equal(claim?.status, 'ok');
+            assert.equal(claim?.status === 'ok' && (await registry.commitClaim('clock-skewed-client', claim.claimId)), true);
+            await backend.enqueueOrphaned?.(23, [
+                {
+                    clientId: 'clock-skewed-orphan',
+                    nodeId: 23,
+                    connectionId: 'clock-skewed-connection',
+                    connectedAt: 1,
+                    metadata: { role: 'orphan' }
+                }
+            ]);
+            const orphan = await backend.claimOrphaned?.('clock-skewed-worker');
+            assert.ok(orphan);
+            assert.equal(orphan.clients[0].clientId, 'clock-skewed-orphan');
+            assert.equal(await backend.ackOrphaned?.(orphan.id, orphan.claimToken), true);
+        } finally {
+            Date.now = originalNow;
+        }
+    });
+
+    it('purges pending ownership claims when their node is cleaned up', async () => {
+        const backend = new MeshClientRedisRegistry<{ role: string }>(`claims-${Date.now()}-${process.pid}`);
+        const first = new MeshClientRegistry(1, backend);
+        const claim = await first.claim('pending-claim', { role: 'pending' }, 'pending', true, 'connection-1');
+        assert.equal(claim?.status, 'ok');
+        await first.cleanupNode();
+        const retry = await first.claim('pending-claim', { role: 'retry' }, 'pending', true, 'connection-2');
+        assert.equal(retry?.status, 'ok');
     });
 
     it('recreates default Redis helper clients after their owning app stops', async () => {
@@ -306,13 +794,13 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         });
 
         try {
-            assert.equal(await first.registerClient('before-start', { role: 'ignored' }), true);
+            assert.equal(await first.registerClient('before-start', { role: 'ignored' }, false, 'before-start-connection'), true);
             await assert.rejects(first.invoke('before-start', 'notify', {}), /Client not found/);
 
             await first.start();
             await second.start();
-            assert.equal(await first.registerClient('client-1', firstMetadata, false), true);
-            assert.equal(await second.registerClient('client-1', { role: 'conflict' }, false), false);
+            assert.equal(await first.registerClient('client-1', firstMetadata, false, 'connection-1'), true);
+            assert.equal(await second.registerClient('client-1', { role: 'conflict' }, false, 'connection-conflict'), false);
 
             assert.deepStrictEqual(await second.invoke('client-1', 'notify', {}), { deliveredBy: 'first' });
             assert.deepStrictEqual(firstDeliveries, ['client-1:notify']);
@@ -323,9 +811,71 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             assert.deepStrictEqual(firstMetadata, { role: 'updated' });
             assert.deepStrictEqual((await second.clientRegistry.getClient('client-1'))?.metadata, { role: 'updated' });
 
-            assert.equal(await second.registerClient('client-1', { role: 'second' }), true);
+            assert.equal(await second.registerClient('client-1', { role: 'second' }, true, 'connection-2'), true);
             await waitFor(() => superseded.includes('client-1'));
             assert.equal((await second.clientRegistry.getClient('client-1'))?.nodeId, second.instanceId);
+        } finally {
+            await second.stop();
+            await first.stop();
+        }
+    });
+
+    it('serializes a pending activation racing an exact two-node takeover', async () => {
+        const key = `pending-takeover-${Date.now()}-${process.pid}`;
+        const oldConnection = new PassThrough();
+        let oldInvokes = 0;
+        let newInvokes = 0;
+        let commitAttempts = 0;
+        const first = new MeshClientService<{ role: string }>({
+            key,
+            meshOptions,
+            clientInvokeFn: async () => {
+                oldInvokes++;
+                return 'old';
+            }
+        });
+        const second = new MeshClientService<{ role: string }>({
+            key,
+            meshOptions,
+            clientInvokeFn: async () => {
+                newInvokes++;
+                return 'new';
+            }
+        });
+        first.onClientSuperseded((_clientId, connectionId) => {
+            assert.equal(connectionId, 'connection-old');
+            oldConnection.destroy();
+            return true;
+        });
+
+        try {
+            await first.start();
+            await second.start();
+            assert.equal(await first.reserveClient('pending-client', { role: 'pending-old' }, true, 'connection-old'), true);
+            assert.equal((await first.clientRegistry.getClientIncludingPending('pending-client'))?.state, 'pending');
+
+            const secondBackend = (second as any).backend as MeshClientRedisRegistry<{ role: string }>;
+            const commitClaim = secondBackend.commitClaim.bind(secondBackend);
+            secondBackend.commitClaim = async (...args) => {
+                commitAttempts++;
+                if (commitAttempts === 1) {
+                    assert.equal(oldConnection.destroyed, true);
+                    assert.equal(await first.activateClient('pending-client', { role: 'activated-old' }, 'connection-old'), true);
+                }
+                return commitClaim(...args);
+            };
+
+            assert.equal(await second.registerClient('pending-client', { role: 'active-new' }, true, 'connection-new'), true);
+            assert.equal(commitAttempts, 2);
+            assert.equal(oldConnection.destroyed, true);
+            const current = await second.clientRegistry.getClientIncludingPending('pending-client');
+            assert.equal(current?.nodeId, second.instanceId);
+            assert.equal(current?.connectionId, 'connection-new');
+            assert.equal(current?.state, 'active');
+            assert.equal(await second.invoke('pending-client', 'notify', {}), 'new');
+            assert.equal(await first.invoke('pending-client', 'notify', {}), 'new');
+            assert.equal(oldInvokes, 0);
+            assert.equal(newInvokes, 2);
         } finally {
             await second.stop();
             await first.stop();
@@ -367,6 +917,16 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             'custom-authorizer-does-not-read-this',
             { enableReconnect: false }
         );
+        const replacement = new SrpcClient<BaseMessage, BaseMessage>(
+            createLogger('MeshSrpcReplacementClient'),
+            `ws://127.0.0.1:${port}/mesh-srpc`,
+            JsonMessage,
+            JsonMessage,
+            'mesh-client',
+            { role: 'replacement' },
+            'custom-authorizer-does-not-read-this',
+            { enableReconnect: false }
+        );
 
         try {
             await client.connect();
@@ -382,13 +942,26 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             assert.equal((stream.meta as Record<string, unknown>).role, 'explicit');
             assert.equal((await server.clientRegistry.getClient('mesh-client'))?.metadata.role, 'explicit');
 
-            client.disconnect();
+            const oldConnectionId = stream.id;
+            await replacement.connect({ supersede: true });
+            await waitFor(() => connected.length === 2);
+            await waitFor(async () => {
+                const current = await server.clientRegistry.getClient('mesh-client');
+                return current?.connectionId !== oldConnectionId && current?.metadata.role === 'replacement';
+            });
+            assert.equal(disconnected.length, 0);
+
+            replacement.disconnect();
             await waitFor(() => disconnected.length === 1);
             await waitFor(async () => (await server.clientRegistry.getClient('mesh-client')) === undefined);
-            assert.deepStrictEqual(connected, [{ clientId: 'mesh-client', role: 'initial' }]);
-            assert.deepStrictEqual(disconnected, [{ clientId: 'mesh-client', role: 'explicit' }]);
+            assert.deepStrictEqual(connected, [
+                { clientId: 'mesh-client', role: 'initial' },
+                { clientId: 'mesh-client', role: 'replacement' }
+            ]);
+            assert.deepStrictEqual(disconnected, [{ clientId: 'mesh-client', role: 'replacement' }]);
         } finally {
             client.disconnect();
+            replacement.disconnect();
             await server.meshStop();
             server.close();
             try {
@@ -495,6 +1068,18 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             await assert.rejects(
                 first.invoke(connection, 'dFail', { message: 'remote user error' }),
                 error => error instanceof SrpcError && error.isUserError === true && error.message === 'remote user error'
+            );
+
+            // Direct-link message security is configured only once on the
+            // underlying MeshService; a normal stop/start must reuse that
+            // policy and re-register the route successfully.
+            await first.meshStop();
+            await first.meshStart();
+            const restartedConnection = await first.resolveClient('direct-client');
+            assert.ok(restartedConnection);
+            await assert.rejects(
+                first.invoke(restartedConnection, 'dFail', { message: 'remote user error after restart' }),
+                error => error instanceof SrpcError && error.isUserError === true && error.message === 'remote user error after restart'
             );
         } finally {
             client.disconnect();

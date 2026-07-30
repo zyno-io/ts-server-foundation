@@ -58,6 +58,17 @@ export class SrpcError extends Error {
     }
 }
 
+/** Preserve the explicit sRPC error contract without promoting ordinary errors. */
+export function serializeSrpcError(error: unknown): { error: string; userError?: boolean } {
+    const isSrpcError = error instanceof SrpcError;
+    const message = isSrpcError ? error.message : String(error);
+    const userError = isSrpcError && typeof error.isUserError === 'boolean' ? error.isUserError : undefined;
+    return {
+        error: message,
+        ...(userError === undefined ? {} : { userError })
+    };
+}
+
 export interface ISrpcLogger {
     info(...messages: unknown[]): void;
     warn(...messages: unknown[]): void;
@@ -73,12 +84,36 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     debug?: boolean;
     logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;
-    /**
-     * How long to ignore a reply for a request that timed out locally. This
-     * prevents a valid late reply from being treated as an unknown request and
-     * disconnecting an otherwise healthy stream. Defaults to 60 seconds.
-     */
+    /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
+    /** Maximum client requests buffered before a stream is activated. */
+    maxPendingClientRequests?: number;
+    /** Maximum decoded client-request bytes buffered before a stream is activated. */
+    maxPendingClientRequestBytes?: number;
+    /** Maximum concurrent client request handlers for one stream. */
+    maxInFlightClientRequests?: number;
+    /** Maximum decoded client-request bytes executing concurrently for one stream. */
+    maxInFlightClientRequestBytes?: number;
+    /** Maximum queued WebSocket bytes per stream before the stream is closed. */
+    maxBufferedBytes?: number;
+    /** Maximum encoded size of one incoming client WebSocket message. */
+    maxMessageBytes?: number;
+    /** Maximum pending server-to-client RPCs per stream. */
+    maxPendingServerRequests?: number;
+    /** Maximum encoded pending server-to-client RPC bytes per stream. */
+    maxPendingServerRequestBytes?: number;
+    /** Maximum WebSocket authentication handshakes awaiting authorization. */
+    maxPendingHandshakes?: number;
+    /** Maximum live streams, including streams still activating. */
+    maxActiveStreams?: number;
+    /** Maximum UTF-8 byte length of a client ID. */
+    maxClientIdBytes?: number;
+    /** Maximum JSON-encoded byte length of merged query/authorization metadata. */
+    maxClientMetadataBytes?: number;
+    /** Maximum principals retained by the bounded local authentication replay cache. */
+    maxAuthReplayPrincipals?: number;
+    /** Optional audience expected in v2 credentials. Defaults to `wsPath`. */
+    authAudience?: string;
 }
 
 export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
@@ -90,7 +125,9 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly clientId: string;
     readonly appVersion: string;
     readonly configureTs: number;
-    readonly protocolVersion: number;
+    readonly protocolVersion: 2;
+    /** Optional client capabilities negotiated during the WebSocket upgrade. */
+    readonly features?: ReadonlySet<string>;
     readonly supersede: boolean;
     readonly meta: T;
     readonly connectedAt: number;

@@ -32,4 +32,5 @@ export * from './security/crypto';
 export * from './security/validation';
 export * from './utils/date';
 export * from './utils/error';
+export * from './utils/timer';
 export * from './utils/uuid';

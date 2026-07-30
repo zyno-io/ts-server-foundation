@@ -23,6 +23,9 @@ import {
     LoggerLevel,
     LogEntry,
     MailService,
+    MeshBroadcastIndeterminateDeliveryError,
+    MeshService,
+    MeshClientService,
     MeshClientRegistry,
     type MeshClientRegistryBackend,
     QueryResult,
@@ -96,40 +99,67 @@ interface MeshRegistryTestMeta {
     role: string;
 }
 
-class InMemoryMeshClientBackend<TMeta> implements MeshClientRegistryBackend<TMeta> {
-    readonly clients = new Map<string, { nodeId: number; connectedAt: number; metadata: TMeta }>();
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+}
 
-    async register(clientId: string, nodeId: number, metadata: TMeta): Promise<{ status: 'ok'; supersededNodeId: number | null }> {
+class InMemoryMeshClientBackend<TMeta> implements MeshClientRegistryBackend<TMeta> {
+    readonly clients = new Map<string, { nodeId: number; connectionId: string; connectedAt: number; metadata: TMeta }>();
+
+    async register(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        _allowSupersede: boolean,
+        connectionId: string
+    ): Promise<{ status: 'ok'; supersededNodeId: number | null; supersededConnectionId?: string }> {
         const existing = this.clients.get(clientId);
-        this.clients.set(clientId, { nodeId, connectedAt: Date.now(), metadata });
+        this.clients.set(clientId, { nodeId, connectionId, connectedAt: Date.now(), metadata });
         return {
             status: 'ok',
-            supersededNodeId: existing && existing.nodeId !== nodeId ? existing.nodeId : null
+            supersededNodeId: existing && existing.nodeId !== nodeId ? existing.nodeId : null,
+            ...(existing && existing.nodeId !== nodeId && existing.connectionId ? { supersededConnectionId: existing.connectionId } : {})
         };
     }
 
-    async reserve(clientId: string, nodeId: number, metadata: TMeta): Promise<{ status: 'ok'; supersededNodeId: number | null }> {
-        return this.register(clientId, nodeId, metadata);
+    async reserve(
+        clientId: string,
+        nodeId: number,
+        metadata: TMeta,
+        allowSupersede: boolean,
+        connectionId: string
+    ): Promise<{ status: 'ok'; supersededNodeId: number | null; supersededConnectionId?: string }> {
+        return this.register(clientId, nodeId, metadata, allowSupersede, connectionId);
     }
 
-    async activate(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean> {
+    async activate(clientId: string, nodeId: number, metadata: TMeta, connectionId: string): Promise<boolean> {
+        const existing = this.clients.get(clientId);
+        if (!existing || existing.nodeId !== nodeId || existing.connectionId !== connectionId) return false;
         this.clients.set(clientId, {
             nodeId,
-            connectedAt: this.clients.get(clientId)?.connectedAt ?? Date.now(),
+            connectionId: existing.connectionId,
+            connectedAt: existing.connectedAt,
             metadata
         });
         return true;
     }
 
-    async unregister(clientId: string, nodeId: number): Promise<boolean> {
-        if (this.clients.get(clientId)?.nodeId !== nodeId) return false;
+    async unregister(clientId: string, nodeId: number, connectionId: string): Promise<boolean> {
+        const existing = this.clients.get(clientId);
+        if (!existing || existing.nodeId !== nodeId || existing.connectionId !== connectionId) return false;
         this.clients.delete(clientId);
         return true;
     }
 
-    async updateMetadata(clientId: string, nodeId: number, metadata: TMeta): Promise<boolean> {
+    async updateMetadata(clientId: string, nodeId: number, metadata: TMeta, connectionId: string): Promise<boolean> {
         const existing = this.clients.get(clientId);
-        if (!existing || existing.nodeId !== nodeId) return false;
+        if (!existing || existing.nodeId !== nodeId || existing.connectionId !== connectionId) return false;
         this.clients.set(clientId, { ...existing, metadata });
         return true;
     }
@@ -155,6 +185,130 @@ class InMemoryMeshClientBackend<TMeta> implements MeshClientRegistryBackend<TMet
 }
 
 describe('services', () => {
+    it('uses plain JSON Redis envelopes and validates timer limits', async () => {
+        const service = new MeshService('secure-envelope', {
+            heartbeatIntervalMs: 1_000,
+            nodeTtlMs: 3_000
+        }) as any;
+        const payload = service.encodeEnvelope({
+            requestId: 'request-1',
+            senderInstanceId: 1,
+            targetInstanceId: 2,
+            type: 'test',
+            data: { ok: true }
+        });
+        const envelope = JSON.parse(payload) as Record<string, unknown>;
+        assert.equal(envelope.protocolVersion, 2);
+        assert.equal('mac' in envelope, false);
+        assert.equal('messageSignature' in envelope, false);
+        assert.throws(() => new MeshService('invalid-timer', { heartbeatIntervalMs: 1_000, nodeTtlMs: 2_147_483_648 }), /timer/);
+    });
+
+    it('delivers broadcasts locally in the exact JSON form sent to Redis', async () => {
+        const service = new MeshService<{ changed: { when: Date; value: number } }>('wire-json-broadcast') as any;
+        service._instanceId = 1;
+        service.running = true;
+        service.leaseLost = false;
+        service.leaseSafeUntil = Number.POSITIVE_INFINITY;
+        service.getPublisher = () => ({ publish: async () => 1 });
+        let received: unknown;
+        service.registerBroadcastHandler('changed', (data: unknown) => {
+            received = data;
+        });
+
+        const when = new Date('2026-07-29T12:34:56.000Z');
+        await service.broadcast('changed', { when, value: Number.NaN });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.deepEqual(received, { when: when.toJSON(), value: null });
+    });
+
+    it('dispatches only valid remote broadcast envelopes', async () => {
+        const service = new MeshService<{ refreshed: { key: string } }>('remote-broadcast') as any;
+        service._instanceId = 1;
+        service.running = true;
+        service.generation = 1;
+        service.leaseLost = false;
+        service.leaseSafeUntil = Number.POSITIVE_INFINITY;
+        service.validateIncomingSender = async () => true;
+        const received: string[] = [];
+        service.registerBroadcastHandler('refreshed', (data: { key: string }) => {
+            received.push(data.key);
+        });
+
+        await service.handleBroadcastIncoming(
+            JSON.stringify({ protocolVersion: 2, broadcast: true, senderInstanceId: 2, type: 'refreshed', data: { key: 'users' } }),
+            1
+        );
+        await service.handleBroadcastIncoming(
+            JSON.stringify({ protocolVersion: 2, senderInstanceId: 2, requestId: 'not-a-broadcast', type: 'refreshed', data: { key: 'ignored' } }),
+            1
+        );
+        await new Promise<void>(resolve => setImmediate(resolve));
+
+        assert.deepEqual(received, ['users']);
+    });
+
+    it('fences a mesh lease on its absolute boundary even while renewal remains in flight', async () => {
+        const service = new MeshService('hung-heartbeat-fence', {
+            heartbeatIntervalMs: 1_000,
+            nodeTtlMs: 3_000
+        }) as any;
+        let fenced = 0;
+        service.running = true;
+        service.generation = 1;
+        service.leaseLost = false;
+        service.heartbeatGeneration = 1; // Model a renewal promise that never settles.
+        service.leaseSafeUntil = performance.now() + 10;
+        service.leaseLostCallback = () => {
+            fenced++;
+        };
+
+        service.armLeaseSafetyTimer(1);
+        await new Promise<void>(resolve => setTimeout(resolve, 30));
+
+        assert.equal(service.running, false);
+        assert.equal(service.leaseLost, true);
+        assert.equal(fenced, 1);
+        assert.throws(() => service.assertLeaseSafe(), /no longer safe/);
+    });
+
+    it('fences and relinquishes leadership instead of silently suppressing cleanup at stale-drain saturation', async () => {
+        const service = new MeshService('cleanup-drain-saturation', {
+            heartbeatIntervalMs: 1_000,
+            nodeTtlMs: 3_000
+        }) as any;
+        let stopped = 0;
+        service.running = true;
+        service.generation = 9;
+        service.leaderEpoch = 4;
+        service.leaseLost = false;
+        service.leaseSafeUntil = Number.POSITIVE_INFINITY;
+        service.leaderService = {
+            isLeader: true,
+            stop: async () => {
+                stopped++;
+            }
+        };
+        for (let index = 0; index < 8; index++) {
+            service.cleanupDrains.set(`stale-${index}`, new Promise<void>(() => {}));
+        }
+        service.startCleanup();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(service.running, false);
+        assert.equal(service.leaseLost, true);
+        assert.equal(service.leaderService, null);
+        assert.equal(stopped, 1);
+    });
+    it('rejects unsafe mesh-client invocation timers eagerly', async () => {
+        const service = new MeshClientService<object>({
+            key: 'invalid-invoke-timer',
+            clientInvokeFn: async () => undefined
+        });
+        for (const timeout of [0, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 0x80000000]) {
+            await assert.rejects(service.invoke('client-1', 'notify', {}, timeout), /safe positive integer/);
+        }
+    });
+
     it('registers logger providers by default and scopes injected loggers to the consuming class', async () => {
         const entries: LogEntry[] = [];
         setLogSink(entry => entries.push(entry));
@@ -291,20 +445,21 @@ describe('services', () => {
         const backend = new InMemoryMeshClientBackend<MeshRegistryTestMeta>();
         const registry = new MeshClientRegistry<MeshRegistryTestMeta>(7, backend);
 
-        await registry.register('client-1', { role: 'admin' });
+        await registry.register('client-1', { role: 'admin' }, false, 'connection-1');
         assert.deepStrictEqual(await registry.getClient('client-1'), {
             clientId: 'client-1',
             nodeId: 7,
+            connectionId: 'connection-1',
             connectedAt: (await registry.getClient('client-1'))?.connectedAt,
             metadata: { role: 'admin' }
         });
 
-        assert.equal(await registry.updateMetadata('client-1', { role: 'user' }), true);
+        assert.equal(await registry.updateMetadata('client-1', { role: 'user' }, 'connection-1'), true);
         assert.deepStrictEqual(
             (await registry.listClientsForNode()).map(client => client.clientId),
             ['client-1']
         );
-        assert.equal(await registry.unregister('client-1'), true);
+        assert.equal(await registry.unregister('client-1', 'connection-1'), true);
         assert.equal(await registry.getClient('client-1'), undefined);
     });
 
