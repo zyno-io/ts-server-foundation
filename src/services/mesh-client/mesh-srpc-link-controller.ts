@@ -185,6 +185,8 @@ export interface MeshSrpcLinkControllerOptions<TMeta extends SrpcMeta, TRegistry
     destroyLocalStream(clientId: string, connectionId: string, streamId: number, error?: string): Promise<void>;
     attachLocalReceiver(clientId: string, connectionId: string, streamId: number): SrpcByteStream;
     disconnectLocal(clientId: string, connectionId: string, reason?: string): Promise<void | boolean>;
+    /** Exact ownership handoff; distinct from an operator-requested disconnect. */
+    fenceLocal?(clientId: string, connectionId: string, reason?: string): Promise<void | boolean>;
     updateLocalMetadata(clientId: string, connectionId: string, metadata: Partial<TMeta>): Promise<TRegistryMeta | void>;
 }
 
@@ -682,7 +684,11 @@ export class MeshSrpcLinkController<TMeta extends SrpcMeta, TRegistryMeta>
                 let fenced = false;
                 if (local?.id === connectionId || this.options.hasLocalFenceConnection?.(clientId, connectionId) === true) {
                     this.assertLeaseSafe();
-                    fenced = (await this.options.disconnectLocal(clientId, connectionId, header.reason)) !== false;
+                    // Ownership takeover is semantically different from a
+                    // caller-requested disconnect: the former must preserve
+                    // the supersede cause for lifecycle consumers.
+                    const fenceLocal = this.options.fenceLocal ?? this.options.disconnectLocal;
+                    fenced = (await fenceLocal(clientId, connectionId, header.reason)) !== false;
                     this.assertLeaseSafe();
                 } else {
                     // Absence is a completed exact fence only when the registry

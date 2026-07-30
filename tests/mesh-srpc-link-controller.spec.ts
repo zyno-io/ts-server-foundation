@@ -77,6 +77,188 @@ describe('MeshSrpcLinkController', () => {
         assert.throws(() => server.resolveMeshLinkConfig(), /safe positive integer/);
     });
 
+    it('uses the application listener by default and supports an explicit mesh-link listener override', () => {
+        const clientListener = createServer();
+        const explicitMeshListener = createServer();
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLinkOptions = { secret };
+        server.options = { wsPath: '/client', httpServer: clientListener };
+        server.resolveMeshLinkHttpServer = () => undefined;
+
+        assert.equal(server.resolveMeshLinkConfig().httpServer, undefined);
+        const source = (MeshSrpcServer.prototype as any).startMesh.toString();
+        assert.ok(source.includes('httpServer: linkConfig.httpServer'), 'advertised address must use the selected application listener');
+
+        server.meshLinkOptions = { secret, httpServer: explicitMeshListener };
+        server.resolveMeshLinkHttpServer = () => explicitMeshListener;
+        assert.equal(server.resolveMeshLinkConfig().httpServer, explicitMeshListener);
+    });
+
+    it('reads registry presence without reserving a remote handle and projects local pre-start streams', async () => {
+        const record = {
+            clientId: 'remote-client',
+            nodeId: 41,
+            connectionId: 'remote-generation',
+            connectedAt: 1234,
+            metadata: { role: 'remote' }
+        };
+        const running = Object.create(MeshSrpcServer.prototype) as any;
+        running.meshRunning = true;
+        running.meshClientService = {
+            instanceId: 7,
+            clientRegistry: {
+                getClient: async (clientId: string) => (clientId === record.clientId ? record : undefined),
+                listClients: async () => [record]
+            }
+        };
+        running.resolveClient = async () => {
+            throw new Error('presence reads must not resolve remote handles');
+        };
+
+        assert.deepEqual(await running.getClientPresence(record.clientId), record);
+        assert.deepEqual(await running.listClientPresences(), [record]);
+
+        const local = Object.create(MeshSrpcServer.prototype) as any;
+        local.meshRunning = false;
+        local.meshClientService = { instanceId: 9 };
+        local.extractMetadataFn = (stream: { meta: FullClientMeta }) => ({ role: stream.meta.role });
+        local.streamsByClientId = new Map([
+            ['local-client', { clientId: 'local-client', id: 'local-generation', connectedAt: 5678, meta: { role: 'local', secret: 'hidden' } }]
+        ]);
+
+        assert.deepEqual(await local.getClientPresence('local-client'), {
+            clientId: 'local-client',
+            nodeId: 9,
+            connectionId: 'local-generation',
+            connectedAt: 5678,
+            metadata: { role: 'local' }
+        });
+        assert.deepEqual((await local.listClientPresences())[0], {
+            clientId: 'local-client',
+            nodeId: 9,
+            connectionId: 'local-generation',
+            connectedAt: 5678,
+            metadata: { role: 'local' }
+        });
+
+        local.extractMetadataFn = undefined;
+        const localPresence = await local.getClientPresence('local-client');
+        assert.ok(localPresence);
+        (localPresence.metadata as FullClientMeta).role = 'mutated-through-presence';
+        assert.equal(local.streamsByClientId.get('local-client').meta.role, 'local');
+    });
+
+    it('preserves the supersede disconnect cause when another mesh node claims the exact generation', async () => {
+        const stream = { id: 'generation-old', clientId: 'client-1' };
+        let cleanupCause: string | undefined;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.streamsById = new Map([[stream.id, stream]]);
+        server.streamsByClientId = new Map([[stream.clientId, stream]]);
+        server.meshLogger = { info: () => {} };
+        server.cleanupStream = (_stream: unknown, cause: string) => {
+            cleanupCause = cause;
+        };
+
+        assert.equal(await server.handleClientSuperseded(stream.clientId, stream.id, 'superseded by another node'), true);
+        assert.equal(cleanupCause, 'supersede');
+    });
+
+    it('uses the supersede fence rather than an ordinary disconnect for remote ownership handoffs', async () => {
+        const stream = { id: 'generation-old', clientId: 'client-1' };
+        let ordinaryDisconnects = 0;
+        const fences: Array<{ clientId: string; connectionId: string; reason: string | undefined }> = [];
+        const controller = new MeshSrpcLinkController<SrpcMeta, SrpcMeta>({
+            meshKey: 'remote-fence-cause',
+            requestTimeoutMs: 1_000,
+            runtime: { onPeerClosed: () => () => {} } as any,
+            service: { instanceId: 1, clientRegistry: { getClient: async () => undefined }, mesh: {} } as any,
+            getLocalConnection: clientId => (clientId === stream.clientId ? (stream as any) : undefined),
+            invokeLocal: async () => Buffer.alloc(0),
+            reserveLocalSenderIds: () => [],
+            writeLocalStream: async () => {},
+            finishLocalStream: async () => {},
+            destroyLocalStream: async () => {},
+            attachLocalReceiver: () => {
+                throw new Error('not needed');
+            },
+            disconnectLocal: async () => {
+                ordinaryDisconnects++;
+            },
+            fenceLocal: async (clientId, connectionId, reason) => {
+                fences.push({ clientId, connectionId, reason });
+            },
+            updateLocalMetadata: async () => {}
+        });
+        (controller as any).verifyPeerMembership = async () => {};
+        (controller as any).assertLeaseSafe = () => {};
+
+        try {
+            await controller.route(
+                { connected: true } as any,
+                {
+                    header: { type: 'fenceClient', clientId: stream.clientId, connectionId: stream.id, reason: 'supersede' },
+                    body: Buffer.alloc(0)
+                } as any
+            );
+            assert.equal(ordinaryDisconnects, 0);
+            assert.deepEqual(fences, [{ clientId: stream.clientId, connectionId: stream.id, reason: 'supersede' }]);
+        } finally {
+            await controller.close();
+        }
+    });
+
+    it('releases the mesh route and transport when a lease failure marks the server stopped', async () => {
+        let controllerCloses = 0;
+        let routeUnregistrations = 0;
+        const remoteTransports: unknown[] = [];
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLogger = { warn: () => {} };
+        server.meshRunning = true;
+        server.streamsByClientId = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.meshLinkRuntime = {};
+        server.meshLinkController = { close: async () => controllerCloses++ };
+        server.unregisterMeshLinkRoute = () => routeUnregistrations++;
+        server.meshClientService = { setRemoteTransport: (transport: unknown) => remoteTransports.push(transport) };
+
+        const failure = new Error('lease lost');
+        await server.handleMeshLeaseLost(failure);
+
+        assert.equal(server.meshRunning, false);
+        assert.strictEqual(server.meshLeaseFailure, failure);
+        assert.equal(controllerCloses, 1);
+        assert.deepEqual(remoteTransports, [undefined]);
+        assert.equal(routeUnregistrations, 1);
+        assert.equal(server.meshLinkController, undefined);
+        assert.equal(server.meshLinkRuntime, undefined);
+    });
+
+    it('does not emit an offline lifecycle event after a remote ownership fence', async () => {
+        const stream = { id: 'generation-old', clientId: 'client-1' };
+        let disconnected = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.publishedStreams = new Set([stream]);
+        server.streamDisconnectionHandlers = new Set();
+        server.logger = { error: () => {} };
+        server.meshLogger = { warn: () => {} };
+        server.lifecycleConnectedStreams = new WeakSet([stream]);
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map();
+        server.clientMetadata = new Map([[stream.clientId, { role: 'old' }]]);
+        server.meshLinkController = { invalidateConnection: () => {} };
+        server.meshClientService = { unregisterClient: async () => true };
+        server.disconnectedCallbacks = new Set([() => disconnected++]);
+
+        server.onStreamDisconnected(stream, 'supersede');
+        await Promise.all([...server.clientRegistryChains.values()]);
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.equal(disconnected, 0);
+        assert.equal(server.clientMetadata.has(stream.clientId), false);
+    });
+
     it('rejects stale local handles before updating replacement metadata', async () => {
         const stale = { id: 'connection-1', clientId: 'client-1', meta: { role: 'stale' } };
         const current = { id: 'connection-2', clientId: 'client-1', meta: { role: 'current' } };

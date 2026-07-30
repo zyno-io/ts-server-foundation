@@ -1,4 +1,5 @@
 import type { BaseMessage, ISrpcServerOptions, SrpcConnection, SrpcDisconnectCause, SrpcMeta, SrpcStream } from '../../srpc/types';
+import type { Server } from 'node:http';
 import type { MeshBroadcastMap, MeshBroadcastOptions, MeshServiceOptions } from '../mesh';
 
 import { getCurrentApp, onServerBootstrap, onServerShutdownRequested } from '../../app';
@@ -28,6 +29,13 @@ export interface MeshSrpcServerOptions<TMeta, TRegistryMeta = TMeta> {
         advertiseUrl?: string;
         path?: string;
         secret?: string;
+        /**
+         * Explicit mesh-link listener. When omitted, mesh upgrades use the
+         * running application HTTP listener, independent of the sRPC client
+         * listener. Before an application listener exists, TSF preserves the
+         * legacy fallback to the sRPC server's supplied httpServer.
+         */
+        httpServer?: Server;
         connectTimeoutMs?: number;
         requestTimeoutMs?: number;
         idleTimeoutMs?: number;
@@ -58,6 +66,7 @@ export class MeshSrpcServer<
     private meshStartPromise?: Promise<void>;
     private meshStopPromise?: Promise<void>;
     private meshRunning = false;
+    private meshLeaseFailure?: Error;
     private meshStopping = false;
     private meshClosed = false;
     private meshLinkRequestTimeoutMs = 30_000;
@@ -134,37 +143,12 @@ export class MeshSrpcServer<
 
         // Wire up cross-pod duplicate detection: disconnect local stream when
         // the same client connects on a different node.
-        this.meshClientService.onClientSuperseded(async (clientId, connectionId, reason) => {
-            const stream = connectionId === undefined ? this.getCurrentStreamByClientId(clientId) : this.streamsById.get(connectionId);
-            // Exact-generation absence is already a completed fence. This is
-            // important for same-node supersession: core closes the old stream
-            // synchronously before the replacement's private registry claim.
-            if (!stream) return connectionId !== undefined;
-            if (stream.clientId !== clientId || (connectionId !== undefined && stream.id !== connectionId)) return false;
-            if (connectionId !== undefined) {
-                this.meshLogger.info('Disconnecting client through exact mesh transport', { clientId, connectionId });
-                await super.disconnectClient(stream, reason);
-                return true;
-            }
-            this.meshLogger.info('Disconnecting superseded client', { clientId });
-            this.cleanupStream(stream, 'supersede');
-            return true;
-        });
+        this.meshClientService.onClientSuperseded((clientId, connectionId, reason) => this.handleClientSuperseded(clientId, connectionId, reason));
 
         // A lost mesh lease is a split-brain boundary.  Do not wait for the
         // normal shutdown path: synchronously fence every local stream so a
         // stale link cannot keep serving after another node takes ownership.
-        this.meshClientService.onLeaseLost(async reason => {
-            this.meshLogger.warn('Fencing local sRPC streams after mesh lease loss', { reason });
-            const streams = new Set<SrpcStream<TMeta>>([
-                ...(this.streamsByClientId?.values() ?? []),
-                ...(this.pendingStreamsByClientId?.values() ?? [])
-            ]);
-            for (const stream of streams) {
-                if (this.isCurrentStream(stream)) this.cleanupStream(stream, 'disconnect');
-            }
-            await this.meshLinkController?.close();
-        });
+        this.meshClientService.onLeaseLost(reason => this.handleMeshLeaseLost(reason));
 
         // Wire up mesh node cleanup callback
         this.meshClientService.onNodeClientsOrphaned(async (nodeId, orphaned) => {
@@ -189,13 +173,62 @@ export class MeshSrpcServer<
                 app.on(onServerShutdownRequested, () => this.meshStop())
             );
         } catch {
-            // Standalone servers using an explicit httpServer retain the
+            // Standalone servers using an explicit mesh-link listener retain the
             // idempotent meshStart()/meshStop() lifecycle.
         }
     }
 
     ////////////////////////////////////////
     // Post-establish check - reserve mesh ownership before activation
+
+    /** Fence the exact local generation when a newer owner claims the client. */
+    private async handleClientSuperseded(clientId: string, connectionId: string | undefined, reason?: string): Promise<boolean> {
+        const stream = connectionId === undefined ? this.getCurrentStreamByClientId(clientId) : this.streamsById.get(connectionId);
+        // Exact-generation absence is already a completed fence. This is
+        // important for same-node supersession: core closes the old stream
+        // synchronously before the replacement's private registry claim.
+        if (!stream) return connectionId !== undefined;
+        if (stream.clientId !== clientId || (connectionId !== undefined && stream.id !== connectionId)) return false;
+        if (connectionId !== undefined) {
+            this.meshLogger.info('Disconnecting client through exact mesh transport', { clientId, connectionId, reason });
+            // This is a replacement ownership generation, not an ordinary
+            // client disconnect. Preserve the supersede cause so local
+            // lifecycle consumers do not emit disconnect side effects for
+            // a client that remains connected on another mesh node.
+            this.cleanupStream(stream, 'supersede');
+            return true;
+        }
+        this.meshLogger.info('Disconnecting superseded client', { clientId, reason });
+        this.cleanupStream(stream, 'supersede');
+        return true;
+    }
+
+    /** Fence streams and release the link route after the mesh lease is lost. */
+    private async handleMeshLeaseLost(reason?: Error): Promise<void> {
+        this.meshLogger.warn('Fencing local sRPC streams after mesh lease loss', { reason });
+        this.meshRunning = false;
+        this.meshLeaseFailure = reason ?? new Error('sRPC mesh lease was lost');
+        const streams = new Set<SrpcStream<TMeta>>([...(this.streamsByClientId?.values() ?? []), ...(this.pendingStreamsByClientId?.values() ?? [])]);
+        for (const stream of streams) {
+            if (this.isCurrentStream(stream)) this.cleanupStream(stream, 'disconnect');
+        }
+
+        // meshStop() deliberately returns once meshRunning is false, so lease
+        // loss must release the route here. Otherwise the shared runtime keeps
+        // dispatching this mesh key to a closed controller forever.
+        const controller = this.meshLinkController;
+        try {
+            await controller?.close();
+        } finally {
+            this.meshClientService.setRemoteTransport(undefined);
+            this.unregisterMeshLinkRoute?.();
+            this.unregisterMeshLinkRoute = undefined;
+            if (this.meshLinkController === controller) {
+                this.meshLinkController = undefined;
+                this.meshLinkRuntime = undefined;
+            }
+        }
+    }
 
     /**
      * Defers stream activation until mesh reservation succeeds.
@@ -394,6 +427,14 @@ export class MeshSrpcServer<
             const currentStream = this.getCurrentStreamByClientId(stream.clientId);
             const replacementExists = currentStream !== undefined && currentStream !== stream;
             if (replacementExists) return;
+            // A mesh ownership fence intentionally closes only this local
+            // generation. The client remains present on the replacement node,
+            // so release our stale metadata without publishing an offline
+            // lifecycle event.
+            if (cause === 'supersede') {
+                this.clientMetadata.delete(stream.clientId);
+                return;
+            }
             if (removed && hasMetadata && publishedLifecycle) {
                 this.clientMetadata.delete(stream.clientId);
                 void this.enqueueClientCallback(stream.clientId, async () => {
@@ -515,14 +556,51 @@ export class MeshSrpcServer<
         return this.meshClientService.clientRegistry;
     }
 
-    get startupState(): 'stopped' | 'starting' | 'ready' | 'draining' {
+    get startupState(): 'stopped' | 'starting' | 'ready' | 'draining' | 'failed' {
         if (this.meshStopping || this.meshStopPromise) return 'draining';
         if (this.meshStartPromise) return 'starting';
+        if (this.meshLeaseFailure) return 'failed';
         return this.meshRunning ? 'ready' : 'stopped';
     }
 
     ready(): Promise<void> {
+        if (this.meshLeaseFailure) return Promise.reject(this.meshLeaseFailure);
         return this.meshStart();
+    }
+
+    /**
+     * Read a generation-fenced registry record without materializing a remote
+     * connection, link capability, or byte-stream sender pool. Use this for
+     * presence and metadata decisions; resolveClient() is for an imminent
+     * invoke, byte stream, metadata mutation, or disconnect.
+     */
+    async getClientPresence(clientId: string): Promise<RegisteredClient<TRegistryMeta> | undefined> {
+        if (!this.meshRunning) {
+            const stream = this.streamsByClientId.get(clientId);
+            if (!stream) return undefined;
+            return {
+                clientId: stream.clientId,
+                nodeId: this.meshInstanceId,
+                connectionId: stream.id,
+                connectedAt: stream.connectedAt,
+                metadata: snapshotMetadata(this.extractMeta(stream))
+            };
+        }
+        return this.clientRegistry.getClient(clientId);
+    }
+
+    /** Registry-only counterpart to listClients(); it never creates remote handles. */
+    async listClientPresences(): Promise<RegisteredClient<TRegistryMeta>[]> {
+        if (!this.meshRunning) {
+            return [...this.streamsByClientId.values()].map(stream => ({
+                clientId: stream.clientId,
+                nodeId: this.meshInstanceId,
+                connectionId: stream.id,
+                connectedAt: stream.connectedAt,
+                metadata: snapshotMetadata(this.extractMeta(stream))
+            }));
+        }
+        return this.clientRegistry.listClients();
     }
 
     /**
@@ -665,6 +743,7 @@ export class MeshSrpcServer<
     }
 
     async meshStart(): Promise<void> {
+        if (this.meshLeaseFailure) throw this.meshLeaseFailure;
         if (this.meshClosed) throw new Error('sRPC mesh server is closed');
         if (this.meshStopPromise) {
             await this.meshStopPromise;
@@ -695,7 +774,10 @@ export class MeshSrpcServer<
             const advertiseUrl = resolveMeshLinkAdvertiseUrl({
                 advertiseUrl: linkConfig.advertiseUrl,
                 path: linkConfig.path,
-                httpServer: this.options.httpServer
+                // resolveMeshLinkConfig selects the actual listener. Undefined
+                // intentionally means the application HTTP listener rather than
+                // an isolated sRPC client listener (for example mTLS).
+                httpServer: linkConfig.httpServer
             });
             this.meshLinkRuntime = acquireMeshLinkRuntime(linkConfig);
             this.meshLinkController = this.createMeshLinkController(this.meshLinkRuntime);
@@ -957,6 +1039,11 @@ export class MeshSrpcServer<
                 await super.disconnectClient(stream, reason);
                 return true;
             },
+            fenceLocal: async (clientId, connectionId) => {
+                const stream = getFenceLocal(clientId, connectionId);
+                this.cleanupStream(stream, 'supersede');
+                return true;
+            },
             updateLocalMetadata: async (clientId, connectionId, metadata) => {
                 const stream = getLocal(clientId, connectionId);
                 const projected = this.projectMetadataWithoutMutation(stream, metadata);
@@ -1033,7 +1120,7 @@ export class MeshSrpcServer<
             advertiseUrl: this.meshLinkOptions?.advertiseUrl ?? config?.MESH_LINK_ADVERTISE_URL,
             path,
             secret,
-            httpServer: this.options.httpServer,
+            httpServer: this.resolveMeshLinkHttpServer(),
             connectTimeoutMs: this.meshLinkOptions?.connectTimeoutMs ?? config?.MESH_LINK_CONNECT_TIMEOUT_MS ?? 5_000,
             requestTimeoutMs,
             idleTimeoutMs: this.meshLinkOptions?.idleTimeoutMs ?? config?.MESH_LINK_IDLE_TIMEOUT_MS ?? 60_000,
@@ -1041,6 +1128,23 @@ export class MeshSrpcServer<
             maxBufferedBytes: this.meshLinkOptions?.maxBufferedBytes ?? config?.MESH_LINK_MAX_BUFFERED_BYTES ?? 16 * 1024 * 1024,
             maxEndpointPins: this.meshLinkOptions?.maxEndpointPins
         };
+    }
+
+    /**
+     * Normal applications start mesh links after their main HTTP listener is
+     * bound, so omitting meshLink.httpServer intentionally hosts upgrades
+     * there.  Standalone servers historically supplied only options.httpServer
+     * and may have no live application listener; retain that safe fallback so
+     * their advertised listener and upgrade listener cannot diverge.
+     */
+    private resolveMeshLinkHttpServer(): Server | undefined {
+        if (this.meshLinkOptions?.httpServer) return this.meshLinkOptions.httpServer;
+        try {
+            if (getCurrentApp().http.getAddress()) return undefined;
+        } catch {
+            // No application exists; use the standalone sRPC listener below.
+        }
+        return this.options.httpServer;
     }
 }
 
