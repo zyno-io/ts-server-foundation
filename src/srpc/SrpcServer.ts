@@ -153,7 +153,7 @@ export class SrpcServer<
         const { id: clientStreamId, cid: clientId, appv: appVersion } = query;
         const address = this.getRemoteAddress(info.req);
 
-        const protocolVersion = Number(query._v);
+        const protocolVersion = query._v === undefined && this.options.allowMissingProtocolVersion ? 2 : Number(query._v);
         if (!clientStreamId || !clientId || !appVersion || protocolVersion !== 2) {
             cb(false, 400, 'Missing required query parameters');
             return;

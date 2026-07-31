@@ -81,6 +81,8 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     clientMessage: SrpcMessageFns<TClientOutput>;
     serverMessage: SrpcMessageFns<TServerOutput>;
     wsPath: string;
+    /** Temporarily accept clients that predate the mandatory `_v=2` handshake parameter. */
+    allowMissingProtocolVersion?: boolean;
     debug?: boolean;
     logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;

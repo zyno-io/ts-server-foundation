@@ -2085,6 +2085,29 @@ describe('srpc', () => {
         }
     });
 
+    it('optionally accepts legacy handshakes that omit the protocol version', async () => {
+        const harness = await createHarness({ allowMissingProtocolVersion: true });
+        const connected = deferred<SrpcStream<SrpcMeta>>();
+        harness.server.setClientAuthorizer(() => true);
+        harness.server.registerConnectionHandler(stream => connected.resolve(stream));
+        const url = `ws://127.0.0.1:${harness.port}/srpc-test?id=${randomUUID()}&cid=legacy-client&appv=1`;
+        const client = new WebSocket(url);
+
+        client.on('message', data => {
+            const message = JsonMessage.decode(webSocketDataToBuffer(data)) as ServerMessage;
+            if (message.pingPong) client.send(encodeRawSrpcMessage<ClientMessage>({ pingPong: {} }));
+        });
+
+        try {
+            await waitForWebSocketOpen(client);
+            const stream = await connected.promise;
+            assert.equal(stream.protocolVersion, 2);
+        } finally {
+            client.close();
+            await harness.close();
+        }
+    });
+
     it('rejects replayed v2 credentials and validates invocation timer bounds', async () => {
         const harness = await createHarness();
         const url = createSignedRawWebSocketUrl(harness.port, 'replay-client');
