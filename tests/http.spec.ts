@@ -1342,7 +1342,7 @@ describe('http router', () => {
         assert.equal(wrongMethod.statusCode, 404);
     });
 
-    it('uses declaration order when multiple routes match the same request', async () => {
+    it('prefers literal path segments over parameters regardless of declaration or controller order', async () => {
         @http.controller('/parameter-first')
         class ParameterFirstController {
             @http.GET('/:value')
@@ -1369,14 +1369,124 @@ describe('http router', () => {
             }
         }
 
+        @http.controller('/cross-controller')
+        class CrossControllerParameterController {
+            @http.GET('/:value')
+            parameter(value: HttpPath<string>) {
+                return { route: 'parameter', value };
+            }
+        }
+
+        @http.controller('/cross-controller')
+        class CrossControllerLiteralController {
+            @http.GET('/fixed')
+            fixed() {
+                return { route: 'fixed' };
+            }
+        }
+
         process.env.APP_ENV = 'test';
         const app = createApp({ controllers: [ParameterFirstController, LiteralFirstController] });
+        const parameterFirst = createApp({ controllers: [CrossControllerParameterController, CrossControllerLiteralController] });
+        const literalFirst = createApp({ controllers: [CrossControllerLiteralController, CrossControllerParameterController] });
 
-        assert.deepStrictEqual((await app.request(HttpRequest.GET('/parameter-first/fixed'))).json, {
+        assert.deepStrictEqual((await app.request(HttpRequest.GET('/parameter-first/fixed'))).json, { route: 'fixed' });
+        assert.deepStrictEqual((await app.request(HttpRequest.GET('/literal-first/fixed'))).json, { route: 'fixed' });
+        assert.deepStrictEqual((await parameterFirst.request(HttpRequest.GET('/cross-controller/fixed'))).json, { route: 'fixed' });
+        assert.deepStrictEqual((await literalFirst.request(HttpRequest.GET('/cross-controller/fixed'))).json, { route: 'fixed' });
+
+        parameterFirst.router.restrictControllers([CrossControllerParameterController]);
+        assert.deepStrictEqual((await parameterFirst.request(HttpRequest.GET('/cross-controller/fixed'))).json, {
             route: 'parameter',
             value: 'fixed'
         });
-        assert.deepStrictEqual((await app.request(HttpRequest.GET('/literal-first/fixed'))).json, { route: 'fixed' });
+    });
+
+    it('prefers the earliest literal segment and falls back to a parameter route when needed', async () => {
+        @http.controller('/specificity')
+        class DynamicFirstController {
+            @http.GET('/:value/fixed')
+            dynamic(value: HttpPath<string>) {
+                return { route: 'dynamic', value };
+            }
+        }
+
+        @http.controller('/specificity')
+        class LiteralFirstController {
+            @http.GET('/fixed/:value')
+            literal(value: HttpPath<string>) {
+                return { route: 'literal', value };
+            }
+        }
+
+        @http.controller('/fallback')
+        class StaticBranchController {
+            @http.GET('/fixed/one')
+            getStatic() {
+                return { route: 'static' };
+            }
+        }
+
+        @http.controller('/fallback')
+        class ParameterFallbackController {
+            @http.GET('/:value/two')
+            parameter(value: HttpPath<string>) {
+                return { route: 'parameter', value };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [DynamicFirstController, LiteralFirstController, StaticBranchController, ParameterFallbackController] });
+
+        assert.deepStrictEqual((await app.request(HttpRequest.GET('/specificity/fixed/fixed'))).json, {
+            route: 'literal',
+            value: 'fixed'
+        });
+        assert.deepStrictEqual((await app.request(HttpRequest.GET('/fallback/fixed/two'))).json, {
+            route: 'parameter',
+            value: 'fixed'
+        });
+    });
+
+    it('rejects duplicate literal paths and indistinguishable parameter paths', () => {
+        @http.controller('/duplicate-literal')
+        class FirstLiteralController {
+            @http.GET('/fixed')
+            get() {
+                return { route: 'first' };
+            }
+        }
+
+        @http.controller('/duplicate-literal')
+        class SecondLiteralController {
+            @http.GET('/fixed')
+            get() {
+                return { route: 'second' };
+            }
+        }
+
+        @http.controller('/duplicate-parameter')
+        class IdController {
+            @http.GET('/:id')
+            get(id: HttpPath<string>) {
+                return { id };
+            }
+        }
+
+        @http.controller('/duplicate-parameter')
+        class SlugController {
+            @http.GET('/:slug')
+            get(slug: HttpPath<string>) {
+                return { slug };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        assert.throws(
+            () => createApp({ controllers: [FirstLiteralController, SecondLiteralController] }),
+            /Ambiguous HTTP route GET \/duplicate-literal\/fixed/
+        );
+        assert.throws(() => createApp({ controllers: [IdController, SlugController] }), /Ambiguous HTTP route GET \/duplicate-parameter\/:slug/);
     });
 
     it('requires explicit HEAD routes and suppresses their bodies in memory and over Node HTTP', async () => {

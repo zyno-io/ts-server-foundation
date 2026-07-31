@@ -97,8 +97,22 @@ interface CompiledRouteParameterResolver {
     resolver: RouteParameterResolverInput;
 }
 
+type RouteSegment = { kind: 'literal'; value: string } | { kind: 'parameter' };
+
+interface HttpRouteDispatchEntry {
+    route: HttpRoutePlan;
+    segments: readonly RouteSegment[];
+}
+
 export class HttpRouter {
     private routes: HttpRoutePlan[] = [];
+    /**
+     * Routes grouped by method and ordered once at registration time. Literal path segments take
+     * precedence over parameters at the first position where their shapes differ.
+     */
+    private readonly dispatchRoutes = new Map<HttpMethod, HttpRouteDispatchEntry[]>();
+    private readonly routeSegments = new WeakMap<HttpRoutePlan, readonly RouteSegment[]>();
+    private readonly routePatterns = new Map<string, HttpRoutePlan>();
     private restrictedControllers?: Set<ClassType>;
     private readonly unregisteredMiddlewareInstances = new WeakMap<ClassType<HttpMiddleware>, HttpMiddleware>();
     private readonly httpResolvers: CompiledRouteParameterResolver[];
@@ -121,7 +135,7 @@ export class HttpRouter {
 
         for (const route of getRouteMetadata(controllerClass)) {
             const path = joinPaths(controller.path, route.path);
-            const { regex, paramNames } = compilePath(path);
+            const { regex, paramNames, segments } = compilePath(path);
             const method = ReflectionClass.from(controllerClass).getMethod(route.propertyKey);
             const parameters = this.compileParameters(controllerClass, route.propertyKey, route.method, paramNames);
             if (parameters.filter(parameter => parameter.kind === 'body').length > 1) {
@@ -131,7 +145,7 @@ export class HttpRouter {
             if (bodyMode === 'stream' && hasParsedBodyParameters(parameters)) {
                 throw new Error(`Cannot combine HttpRequestStream with parsed body or file parameters on ${String(route.propertyKey)}`);
             }
-            this.routes.push({
+            const plan: HttpRoutePlan = {
                 method: route.method,
                 path,
                 regex,
@@ -146,7 +160,8 @@ export class HttpRouter {
                 middlewares: [...controller.middlewares, ...route.middlewares],
                 bodyMode,
                 uploadPolicy: compileMultipartRequestPolicy(parameters)
-            });
+            };
+            this.addRoute(plan, segments);
         }
     }
 
@@ -154,6 +169,7 @@ export class HttpRouter {
         const restrictedControllers = new Set(controllerClasses);
         this.restrictedControllers = restrictedControllers;
         this.routes = this.routes.filter(route => restrictedControllers.has(route.controllerClass));
+        this.rebuildRouteIndexes();
     }
 
     listRoutes(): readonly HttpRoutePlan[] {
@@ -161,7 +177,7 @@ export class HttpRouter {
     }
 
     hasRoute(request: HttpRequest): boolean {
-        return this.routes.some(route => route.method === request.method && !!matchRoutePath(route, request.path));
+        return this.dispatchRoutes.get(request.method)?.some(({ route }) => !!matchRoutePath(route, request.path)) ?? false;
     }
 
     hasFallbackController(): boolean {
@@ -254,8 +270,7 @@ export class HttpRouter {
     }
 
     private match(request: HttpRequest, onMatchedRoute: () => void): HttpRoutePlan | undefined {
-        for (const route of this.routes) {
-            if (route.method !== request.method) continue;
+        for (const { route } of this.dispatchRoutes.get(request.method) ?? []) {
             const match = matchRoutePath(route, request.path);
             if (!match) continue;
 
@@ -271,6 +286,38 @@ export class HttpRouter {
             });
             return route;
         }
+    }
+
+    private addRoute(route: HttpRoutePlan, segments: readonly RouteSegment[]): void {
+        const pattern = routePatternKey(route.method, segments);
+        const existing = this.routePatterns.get(pattern);
+        if (existing) {
+            throw new Error(`Ambiguous HTTP route ${route.method} ${route.path}: ${describeRoute(route)} conflicts with ${describeRoute(existing)}`);
+        }
+
+        this.routes.push(route);
+        this.routeSegments.set(route, segments);
+        this.routePatterns.set(pattern, route);
+        this.insertDispatchRoute(route, segments);
+    }
+
+    private rebuildRouteIndexes(): void {
+        this.dispatchRoutes.clear();
+        this.routePatterns.clear();
+        for (const route of this.routes) {
+            const segments = this.routeSegments.get(route);
+            if (!segments) throw new Error(`Missing route segments for ${describeRoute(route)}`);
+            this.routePatterns.set(routePatternKey(route.method, segments), route);
+            this.insertDispatchRoute(route, segments);
+        }
+    }
+
+    private insertDispatchRoute(route: HttpRoutePlan, segments: readonly RouteSegment[]): void {
+        const routes = this.dispatchRoutes.get(route.method) ?? [];
+        const entry: HttpRouteDispatchEntry = { route, segments };
+        const index = routes.findIndex(current => compareRouteSpecificity(segments, current.segments) < 0);
+        routes.splice(index === -1 ? routes.length : index, 0, entry);
+        this.dispatchRoutes.set(route.method, routes);
     }
 
     private async runMiddlewares(
@@ -727,20 +774,42 @@ function joinPaths(base: string, child: string): string {
     return joined.length > 1 ? joined.replace(/\/$/, '') : joined;
 }
 
-function compilePath(path: string): { regex: RegExp; paramNames: string[] } {
+function compilePath(path: string): { regex: RegExp; paramNames: string[]; segments: RouteSegment[] } {
     const paramNames: string[] = [];
-    const pattern = path
-        .split('/')
-        .map(segment => {
-            if (segment.startsWith(':')) {
-                paramNames.push(segment.slice(1));
-                return '([^/]+)';
-            }
-            return escapeRegex(segment);
-        })
-        .join('/');
+    const segments: RouteSegment[] = path.split('/').map(segment => {
+        if (segment.startsWith(':')) {
+            paramNames.push(segment.slice(1));
+            return { kind: 'parameter' };
+        }
+        return { kind: 'literal', value: segment };
+    });
+    const pattern = segments.map(segment => (segment.kind === 'parameter' ? '([^/]+)' : escapeRegex(segment.value))).join('/');
 
-    return { regex: new RegExp(`^${pattern}$`), paramNames };
+    return { regex: new RegExp(`^${pattern}$`), paramNames, segments };
+}
+
+function routePatternKey(method: HttpMethod, segments: readonly RouteSegment[]): string {
+    return `${method}\0${segments.map(segment => (segment.kind === 'parameter' ? ':' : `=${segment.value.length}:${segment.value}`)).join('\0')}`;
+}
+
+function describeRoute(route: HttpRoutePlan): string {
+    return `${route.controllerClass.name}.${route.methodName} (${route.method} ${route.path})`;
+}
+
+/**
+ * Literal values do not affect precedence because routes that first differ by literal value cannot
+ * match the same request. For every overlapping pair, the first differing shape segment determines
+ * precedence: a literal segment beats a parameter segment.
+ */
+function compareRouteSpecificity(left: readonly RouteSegment[], right: readonly RouteSegment[]): number {
+    const length = Math.min(left.length, right.length);
+    for (let index = 0; index < length; index++) {
+        const leftRank = left[index].kind === 'literal' ? 0 : 1;
+        const rightRank = right[index].kind === 'literal' ? 0 : 1;
+        if (leftRank !== rightRank) return leftRank - rightRank;
+    }
+
+    return right.length - left.length;
 }
 
 function escapeRegex(value: string): string {
