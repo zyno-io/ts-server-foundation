@@ -59,9 +59,10 @@
         "docs:preview": "vitepress preview docs --host 0.0.0.0",
         "gen:devconsole-proto": "tsf-gen-proto resources/proto/devconsole.proto src/devconsole/generated",
         "format": "oxfmt && oxlint src --fix",
-        "test": "yarn build && dotenv -e .env.test -- tsf-test",
+        "prepare:test-type-compiler": "node scripts/prepare-test-type-compiler.cjs",
+        "test": "yarn build && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
         "test:type-compiler-go": "node scripts/test-type-compiler-go.cjs",
-        "test:dirty": "yarn build:dirty && APP_ENV=test node --test \"dist/tests/**/*.spec.js\"",
+        "test:dirty": "yarn build:dirty && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
         "test-app": "yarn clean && ttsc -p tsconfig.test-app.json && APP_ENV=test node dist/test-app/bootstrap.js"
     },
     "dependencies": {

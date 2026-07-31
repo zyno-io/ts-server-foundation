@@ -117,6 +117,40 @@ class FakeDriver implements DatabaseDriver {
     }
 }
 
+class BoundedPoolConnection extends FakeConnection {
+    constructor(private boundedDriver: BoundedPoolDriver) {
+        super(boundedDriver);
+    }
+
+    override async release(): Promise<void> {
+        if (this.released) return;
+        await super.release();
+        this.boundedDriver.releaseConnection();
+    }
+}
+
+class BoundedPoolDriver extends FakeDriver {
+    activeConnections = 0;
+
+    constructor(private readonly connectionLimit: number) {
+        super('mysql');
+    }
+
+    override async acquire(): Promise<DriverConnection> {
+        if (this.activeConnections >= this.connectionLimit) {
+            return new Promise<DriverConnection>(() => {});
+        }
+        this.activeConnections++;
+        const connection = new BoundedPoolConnection(this);
+        this.connections.push(connection);
+        return connection;
+    }
+
+    releaseConnection(): void {
+        this.activeConnections--;
+    }
+}
+
 function createMySQLPointBuffer(x: number, y: number): Buffer {
     const buffer = Buffer.alloc(25);
     buffer.writeUInt32LE(0, 0);
@@ -2473,7 +2507,7 @@ describe('database query builder and persistence', () => {
             await session.acquireSessionLock(['resource', 7n]);
         });
 
-        assert.equal(driver.connections.length, 4);
+        assert.equal(driver.connections.length, 3);
         assert.deepStrictEqual(
             driver.executes.map(query => query.sql),
             [
@@ -2485,10 +2519,9 @@ describe('database query builder and persistence', () => {
         );
         assert.deepStrictEqual(driver.executes[2].bindings, ['resource:7']);
         assert.deepStrictEqual(driver.executes[3].bindings, ['resource:7']);
-        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'commit', 'release']);
+        assert.deepStrictEqual(driver.connections[0].commands, ['execute', 'release']);
         assert.deepStrictEqual(driver.connections[1].commands, ['execute', 'release']);
-        assert.deepStrictEqual(driver.connections[2].commands, ['execute', 'release']);
-        assert.deepStrictEqual(driver.connections[3].commands, ['execute', 'release']);
+        assert.deepStrictEqual(driver.connections[2].commands, ['begin', 'execute', 'execute', 'commit', 'release']);
     });
 
     it('uses an existing MySQL locks table when lazy creation is not enabled', async () => {
@@ -2505,6 +2538,34 @@ describe('database query builder and persistence', () => {
         );
         assert.deepStrictEqual(driver.executes[0].bindings, ['resource:7']);
         assert.deepStrictEqual(driver.executes[1].bindings, ['resource:7']);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'execute', 'commit', 'release']);
+    });
+
+    it('initializes MySQL locks before concurrent transactions consume a bounded pool', async () => {
+        const driver = new BoundedPoolDriver(2);
+        const db = new BaseDatabase(driver, [User], { enableLocksTable: true });
+        const work = Promise.all(
+            [1, 2].map(resource =>
+                db.transaction(async session => {
+                    await session.acquireSessionLock(['resource', resource]);
+                })
+            )
+        );
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await Promise.race([
+                work,
+                new Promise<never>((_resolve, reject) => {
+                    timeout = setTimeout(() => reject(new Error('MySQL lock initialization exhausted the connection pool')), 250);
+                })
+            ]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+        }
+
+        assert.equal(driver.activeConnections, 0);
+        assert.equal(driver.connections.length, 4);
+        assert.ok(driver.connections.every(connection => connection.released));
     });
 
     it('rejects session locks outside active transactions', async () => {

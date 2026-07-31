@@ -40,6 +40,7 @@ export async function runTestCli(args = process.argv.slice(2)): Promise<number> 
 
         const resolvedDatabaseEnv = resolveTestDatabaseEnv();
         const testRunTs = Env.TEST_RUN_TS ?? String(Math.floor(Date.now() / 1000));
+        const ttscCacheDir = resolve(Env.TTSC_CACHE_DIR ?? join(process.cwd(), '.yarn', 'ttsc-cache'));
         Env.TEST_RUN_TS = testRunTs;
         const mysqlSessionPoolSize = resolveTestWorkerConcurrency(nodeArgs);
         manager = await startMySQLSessionManagerIfNeeded(testRunTs, resolvedDatabaseEnv, mysqlSessionPoolSize);
@@ -48,6 +49,7 @@ export async function runTestCli(args = process.argv.slice(2)): Promise<number> 
             APP_ENV: 'test',
             TZ: 'UTC',
             TEST_RUN_TS: testRunTs,
+            TTSC_CACHE_DIR: ttscCacheDir,
             ...manager?.env
         });
         return result.status;

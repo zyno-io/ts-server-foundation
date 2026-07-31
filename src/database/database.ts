@@ -83,6 +83,11 @@ export class BaseDatabase {
     }
 
     async transaction<T>(worker: (session: DatabaseSession) => Promise<T>): Promise<T> {
+        // MySQL session locks require a small lock table. Ensure it is ready
+        // before reserving a transaction connection: concurrent first-use
+        // transactions otherwise fill a bounded pool while the initializer is
+        // itself waiting to acquire a connection.
+        await ensureMySQLLocksTable(this);
         const connection = await this.driver.acquire();
         const session = new DatabaseSession(this, connection, { transactional: true });
         let transactionStarted = false;
@@ -279,7 +284,7 @@ export class BaseDatabase {
         await ensureMySQLLocksTable(this);
 
         const table = this.options.lockTableName;
-        await this.rawExecute(sql`INSERT IGNORE INTO ${sql.identifier(table)} (${sql.identifier('key')}) VALUES (${lockKey})`);
+        await this.rawExecute(sql`INSERT IGNORE INTO ${sql.identifier(table)} (${sql.identifier('key')}) VALUES (${lockKey})`, session);
         await this.rawExecute(
             sql`UPDATE ${sql.identifier(table)} SET ${sql.identifier('lastTouched')} = ${sql.rawTrusted('NOW()')} WHERE ${sql.identifier('key')} = ${lockKey}`,
             session
