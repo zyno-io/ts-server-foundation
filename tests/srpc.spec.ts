@@ -1053,8 +1053,15 @@ describe('srpc', () => {
         const harness = await createHarness();
         const activationGate = deferred<void>();
         const handlerEntered = deferred<void>();
+        const requestReceived = deferred<void>();
+        const responseReceived = deferred<NonNullable<ServerMessage['uEchoResponse']>>();
         let handled = false;
 
+        const unregister = registerSrpcObserver(entry => {
+            if (entry.type === 'message' && entry.stream.clientId === 'client-activation' && (entry.data as ClientMessage).uEchoRequest) {
+                requestReceived.resolve();
+            }
+        });
         harness.server.registerConnectionHandler(() => {
             handlerEntered.resolve();
             return activationGate.promise;
@@ -1064,22 +1071,28 @@ describe('srpc', () => {
             return { message: `Echo: ${data.message}` };
         });
 
-        const client = harness.createClient('client-activation');
+        const socket = new WebSocket(createSignedRawWebSocketUrl(harness.port, 'client-activation'));
+        const requestId = randomUUID();
+        socket.on('message', data => {
+            const message = JsonMessage.decode(webSocketDataToBuffer(data)) as ServerMessage;
+            if (message.reply && message.requestId === requestId && message.uEchoResponse) responseReceived.resolve(message.uEchoResponse);
+        });
 
         try {
-            const connecting = client.connect();
+            await waitForWebSocketOpen(socket);
             await handlerEntered.promise;
-            const response = client.invoke('uEcho', { message: 'queued' });
-            await delay(20);
+            socket.send(encodeRawSrpcMessage<ClientMessage>({ requestId, uEchoRequest: { message: 'queued' } }));
+            await requestReceived.promise;
 
             assert.equal(handled, false);
 
             activationGate.resolve();
-            await connecting;
-            assert.deepEqual(await response, { message: 'Echo: queued' });
+            assert.deepEqual(await responseReceived.promise, { message: 'Echo: queued' });
             assert.equal(handled, true);
         } finally {
+            socket.close();
             await harness.close();
+            unregister();
         }
     });
 
@@ -2093,15 +2106,37 @@ describe('srpc', () => {
         const url = `ws://127.0.0.1:${harness.port}/srpc-test?id=${randomUUID()}&cid=legacy-client&appv=1`;
         const client = new WebSocket(url);
 
+        try {
+            await waitForWebSocketOpen(client);
+            const stream = await connected.promise;
+            assert.equal(stream.protocolVersion, 2);
+            await waitForCondition(() => stream.isActivated, 1_000, 'Legacy stream was not activated without a ping response');
+        } finally {
+            client.close();
+            await harness.close();
+        }
+    });
+
+    it('activates after sending the ordered initial ping without waiting for a pong', async () => {
+        const harness = await createHarness();
+        const connected = deferred<SrpcStream<SrpcMeta>>();
+        const receivedInitialPing = deferred<void>();
+        harness.server.setClientAuthorizer(() => true);
+        harness.server.registerConnectionHandler(stream => connected.resolve(stream));
+        const url = `ws://127.0.0.1:${harness.port}/srpc-test?id=${randomUUID()}&cid=no-initial-pong&appv=1&_v=2`;
+        const client = new WebSocket(url);
+
         client.on('message', data => {
             const message = JsonMessage.decode(webSocketDataToBuffer(data)) as ServerMessage;
-            if (message.pingPong) client.send(encodeRawSrpcMessage<ClientMessage>({ pingPong: {} }));
+            if (message.pingPong) receivedInitialPing.resolve();
         });
 
         try {
             await waitForWebSocketOpen(client);
             const stream = await connected.promise;
-            assert.equal(stream.protocolVersion, 2);
+            await receivedInitialPing.promise;
+            await waitForCondition(() => stream.isActivated, 1_000, 'Stream was not activated without a ping response');
+            assert.equal(stream.connected, true);
         } finally {
             client.close();
             await harness.close();

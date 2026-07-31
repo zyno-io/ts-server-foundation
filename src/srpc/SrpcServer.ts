@@ -101,7 +101,6 @@ export class SrpcServer<
     private readonly publishedStreams = new WeakSet<SrpcStream<TMeta>>();
     private readonly authReplayNoncesByPrincipal = new Map<string, Map<string, number>>();
     private authNonceConsumer?: (principal: string, nonce: string, expiresAt: number) => boolean | Promise<boolean>;
-    private readonly initialPongWaiters = new WeakMap<SrpcStream<TMeta>, { resolve: () => void; timer: ReturnType<typeof setTimeout> }>();
     private readonly cleanupUpgradeHandler?: () => void;
     private readonly inactivityCheckInterval: ReturnType<typeof setInterval>;
     private pendingHandshakeCount = 0;
@@ -327,8 +326,6 @@ export class SrpcServer<
                     this.cleanupStream(stream, 'disconnect');
                     return;
                 }
-                await this.waitForInitialPong(stream);
-                if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
                 await this.onStreamWillActivate(stream);
                 if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
                 await this.onStreamConnected(stream);
@@ -353,8 +350,8 @@ export class SrpcServer<
     }
 
     /**
-     * Hook for private/cluster CAS work after liveness is proven but before
-     * user connection handlers and public local publication.
+     * Hook for private/cluster CAS work after the initial protocol frame is
+     * queued but before user connection handlers and public local publication.
      */
     protected onStreamWillActivate(_stream: SrpcStream<TMeta>): void | Promise<void> {}
 
@@ -376,18 +373,6 @@ export class SrpcServer<
         // methods without the registry layer; normal servers always have both.
         if (!this.pendingStreamsByClientId || !this.streamsByClientId) return true;
         return this.getCurrentStreamByClientId(stream.clientId) === stream;
-    }
-
-    private waitForInitialPong(stream: SrpcStream<TMeta>): Promise<void> {
-        return new Promise(resolve => {
-            const timer = setTimeout(() => {
-                this.initialPongWaiters.delete(stream);
-                this.cleanupStream(stream, 'timeout');
-                resolve();
-            }, 10_000);
-            timer.unref?.();
-            this.initialPongWaiters.set(stream, { resolve, timer });
-        });
     }
 
     private activateStream(stream: SrpcStream<TMeta>): void {
@@ -416,14 +401,10 @@ export class SrpcServer<
         notifySrpcObservers({ type: 'message', stream, direction: 'inbound', data, at: Date.now() });
         if (data.pingPong) {
             stream.lastPingAt = Date.now();
-            const waiter = this.initialPongWaiters.get(stream);
-            if (waiter) {
-                clearTimeout(waiter.timer);
-                this.initialPongWaiters.delete(stream);
-                waiter.resolve();
-                return;
-            }
-            this.writeToStream(stream, { pingPong: {} } as TServerOutput);
+            // The initial ping establishes frame ordering before activation.
+            // Modern clients reserve the next server ping as their activation
+            // acknowledgement, so an early client pong is not echoed.
+            if (stream.isActivated) this.writeToStream(stream, { pingPong: {} } as TServerOutput);
             return;
         }
 
@@ -642,12 +623,6 @@ export class SrpcServer<
             queueItem.reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error('Stream disconnected')));
         }
         stream.$queue?.clear();
-        const initialPong = this.initialPongWaiters?.get(stream);
-        if (initialPong) {
-            clearTimeout(initialPong.timer);
-            this.initialPongWaiters.delete(stream);
-            initialPong.resolve();
-        }
         this.blockedClientRequests?.delete(stream);
         this.pendingClientRequests?.delete(stream);
         this.pendingClientRequestBytes?.delete(stream);
