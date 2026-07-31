@@ -523,9 +523,10 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
 
     it('bounds durable orphan admission globally and resumes after acknowledgement', async () => {
         const key = `bounded-orphans-${Date.now()}-${process.pid}`;
+        const maxOrphanBytes = 1_024;
         const backend = new MeshClientRedisRegistry<{ role: string }>(key, {
             maxOrphanItems: 2,
-            maxOrphanBytes: 700
+            maxOrphanBytes
         });
         const firstClient = {
             clientId: 'first',
@@ -549,8 +550,8 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         const { client: accountingClient, prefix: accountingPrefix } = createRedis('MESH');
         const orphanKey = `${accountingPrefix}:mesh:${key}:orphaned`;
         const accounted = Number(await accountingClient.hget(`${accountingPrefix}:mesh:${key}:orphaned:accounting`, 'bytes'));
-        assert.ok(accounted <= 700);
-        assert.ok((await accountingClient.hstrlen(orphanKey, claimed.id)) <= 700);
+        assert.ok(accounted <= maxOrphanBytes);
+        assert.ok((await accountingClient.hstrlen(orphanKey, claimed.id)) <= maxOrphanBytes);
         assert.equal(await backend.nackOrphaned?.(claimed.id, claimed.claimToken), true);
         // Claim/NACK rewrites the snapshot; the byte counter must track that
         // exact mutation and still reject a second large admission.
@@ -639,7 +640,9 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         const nodeSetKey = `${prefix}:mesh:${key}:node:17:clients`;
         const nodeClaimsKey = `${prefix}:mesh:${key}:node:17:claims`;
         assert.equal(await client.scard(nodeSetKey), 2);
-        assert.equal(await client.scard(nodeClaimsKey), 1);
+        // Direct registry reservations are already persisted as pending
+        // records. Two-phase claims are owned by MeshClientService instead.
+        assert.equal(await client.scard(nodeClaimsKey), 0);
         assert.ok((await client.ttl(clientsKey)) > 0);
         assert.ok((await client.ttl(nodeSetKey)) > 0);
 
@@ -651,7 +654,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         assert.equal(pending?.connectionId, 'connection-pending');
         assert.equal(await client.sismember(nodeSetKey, 'active-client'), 1);
         assert.equal(await client.sismember(nodeSetKey, 'pending-client'), 1);
-        assert.equal(await client.sismember(nodeClaimsKey, 'pending-client'), 1);
+        assert.equal(await client.sismember(nodeClaimsKey, 'pending-client'), 0);
         assert.ok((await client.ttl(clientsKey)) > 0);
         assert.ok((await client.ttl(nodeSetKey)) > 0);
     });
@@ -799,6 +802,8 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
 
             await first.start();
             await second.start();
+            routeMeshCalls(first, second);
+            routeMeshCalls(second, first);
             assert.equal(await first.registerClient('client-1', firstMetadata, false, 'connection-1'), true);
             assert.equal(await second.registerClient('client-1', { role: 'conflict' }, false, 'connection-conflict'), false);
 
@@ -851,6 +856,8 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         try {
             await first.start();
             await second.start();
+            routeMeshCalls(first, second);
+            routeMeshCalls(second, first);
             assert.equal(await first.reserveClient('pending-client', { role: 'pending-old' }, true, 'connection-old'), true);
             assert.equal((await first.clientRegistry.getClientIncludingPending('pending-client'))?.state, 'pending');
 
@@ -1127,6 +1134,36 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
         if (Date.now() >= deadline) throw new Error('Timed out waiting for condition');
         await sleepMs(10);
     }
+}
+
+/**
+ * MeshClientService is transport-agnostic; MeshSrpcServer installs the
+ * authenticated direct transport in production. These registry integration
+ * tests exercise the same ownership path with an in-process transport pair.
+ */
+function routeMeshCalls<TMeta>(caller: MeshClientService<TMeta>, target: MeshClientService<TMeta>): void {
+    caller.setRemoteTransport({
+        invokeClient: async (_nodeId, request) => {
+            try {
+                return await target.invoke(request.clientId, request.type, request.data, request.timeoutMs, request.connectionId);
+            } catch (error) {
+                if (error instanceof SrpcError || error instanceof ClientDisconnectedError || error instanceof ClientInvocationError) throw error;
+                throw new ClientInvocationError(error instanceof Error ? error.message : String(error));
+            }
+        },
+        fenceClient: async (_nodeId, request) => {
+            let fenced = false;
+            for (const callback of (target as any).clientSupersededCallbacks as ((
+                clientId: string,
+                connectionId?: string,
+                reason?: string
+            ) => boolean | void | Promise<boolean | void>)[]) {
+                if ((await callback(request.clientId, request.connectionId, request.reason)) !== false) fenced = true;
+            }
+            return fenced;
+        },
+        updateClientMetadata: async (_nodeId, request) => target.updateClientMetadata(request.clientId, request.metadata, request.connectionId)
+    });
 }
 
 function listen(server: Server): Promise<void> {
