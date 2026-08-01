@@ -37,14 +37,14 @@ The HTTP input pipeline deserializes and validates reflected values before contr
 
 The database layer is a thin active-record and query system over `mysql2` and `pg`, with dialect-aware schema and migration tooling.
 
-| Area                   | Included behavior                                                                                                           | Detailed guide                                      |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Databases and entities | MySQL/PostgreSQL adapters, reflected entity schemas, column conversion, active-record helpers, and retrieval APIs           | [Database](./database.md)                           |
-| Queries                | Typed filters, joins, selection, paging, patch/delete operations, relations, batched loading, and query observation         | [Database](./database.md#query-builder)             |
-| Sessions               | Transactions, nested savepoints, post-commit/post-rollback hooks, and dialect-specific session locks                        | [Database](./database.md#sessions-and-transactions) |
-| SQL                    | Safe values and identifiers, composable fragments, raw database methods, and explicit unsafe escape hatches                 | [SQL](./sql.md)                                     |
-| Schema and migrations  | Multi-dialect schema builder, live-schema diffs, generated migration files, runners, reset, charset, and PostgreSQL schemas | [Migrations](./migrations.md)                       |
-| Storage annotations    | UUIDs, defaults, update expressions, unsigned values, lengths, dates, coordinates, indexes, and references                  | [Types](./types.md)                                 |
+| Area                   | Included behavior                                                                                                                   | Detailed guide                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Databases and entities | MySQL/PostgreSQL adapters, reflected entity schemas, column conversion, active-record helpers, and retrieval APIs                   | [Database](./database.md)                           |
+| Queries                | Typed filters, joins, selection, paging, patch/delete operations, relations, batched loading, and query observation                 | [Database](./database.md#query-builder)             |
+| Sessions               | Transactions, nested savepoints, post-commit/post-rollback hooks, and dialect-specific session locks                                | [Database](./database.md#sessions-and-transactions) |
+| SQL                    | Safe values and identifiers, composable fragments, raw database methods, and explicit unsafe escape hatches                         | [SQL](./sql.md)                                     |
+| Schema and migrations  | Multi-dialect schema builder, live-schema diffs, generated migration files, runners, reset, charset, and PostgreSQL schemas         | [Migrations](./migrations.md)                       |
+| Storage annotations    | UUIDs, defaults, update expressions, unsigned values, lengths, dates, coordinates, indexes, references, and MySQL generated columns | [Database](./database.md#mysql-generated-columns)   |
 
 Database I/O performs column-aware storage conversion rather than the HTTP input validation pipeline. Database constraints enforce storage rules; call the reflected validation helpers explicitly when application code needs API-style validation outside HTTP.
 

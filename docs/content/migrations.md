@@ -124,6 +124,7 @@ The generated plan includes:
 - added, removed, modified, and renamed columns
 - primary key changes
 - indexes and unique indexes
+- MySQL generated-column expressions and virtual/stored storage
 - foreign keys
 - MySQL enum definitions
 - PostgreSQL enum type changes
@@ -163,7 +164,7 @@ See [Database: Schema Builder](./database.md#schema-builder) for the complete da
 
 ## Reset
 
-`resetMigrations(db, options)` removes every `.ts` file from the source migration directory and writes `00000000_000000_base.ts` containing table creation DDL for all registered entities. Non-`.ts` files are left in place. If there are no registered entity tables, it creates the directory if needed but does not write a base migration.
+`resetMigrations(db, options)` removes every `.ts` file from the source migration directory and writes `00000000_000000_base.ts` containing table creation DDL for all registered entities. That DDL includes MySQL generated columns declared with `@entity.generated()`, so reset does not discard them. Non-`.ts` files are left in place. If there are no registered entity tables, it creates the directory if needed but does not write a base migration.
 
 ```ts
 import { resetMigrations } from '@zyno-io/ts-server-foundation';

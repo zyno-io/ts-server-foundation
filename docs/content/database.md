@@ -57,7 +57,36 @@ export class User extends BaseEntity {
 }
 ```
 
-The migration generator reads entity metadata to infer table names, column names, indexes, primary keys, defaults, nullability, enums, foreign keys, and custom TSF types. See [Types](./types.md) for the database effects of `UuidString`, `DateString`, `Length<N>`, and related annotations.
+The migration generator reads entity metadata to infer table names, column names, indexes, primary keys, defaults, nullability, enums, foreign keys, generated columns, and custom TSF types. See [Types](./types.md) for the database effects of `UuidString`, `DateString`, `Length<N>`, and related annotations.
+
+## MySQL Generated Columns
+
+Use `@entity.generated()` to declare a MySQL generated column from an entity property. The expression is trusted SQL maintained in source code; do not interpolate request data or other untrusted values into it.
+
+```ts
+import { AutoIncrement, BaseEntity, entity, PrimaryKey } from '@zyno-io/ts-server-foundation';
+
+@entity.name('users')
+@entity.index(['normalizedName'])
+export class User extends BaseEntity {
+    id!: number & PrimaryKey & AutoIncrement;
+    name!: string;
+
+    @entity.generated('LOWER(`name`)')
+    normalizedName!: string;
+}
+```
+
+The decorator emits a `VIRTUAL` generated column by default. InnoDB materializes an indexed virtual value in the secondary index, making it a good fit for a search or lookup helper that is only needed through that index. It does not duplicate the value in every clustered table row, although inserts and updates still pay the cost of computing and maintaining the secondary-index entry.
+
+Use stored storage only when the value is frequently read without an index and that row-storage tradeoff is intentional:
+
+```ts
+@entity.generated('JSON_UNQUOTE(JSON_EXTRACT(`metadata`, "$.status"))', { storage: 'stored' })
+status!: string;
+```
+
+Generated entity columns are currently MySQL-only. TSF includes them in generated migrations, migration reset output, and MySQL schema-drift comparison. They can be selected, filtered, and indexed like ordinary entity properties, but are database-owned: inserts omit them, and entity saves or query-builder patches that attempt to set them throw. Re-read an entity after changing its input columns if the application needs its new generated value in memory.
 
 ## Runtime Value Conversion And Validation
 
