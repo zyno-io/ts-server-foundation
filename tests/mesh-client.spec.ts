@@ -261,6 +261,124 @@ class InMemoryRegistryBackend<TMeta> implements MeshClientRegistryBackend<TMeta>
 }
 
 describe('mesh client tracking', () => {
+    it('contains synchronous lease callback failures and sweeps direct-service ownership', async () => {
+        const backend = new InMemoryRegistryBackend<TestMeta>();
+        const service = new MeshClientService<TestMeta>({
+            key: 'direct-lease-loss-cleanup',
+            registryBackend: backend,
+            clientInvokeFn: async () => undefined
+        });
+        markRunning(service, 41, backend);
+        (service as any).registryCleanupNodeId = 41;
+        assert.equal(await service.registerClient('client-1', { role: 'owner' }, false, 'connection-1'), true);
+        let laterCallbacks = 0;
+        service.onLeaseLost(() => {
+            throw new Error('synchronous callback failure');
+        });
+        service.onLeaseLost(() => {
+            laterCallbacks++;
+        });
+
+        await (service as any).mesh.leaseLostCallback(new Error('lease lost'));
+
+        assert.equal(laterCallbacks, 1);
+        assert.equal(await backend.getClient('client-1'), undefined);
+        // The early sweep is deliberately non-final so a post-mutation
+        // consumer barrier can sweep the exact node again.
+        assert.equal((service as any).registryCleanupNodeId, 41);
+    });
+
+    it('retains the exact node through an early lease sweep and removes a late mutation at the final barrier', async () => {
+        const backend = new InMemoryRegistryBackend<TestMeta>();
+        const service = new MeshClientService<TestMeta>({
+            key: 'lease-loss-late-mutation',
+            registryBackend: backend,
+            clientInvokeFn: async () => undefined
+        });
+        markRunning(service, 41, backend);
+        (service as any).registryCleanupNodeId = 41;
+
+        await (service as any).sweepRegistryOwnership();
+        await backend.register('client-1', 41, { role: 'late' }, false, 'connection-1');
+        await service.cleanupRegistryOwnership();
+
+        assert.equal(await backend.getClient('client-1'), undefined);
+        assert.equal((service as any).registryCleanupNodeId, undefined);
+    });
+
+    it('cleans exact lease-lost ownership without stopping membership and permits an immediate successor claim', async () => {
+        const backend = new InMemoryRegistryBackend<TestMeta>();
+        const previous = new MeshClientService<TestMeta>({
+            key: 'lease-loss-exact-cleanup',
+            registryBackend: backend,
+            clientInvokeFn: async () => undefined
+        });
+        markRunning(previous, 41, backend);
+        (previous as any).registryCleanupNodeId = 41;
+        let membershipStops = 0;
+        (previous as any).mesh.stop = async () => {
+            membershipStops++;
+        };
+        assert.equal(await previous.registerClient('client-1', { role: 'previous' }, false, 'connection-1'), true);
+
+        // MeshService owns the lease-loss callback and cannot safely be
+        // stopped recursively from inside it. Registry cleanup is independent.
+        (previous as any).running = false;
+        await previous.cleanupRegistryOwnership();
+
+        assert.equal(membershipStops, 0);
+        assert.equal(await backend.getClient('client-1'), undefined);
+        assert.equal((previous as any).registryCleanupNodeId, undefined);
+
+        const successor = new MeshClientService<TestMeta>({
+            key: 'lease-loss-exact-cleanup',
+            registryBackend: backend,
+            clientInvokeFn: async () => undefined
+        });
+        markRunning(successor, 42, backend);
+        assert.equal(await successor.registerClient('client-1', { role: 'successor' }, false, 'connection-2'), true);
+        assert.equal((await backend.getClient('client-1'))?.nodeId, 42);
+    });
+
+    it('fails closed without losing the exact prior node cleanup obligation', async () => {
+        const service = Object.create(MeshClientService.prototype) as any;
+        const cleanupNodeIds: number[] = [];
+        let cleanupAttempts = 0;
+        let starts = 0;
+        service.running = true;
+        service.admissionFenced = false;
+        service.registryCleanupNodeId = 41;
+        service.ownershipGeneration = 0;
+        service.lifecycle = Promise.resolve();
+        service.stopRegistryTimers = () => {};
+        service.registry = {
+            cleanupNode: async (nodeId: number) => {
+                cleanupNodeIds.push(nodeId);
+                cleanupAttempts++;
+                if (cleanupAttempts === 1) throw new Error('cleanup unavailable');
+                return [];
+            }
+        };
+        service.mesh = {
+            instanceId: 41,
+            start: async () => {
+                starts++;
+                service.mesh.instanceId = 42;
+            },
+            stop: async () => {
+                service.mesh.instanceId = 0;
+            }
+        };
+
+        await assert.rejects(service.stop(), /cleanup unavailable/);
+        await assert.rejects(service.start(), /cleanup is still required for node 41/);
+        await service.stop();
+
+        assert.equal(starts, 0);
+        assert.deepEqual(cleanupNodeIds, [41, 41]);
+        assert.equal(service.registryCleanupNodeId, undefined);
+    });
+
     it('does not bypass handler or disconnect fences after the mesh instance ID resets', async () => {
         let invokes = 0;
         const backend = new InMemoryRegistryBackend<TestMeta>();
@@ -608,12 +726,20 @@ describe('mesh client tracking', () => {
         });
 
         assert.equal(await second.registerClient('client-1', { role: 'second' }, true, 'connection-2'), false);
-        assert.deepEqual(delayedKick, {
+        assert.ok(delayedKick);
+        const { timeoutMs, ...kick } = delayedKick as {
+            clientId: string;
+            connectionId: string;
+            reason: string;
+            timeoutMs: number;
+        };
+        assert.deepEqual(kick, {
             clientId: 'client-1',
             connectionId: 'connection-1',
-            reason: 'supersede',
-            timeoutMs: 30_000
+            reason: 'supersede'
         });
+        assert.ok(timeoutMs > 0);
+        assert.ok(timeoutMs <= 30_000);
         assert.equal((await second.clientRegistry.getClient('client-1'))?.connectionId, 'connection-1');
 
         assert.equal(disconnects, 0);

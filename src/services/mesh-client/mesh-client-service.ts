@@ -150,7 +150,25 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
                 // active claim and never touches a successor's delivery.
                 void this.backend.nackOrphaned(active.id, active.claimToken).catch(() => {});
             }
-            await Promise.allSettled(this.leaseLostCallbacks.map(callback => callback(reason)));
+            // Start every physical-delivery fence synchronously and contain
+            // synchronous callback failures individually. The framework also
+            // performs an early best-effort sweep for direct MeshClientService
+            // users, but deliberately retains the exact node obligation so a
+            // consumer's post-mutation barrier can sweep it again.
+            const callbacks: Promise<void>[] = [];
+            for (const callback of this.leaseLostCallbacks) {
+                try {
+                    callbacks.push(Promise.resolve(callback(reason)));
+                } catch (error) {
+                    callbacks.push(Promise.reject(error));
+                }
+            }
+            callbacks.push(this.sweepRegistryOwnership());
+            await Promise.allSettled(callbacks).then(results => {
+                for (const result of results) {
+                    if (result.status === 'rejected') this.logger.warn('mesh lease-loss callback failed', { error: result.reason });
+                }
+            });
         });
 
         // Placeholder registry - will be re-created in start() with the real instanceId
@@ -183,12 +201,58 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
         return this.registry;
     }
 
+    /** Whether mesh membership and client ownership operations are active. */
+    get isRunning(): boolean {
+        return this.running;
+    }
+
     getAuthNonceConsumer(): ((principal: string, nonce: string, expiresAt: number) => Promise<boolean>) | undefined {
         if (!this.backend.consumeAuthNonce) return undefined;
         return (principal, nonce, expiresAt) => this.backend.consumeAuthNonce!(principal, nonce, expiresAt);
     }
 
     private running = false;
+    /** Synchronous shutdown fence that rejects new client admission. */
+    private admissionFenced = false;
+    /** Exact registry node ID whose ownership cleanup still must succeed. */
+    private registryCleanupNodeId?: number;
+    /** MeshService stop initiated by the synchronous shutdown fence. */
+    private shutdownFencePromise?: Promise<void>;
+
+    /**
+     * Re-open admission for a new lifecycle after the prior stop has fully
+     * completed. MeshSrpcServer only calls this after any cancelled start's
+     * cleanup barrier has settled.
+     */
+    prepareStart(): void {
+        if (!this.running) this.admissionFenced = false;
+    }
+
+    /** @internal Reject new ownership admission while preserving graceful drain delivery. */
+    fenceAdmission(): void {
+        this.admissionFenced = true;
+    }
+
+    /** @internal Immediately fence admission/delivery and stop mesh membership. */
+    fenceForShutdown(): void {
+        this.fenceAdmission();
+        if (this.running) {
+            this.running = false;
+            this.ownershipGeneration++;
+            this.stopRegistryTimers();
+        }
+        // MeshService.stop() synchronously clears its running flag before
+        // serializing physical cleanup behind any in-flight start. Keep the
+        // promise so normal/deferred cleanup cannot declare completion before
+        // that membership stop has settled.
+        if (!this.shutdownFencePromise) {
+            const stop = this.mesh.stop();
+            this.shutdownFencePromise = stop;
+            // Observe the rejection immediately while preserving it for the
+            // shutdown cleanup barrier below.
+            void stop.catch(error => this.logger.warn('failed to stop fenced mesh membership', { error }));
+        }
+    }
 
     async start(): Promise<void> {
         return this.serializeLifecycle(() => this.doStart());
@@ -196,10 +260,22 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
 
     private async doStart(): Promise<void> {
         if (this.running) return;
+        // Never let a new MeshService instance replace the registry node ID
+        // while a prior lifecycle's cleanup remains unconfirmed.
+        if (this.registryCleanupNodeId !== undefined) {
+            throw new Error(`Mesh client registry cleanup is still required for node ${this.registryCleanupNodeId}`);
+        }
         await this.mesh.start();
+        if (this.admissionFenced) {
+            // fenceForShutdown() may have already initiated the physical stop
+            // while this start was pending. Reuse that lifecycle operation.
+            await (this.shutdownFencePromise ?? this.mesh.stop());
+            return;
+        }
         this.registry.setNodeId(this.mesh.instanceId);
         this.running = true;
         this.hasStarted = true;
+        this.registryCleanupNodeId = this.mesh.instanceId;
         this.ownershipGeneration++;
         this.registryRefreshTimer = setInterval(() => {
             if (this.registryRefreshInFlight) return;
@@ -219,8 +295,39 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
         return this.serializeLifecycle(() => this.doStop());
     }
 
+    /**
+     * Best-effort exact-node sweep that retains the cleanup obligation. Lease
+     * loss uses this before consumer mutation barriers have necessarily
+     * settled; cleanupRegistryOwnership() performs the final sweep.
+     */
+    private async sweepRegistryOwnership(): Promise<void> {
+        return this.serializeLifecycle(async () => {
+            if (this.registryCleanupNodeId === undefined) return;
+            await this.registry.cleanupNode(this.registryCleanupNodeId);
+        });
+    }
+
+    /** @internal Removes retained registry ownership without stopping MeshService (safe from lease-loss callbacks). */
+    async cleanupRegistryOwnership(): Promise<void> {
+        return this.serializeLifecycle(async () => {
+            const nodeId = this.registryCleanupNodeId;
+            if (nodeId === undefined) return;
+            await this.registry.cleanupNode(nodeId);
+            if (this.registryCleanupNodeId === nodeId) this.registryCleanupNodeId = undefined;
+        });
+    }
+
     private async doStop(): Promise<void> {
-        if (!this.running && this.mesh.instanceId === 0) return;
+        const shutdownFence = this.shutdownFencePromise;
+        // The synchronous shutdown fence can stop MeshService (and reset its
+        // instance ID) before this serialized service cleanup runs. Retain the
+        // registry cleanup obligation for any lifecycle that reached ownership;
+        // MeshClientRegistry keeps its assigned node ID independently.
+        if (!this.running && this.mesh.instanceId === 0 && this.registryCleanupNodeId === undefined) {
+            await shutdownFence;
+            if (this.shutdownFencePromise === shutdownFence) this.shutdownFencePromise = undefined;
+            return;
+        }
         this.running = false;
         this.ownershipGeneration++;
         this.stopRegistryTimers();
@@ -229,11 +336,20 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
         if (this.orphanDrainInFlight) await settleClientWork(this.orphanDrainInFlight, 2_000);
         try {
             // Clean up our own clients
-            if (this.mesh.instanceId !== 0) {
-                await this.registry.cleanupNode();
+            if (this.registryCleanupNodeId !== undefined) {
+                await this.registry.cleanupNode(this.registryCleanupNodeId);
+                this.registryCleanupNodeId = undefined;
             }
         } finally {
-            await this.mesh.stop();
+            // A synchronous shutdown fence may already own the MeshService
+            // stop. Do not invoke a second physical stop while preserving its
+            // rejection for the caller that completes cleanup.
+            const meshStop = this.shutdownFencePromise ?? this.mesh.stop();
+            try {
+                await meshStop;
+            } finally {
+                if (this.shutdownFencePromise === meshStop) this.shutdownFencePromise = undefined;
+            }
         }
     }
 
@@ -430,6 +546,7 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
      */
     async registerClient(clientId: string, metadata: TMeta, allowSupersede: boolean, connectionId: string): Promise<boolean> {
         const metadataSnapshot = this.validateClientRecord(clientId, metadata);
+        if (this.admissionFenced) return false;
         if (!this.running) return !this.hasStarted;
         return this.takeOwnership(clientId, metadataSnapshot, 'active', allowSupersede, connectionId);
     }
@@ -440,6 +557,7 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
      */
     async reserveClient(clientId: string, metadata: TMeta, allowSupersede: boolean, connectionId: string): Promise<boolean> {
         const metadataSnapshot = this.validateClientRecord(clientId, metadata);
+        if (this.admissionFenced) return false;
         if (!this.running) return !this.hasStarted;
         return this.takeOwnership(clientId, metadataSnapshot, 'pending', allowSupersede, connectionId);
     }
@@ -703,6 +821,7 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
      * Promote a same-node reservation to an active, discoverable client.
      */
     async activateClient(clientId: string, metadata: TMeta, connectionId: string): Promise<boolean> {
+        if (this.admissionFenced) return false;
         const generation = this.ownershipGeneration;
         const canCommit = () => this.isOwnershipGenerationSafe(generation);
         if (!canCommit()) return false;

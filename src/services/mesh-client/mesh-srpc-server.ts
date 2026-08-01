@@ -3,7 +3,7 @@ import type { Server } from 'node:http';
 import type { MeshBroadcastMap, MeshBroadcastOptions, MeshServiceOptions } from '../mesh';
 
 import { getCurrentApp, onServerBootstrap, onServerShutdownRequested } from '../../app';
-import { assertSafeTimerMs, uuid7 } from '../../helpers';
+import { assertSafeTimerMs, toError, uuid7 } from '../../helpers';
 import { SrpcByteStream } from '../../srpc/SrpcByteStream';
 import { SrpcError, SrpcOwnerUnavailableError, SrpcStaleConnectionError } from '../../srpc/types';
 import { SrpcServer } from '../../srpc/SrpcServer';
@@ -21,6 +21,12 @@ import { ClientDisconnectedError, ClientInvocationError, type MeshClientRegistry
 export interface MeshSrpcServerOptions<TMeta, TRegistryMeta = TMeta> {
     meshKey: string;
     meshOptions?: MeshServiceOptions;
+    /**
+     * Register meshStart()/meshStop() with the current App lifecycle.
+     * Defaults to true. Disable this when the application needs bounded or
+     * custom mesh startup/shutdown handling.
+     */
+    autoLifecycle?: boolean;
     registryBackend?: MeshClientRegistryBackend<TRegistryMeta>;
     /** Limits for the built-in Redis registry. Ignored with registryBackend. */
     registryOptions?: MeshClientRedisRegistryOptions;
@@ -65,6 +71,22 @@ export class MeshSrpcServer<
     private unregisterMeshLinkRoute?: () => void;
     private meshStartPromise?: Promise<void>;
     private meshStopPromise?: Promise<void>;
+    private meshFatalCleanupPromise?: Promise<void>;
+    private meshLeaseCleanupPromise?: Promise<void>;
+    private meshLeaseCleanupRequired = false;
+    private meshLeaseCleanupRetryTimer?: ReturnType<typeof setTimeout>;
+    private meshLeaseCleanupRetryMs = 1_000;
+    /**
+     * A start that shutdown abandoned. New starts wait for its eventual
+     * rollback so a late mesh start cannot overlap a replacement lifecycle.
+     */
+    private meshPendingStartCleanup?: Promise<void>;
+    /** A detached controller close from a cancelled, not-yet-ready start. */
+    private meshPendingLinkClose?: Promise<void>;
+    private meshCleanupFailure?: Error;
+    private meshStartGeneration = 0;
+    private meshStartCancelled = false;
+    private meshStartRollbackFailure?: Error;
     private meshRunning = false;
     private meshLeaseFailure?: Error;
     private meshStopping = false;
@@ -83,6 +105,21 @@ export class MeshSrpcServer<
     // Track metadata for connect/disconnect callbacks.
     private clientMetadata = new Map<string, TRegistryMeta>();
     private lifecycleConnectedStreams = new WeakSet<SrpcStream<TMeta>>();
+    /**
+     * Lifecycle disconnects captured before a cancelled startup fully fences
+     * mesh membership. Their callbacks cannot run until rollback has released
+     * the abandoned membership, otherwise consumers can observe a false
+     * offline transition while ownership is still indeterminate.
+     */
+    private pendingStartDisconnects = new Map<
+        SrpcStream<TMeta>,
+        { clientId: string; connectionId: string; nodeId: number; metadata: TRegistryMeta }
+    >();
+    private pendingStartDisconnectFenceDeadlines = new Map<SrpcStream<TMeta>, number>();
+    private pendingStartDisconnectCallbackQueued = new WeakSet<SrpcStream<TMeta>>();
+    private rollbackGatedDisconnects = new WeakSet<SrpcStream<TMeta>>();
+    private meshSupersedeReconcileMs = 30_000;
+    private meshSupersedeReconcileRetryMs = 10;
 
     // Serialize registry mutations per client to prevent race conditions
     // without letting slow user callbacks block reconnects.
@@ -148,7 +185,7 @@ export class MeshSrpcServer<
         // A lost mesh lease is a split-brain boundary.  Do not wait for the
         // normal shutdown path: synchronously fence every local stream so a
         // stale link cannot keep serving after another node takes ownership.
-        this.meshClientService.onLeaseLost(reason => this.handleMeshLeaseLost(reason));
+        this.meshClientService.onLeaseLost(reason => this.beginMeshLeaseCleanup(reason));
 
         // Wire up mesh node cleanup callback
         this.meshClientService.onNodeClientsOrphaned(async (nodeId, orphaned) => {
@@ -166,15 +203,17 @@ export class MeshSrpcServer<
             }
         });
 
-        try {
-            const app = getCurrentApp();
-            this.unregisterLifecycleHandlers.push(
-                app.on(onServerBootstrap, () => this.meshStart()),
-                app.on(onServerShutdownRequested, () => this.meshStop())
-            );
-        } catch {
-            // Standalone servers using an explicit mesh-link listener retain the
-            // idempotent meshStart()/meshStop() lifecycle.
+        if (options.autoLifecycle !== false) {
+            try {
+                const app = getCurrentApp();
+                this.unregisterLifecycleHandlers.push(
+                    app.on(onServerBootstrap, () => this.meshStart()),
+                    app.on(onServerShutdownRequested, () => this.meshStop())
+                );
+            } catch {
+                // Standalone servers using an explicit mesh-link listener retain the
+                // idempotent meshStart()/meshStop() lifecycle.
+            }
         }
     }
 
@@ -183,6 +222,8 @@ export class MeshSrpcServer<
 
     /** Fence the exact local generation when a newer owner claims the client. */
     private async handleClientSuperseded(clientId: string, connectionId: string | undefined, reason?: string): Promise<boolean> {
+        const isTakeoverFence = connectionId !== undefined && reason === 'supersede';
+        if (isTakeoverFence) this.markPendingStartDisconnectFence(clientId, connectionId);
         const stream = connectionId === undefined ? this.getCurrentStreamByClientId(clientId) : this.streamsById.get(connectionId);
         // Exact-generation absence is already a completed fence. This is
         // important for same-node supersession: core closes the old stream
@@ -190,24 +231,87 @@ export class MeshSrpcServer<
         if (!stream) return connectionId !== undefined;
         if (stream.clientId !== clientId || (connectionId !== undefined && stream.id !== connectionId)) return false;
         if (connectionId !== undefined) {
+            if (isTakeoverFence) {
+                this.captureDeferredDisconnect(stream);
+                this.markPendingStartDisconnectFence(clientId, connectionId);
+            }
+            const snapshot = this.pendingStartDisconnects.get(stream);
+            const deadline = this.pendingStartDisconnectFenceDeadlines.get(stream);
+            // Reserve this client's lifecycle ordering before cleanup lets a
+            // same-node replacement enqueue its connected callback. Startup
+            // shutdown snapshots instead wait for rollback to dispatch.
+            if (isTakeoverFence && !this.rollbackGatedDisconnects?.has(stream) && snapshot && deadline !== undefined)
+                this.queuePendingStartDisconnectCallback(stream, snapshot, deadline);
             this.meshLogger.info('Disconnecting client through exact mesh transport', { clientId, connectionId, reason });
             // This is a replacement ownership generation, not an ordinary
             // client disconnect. Preserve the supersede cause so local
             // lifecycle consumers do not emit disconnect side effects for
             // a client that remains connected on another mesh node.
-            this.cleanupStream(stream, 'supersede');
+            this.cleanupStream(stream, isTakeoverFence ? 'supersede' : 'disconnect');
             return true;
         }
         this.meshLogger.info('Disconnecting superseded client', { clientId, reason });
-        this.cleanupStream(stream, 'supersede');
+        this.cleanupStream(stream, reason === 'supersede' ? 'supersede' : 'disconnect');
         return true;
     }
 
     /** Fence streams and release the link route after the mesh lease is lost. */
+    private beginMeshLeaseCleanup(reason?: Error): Promise<void> {
+        if (this.meshLeaseCleanupPromise) return this.meshLeaseCleanupPromise;
+        this.meshLeaseCleanupRequired = true;
+        this.clearMeshLeaseCleanupRetry();
+
+        // Install the join barrier before synchronous stream teardown begins.
+        // A disconnect handler may re-enter meshStop() from cleanupStream().
+        let resolveCleanup!: () => void;
+        let rejectCleanup!: (error: unknown) => void;
+        const tracked = new Promise<void>((resolve, reject) => {
+            resolveCleanup = resolve;
+            rejectCleanup = reject;
+        });
+        this.meshLeaseCleanupPromise = tracked;
+
+        let cleanup: Promise<void>;
+        try {
+            cleanup = this.handleMeshLeaseLost(reason);
+        } catch (error) {
+            cleanup = Promise.reject(error);
+        }
+        void cleanup.then(resolveCleanup, rejectCleanup);
+        void tracked.then(
+            () => {
+                this.meshLeaseCleanupRequired = false;
+                if (this.meshLeaseCleanupPromise === tracked) this.meshLeaseCleanupPromise = undefined;
+            },
+            error => {
+                if (this.meshLeaseCleanupPromise === tracked) this.meshLeaseCleanupPromise = undefined;
+                this.meshLogger.warn('mesh lease-loss cleanup failed; retained for retry', { error });
+                this.scheduleMeshLeaseCleanupRetry();
+            }
+        );
+        return tracked;
+    }
+
+    private scheduleMeshLeaseCleanupRetry(): void {
+        if (!this.meshLeaseCleanupRequired || this.meshLeaseCleanupRetryTimer || this.meshClosed) return;
+        this.meshLeaseCleanupRetryTimer = setTimeout(() => {
+            this.meshLeaseCleanupRetryTimer = undefined;
+            void this.beginMeshLeaseCleanup().catch(() => {});
+        }, this.meshLeaseCleanupRetryMs);
+        this.meshLeaseCleanupRetryTimer.unref?.();
+    }
+
+    private clearMeshLeaseCleanupRetry(): void {
+        if (!this.meshLeaseCleanupRetryTimer) return;
+        clearTimeout(this.meshLeaseCleanupRetryTimer);
+        this.meshLeaseCleanupRetryTimer = undefined;
+    }
+
     private async handleMeshLeaseLost(reason?: Error): Promise<void> {
         this.meshLogger.warn('Fencing local sRPC streams after mesh lease loss', { reason });
         this.meshRunning = false;
-        this.meshLeaseFailure = reason ?? new Error('sRPC mesh lease was lost');
+        this.meshLeaseFailure ??= reason ?? new Error('sRPC mesh lease was lost');
+        this.capturePendingStartDisconnects();
         const streams = new Set<SrpcStream<TMeta>>([...(this.streamsByClientId?.values() ?? []), ...(this.pendingStreamsByClientId?.values() ?? [])]);
         for (const stream of streams) {
             if (this.isCurrentStream(stream)) this.cleanupStream(stream, 'disconnect');
@@ -216,17 +320,12 @@ export class MeshSrpcServer<
         // meshStop() deliberately returns once meshRunning is false, so lease
         // loss must release the route here. Otherwise the shared runtime keeps
         // dispatching this mesh key to a closed controller forever.
-        const controller = this.meshLinkController;
         try {
-            await controller?.close();
+            await Promise.allSettled([...(this.clientRegistryChains?.values() ?? [])]);
+            await this.meshClientService.cleanupRegistryOwnership();
+            await this.dispatchPendingStartDisconnects();
         } finally {
-            this.meshClientService.setRemoteTransport(undefined);
-            this.unregisterMeshLinkRoute?.();
-            this.unregisterMeshLinkRoute = undefined;
-            if (this.meshLinkController === controller) {
-                this.meshLinkController = undefined;
-                this.meshLinkRuntime = undefined;
-            }
+            await this.releaseMeshLinkResources(false);
         }
     }
 
@@ -350,7 +449,9 @@ export class MeshSrpcServer<
     protected override async onStreamWillActivate(stream: SrpcStream<TMeta>): Promise<void> {
         const metadata = snapshotMetadata(this.extractMeta(stream));
 
-        if (this.meshInstanceId !== 0) {
+        if (this.meshClientService.isRunning && this.meshStartPromise) await this.meshStartPromise;
+
+        if (this.meshClientService.isRunning) {
             const activated = await this.enqueueClientRegistry(stream.clientId, async () => {
                 if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) {
                     return false;
@@ -374,7 +475,11 @@ export class MeshSrpcServer<
     }
 
     protected override async onStreamActivated(stream: SrpcStream<TMeta>): Promise<void> {
-        this.syncStreamMeta(stream);
+        // A partially-started mesh can already have an instance ID while its
+        // client registry is still unavailable. Backfill will publish this
+        // stream once startup completes; avoid treating that transient state
+        // as a stale metadata write and scheduling retry churn.
+        if (this.meshClientService.isRunning) this.syncStreamMeta(stream);
         await this.enqueueClientCallback(stream.clientId, async () => {
             // Skip stale connection callbacks for streams that disconnected
             // or were replaced before activation finished.
@@ -408,6 +513,7 @@ export class MeshSrpcServer<
     protected override onStreamDisconnected(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause): void {
         super.onStreamDisconnected(stream, cause);
         const publishedLifecycle = this.lifecycleConnectedStreams.has(stream);
+        const deferredDisconnect = this.pendingStartDisconnects?.get(stream);
         this.lifecycleConnectedStreams.delete(stream);
 
         void this.enqueueClientRegistry(stream.clientId, async () => {
@@ -426,12 +532,50 @@ export class MeshSrpcServer<
             // flight. Re-read before touching shared metadata or callbacks.
             const currentStream = this.getCurrentStreamByClientId(stream.clientId);
             const replacementExists = currentStream !== undefined && currentStream !== stream;
-            if (replacementExists) return;
+            if (replacementExists) {
+                // A cancelled-start snapshot survives a merely local,
+                // tentative replacement. That replacement can still be
+                // rejected, in which case the original offline lifecycle
+                // transition must not be lost. A committed remote handoff is
+                // reconciled from the exact registry record before dispatch.
+                if (deferredDisconnect && !this.rollbackGatedDisconnects.has(stream) && this.pendingStartDisconnectFenceDeadlines.has(stream)) {
+                    void this.dispatchPendingStartDisconnects(stream).catch(error => {
+                        this.meshCleanupFailure = toError(error);
+                        this.meshLogger.warn('failed to reconcile deferred supersede disconnect', {
+                            error: this.meshCleanupFailure,
+                            clientId: stream.clientId
+                        });
+                    });
+                } else if (!deferredDisconnect) {
+                    this.pendingStartDisconnects?.delete(stream);
+                }
+                return;
+            }
             // A mesh ownership fence intentionally closes only this local
             // generation. The client remains present on the replacement node,
             // so release our stale metadata without publishing an offline
             // lifecycle event.
             if (cause === 'supersede') {
+                if (deferredDisconnect && !this.rollbackGatedDisconnects.has(stream) && this.pendingStartDisconnectFenceDeadlines.has(stream)) {
+                    this.clientMetadata.delete(stream.clientId);
+                    void this.dispatchPendingStartDisconnects(stream).catch(error => {
+                        this.meshCleanupFailure = toError(error);
+                        this.meshLogger.warn('failed to reconcile deferred supersede disconnect', {
+                            error: this.meshCleanupFailure,
+                            clientId: stream.clientId
+                        });
+                    });
+                    return;
+                }
+                this.pendingStartDisconnects?.delete(stream);
+                this.clientMetadata.delete(stream.clientId);
+                return;
+            }
+            // A full shutdown fence can make the exact unregister return
+            // false even though this stream was already published as
+            // connected. Preserve the callback snapshot and emit it only
+            // after the cancelled start's ownership cleanup succeeds.
+            if (deferredDisconnect) {
                 this.clientMetadata.delete(stream.clientId);
                 return;
             }
@@ -479,6 +623,14 @@ export class MeshSrpcServer<
         const metadata = snapshotMetadata(this.extractMeta(stream));
         const existing = this.clientMetadata.get(stream.clientId);
         if (existing && !shallowChanged(existing, metadata)) return;
+
+        // Pre-start clients are intentionally served locally. Keep the latest
+        // snapshot for startup backfill instead of writing through the
+        // placeholder registry, which would otherwise retry as stale.
+        if (!this.meshClientService.isRunning) {
+            if (this.isCurrentStream(stream)) this.clientMetadata.set(stream.clientId, metadata);
+            return;
+        }
 
         // Write directly to the registry (always local/owning node).
         // Do NOT route through meshClientService.updateClientMetadata here -
@@ -557,9 +709,10 @@ export class MeshSrpcServer<
     }
 
     get startupState(): 'stopped' | 'starting' | 'ready' | 'draining' | 'failed' {
-        if (this.meshStopping || this.meshStopPromise) return 'draining';
-        if (this.meshStartPromise) return 'starting';
         if (this.meshLeaseFailure) return 'failed';
+        if (this.meshCleanupFailure) return 'failed';
+        if (this.meshStopping || this.meshStopPromise || this.meshPendingStartCleanup || this.meshPendingLinkClose) return 'draining';
+        if (this.meshStartPromise) return 'starting';
         return this.meshRunning ? 'ready' : 'stopped';
     }
 
@@ -744,18 +897,51 @@ export class MeshSrpcServer<
 
     async meshStart(): Promise<void> {
         if (this.meshLeaseFailure) throw this.meshLeaseFailure;
+        if (this.meshCleanupFailure) throw this.meshCleanupFailure;
         if (this.meshClosed) throw new Error('sRPC mesh server is closed');
         if (this.meshStopPromise) {
             await this.meshStopPromise;
             return this.meshStart();
         }
+        // A shutdown is allowed to return before an uncooperative underlying
+        // mesh start settles. Do not let a new start overlap that deferred
+        // rollback or inherit its partially-created membership.
+        if (this.meshPendingStartCleanup) {
+            await this.meshPendingStartCleanup;
+            return this.meshStart();
+        }
+        if (this.meshPendingLinkClose) {
+            await this.meshPendingLinkClose;
+            return this.meshStart();
+        }
         if (this.meshRunning) return;
-        if (this.meshStartPromise) return this.meshStartPromise;
+        if (this.meshStartPromise) {
+            if (!this.meshStartCancelled) return this.meshStartPromise;
+            // A caller arriving after shutdown requested cancellation must not
+            // inherit the cancelled start's rejection. Wait for its rollback,
+            // then begin a fresh lifecycle.
+            await this.meshStartPromise.catch(() => {});
+            return this.meshStart();
+        }
+        const generation = (this.meshStartGeneration ?? 0) + 1;
+        this.meshStartGeneration = generation;
+        this.meshStartCancelled = false;
+        this.meshStartRollbackFailure = undefined;
+        this.meshClientService.prepareStart?.();
         const start = (async () => {
             try {
-                await this.startMesh();
+                await this.startMesh(generation);
             } catch (error) {
-                await this.rollbackMeshStart();
+                try {
+                    await this.rollbackMeshStart();
+                } catch (rollbackError) {
+                    this.meshStartRollbackFailure = toError(rollbackError);
+                    // A cancelled start gets one deferred rollback retry after
+                    // its original startup settles. Do not permanently fail
+                    // future starts until that recovery barrier also fails.
+                    if (!this.meshStartCancelled) this.meshCleanupFailure = this.meshStartRollbackFailure;
+                    throw this.meshStartRollbackFailure;
+                }
                 throw error;
             }
         })();
@@ -767,7 +953,13 @@ export class MeshSrpcServer<
         }
     }
 
-    private async startMesh(): Promise<void> {
+    private assertMeshStartCurrent(generation: number): void {
+        if (this.meshStartGeneration !== generation || this.meshStopping || this.meshClosed) {
+            throw new Error('sRPC mesh startup was cancelled');
+        }
+    }
+
+    private async startMesh(generation: number): Promise<void> {
         const linkConfig = this.resolveMeshLinkConfig();
         if (linkConfig) {
             this.meshLinkRequestTimeoutMs = linkConfig.requestTimeoutMs;
@@ -790,9 +982,11 @@ export class MeshSrpcServer<
                 linkUrl: advertiseUrl,
                 startedAt: Date.now()
             });
+            this.assertMeshStartCurrent(generation);
         }
 
         await this.meshClientService.start();
+        this.assertMeshStartCurrent(generation);
         this.meshRunning = true;
 
         // Backfill clients that connected before mesh tracking was running.
@@ -810,16 +1004,17 @@ export class MeshSrpcServer<
 
         const backfillPromises: Promise<void>[] = [];
         for (const [clientId, stream] of backfillStreams) {
+            this.assertMeshStartCurrent(generation);
             // Install proxy if not already proxied (streams that connected before meshStart)
             this.installMetaProxy(stream);
 
-            if (!this.clientMetadata.has(clientId)) {
-                const metadata = snapshotMetadata(this.extractMeta(stream));
-                this.clientMetadata.set(clientId, metadata);
-            }
-            const metadata = this.clientMetadata.get(clientId)!;
+            // Resnapshot even if a local pre-start mutation previously
+            // populated the cache. The live stream is authoritative.
+            const metadata = snapshotMetadata(this.extractMeta(stream));
+            this.clientMetadata.set(clientId, metadata);
             const allowSupersede = stream.supersede;
             const backfill = this.enqueueClientRegistry(clientId, async () => {
+                this.assertMeshStartCurrent(generation);
                 // Only backfill the current stream (active or pending).
                 const currentStream = this.getCurrentStreamByClientId(clientId);
                 if (currentStream !== stream) return;
@@ -836,9 +1031,13 @@ export class MeshSrpcServer<
             backfillPromises.push(backfill.then(() => undefined));
         }
         await Promise.all(backfillPromises);
+        this.assertMeshStartCurrent(generation);
     }
 
     async meshStop(): Promise<void> {
+        if (this.meshFatalCleanupPromise) return this.meshFatalCleanupPromise;
+        if (this.meshLeaseCleanupPromise) return this.meshLeaseCleanupPromise;
+        if (this.meshLeaseCleanupRequired) return this.beginMeshLeaseCleanup();
         if (this.meshStopPromise) return this.meshStopPromise;
         const stop = this.stopMesh();
         this.meshStopPromise = stop;
@@ -850,51 +1049,446 @@ export class MeshSrpcServer<
     }
 
     private async stopMesh(): Promise<void> {
-        if (this.meshStartPromise) {
+        const start = this.meshStartPromise;
+        if (start) {
+            // Do not await a start that is blocked on an unavailable
+            // dependency. Detach the directly-owned mesh transport now, then
+            // arrange a best-effort rollback when the dependency eventually
+            // returns. This keeps shutdown bounded and prevents a late start
+            // from resurrecting delivery resources.
+            this.meshStartGeneration++;
+            this.meshStartCancelled = true;
+            this.meshRunning = false;
+            this.meshStopping = true;
+            let setupFailure: Error | undefined;
             try {
-                await this.meshStartPromise;
-            } catch {
-                return;
+                const failures: Error[] = [];
+                // Fence membership first. It does not clear lifecycle metadata,
+                // and makes every subsequent best-effort local cleanup safe.
+                try {
+                    this.meshClientService.fenceForShutdown?.();
+                } catch (error) {
+                    failures.push(toError(error));
+                }
+                try {
+                    this.capturePendingStartDisconnects();
+                } catch (error) {
+                    failures.push(toError(error));
+                }
+                try {
+                    this.disconnectAllMeshStreams();
+                } catch (error) {
+                    failures.push(toError(error));
+                }
+                try {
+                    await this.releaseMeshLinkResources(false);
+                } catch (error) {
+                    failures.push(toError(error));
+                }
+                if (failures.length === 1) setupFailure = failures[0];
+                else if (failures.length > 1) setupFailure = new AggregateError(failures, 'sRPC mesh pending-start shutdown setup failed');
+                if (setupFailure) throw setupFailure;
+            } finally {
+                this.meshStopping = false;
+                // A setup failure must not strand a late start without its
+                // rollback barrier. The deferred retry also retains captured
+                // offline callbacks until ownership is conclusively cleaned.
+                this.deferPendingMeshStartRollback(start, setupFailure);
             }
+            return;
         }
         if (!this.meshRunning) return;
         this.meshRunning = false;
         this.meshStopping = true;
+        const failures: Error[] = [];
         try {
+            // Fence admission before taking the stream snapshot below. Cleanup
+            // can await registry/controller work, so delaying this until the
+            // final MeshClientService.stop() would allow a late connection to
+            // reserve and activate outside that snapshot.
+            this.meshClientService.fenceAdmission?.();
             // Fence local delivery first. This queues exact unregister work
             // while the mesh service is still available to persist it.
-            const streams = new Set<SrpcStream<TMeta>>([
-                ...(this.streamsByClientId?.values() ?? []),
-                ...(this.pendingStreamsByClientId?.values() ?? [])
-            ]);
-            for (const stream of streams) {
-                if (this.isCurrentStream(stream)) this.cleanupStream(stream, 'disconnect');
-            }
+            this.disconnectAllMeshStreams();
             await Promise.allSettled([...(this.clientRegistryChains?.values() ?? [])]);
-            await Promise.allSettled([...(this.clientCallbackChains?.values() ?? [])]);
-            await this.meshLinkController?.close();
-            this.meshClientService.setRemoteTransport(undefined);
-            this.unregisterMeshLinkRoute?.();
-            this.unregisterMeshLinkRoute = undefined;
+        } catch (error) {
+            failures.push(toError(error));
+        }
+        try {
+            await this.releaseMeshLinkResources(false);
+        } catch (error) {
+            failures.push(toError(error));
+        }
+        try {
             await this.meshClientService.stop();
-            this.meshLinkController = undefined;
-            this.meshLinkRuntime = undefined;
-            this.clientMetadata.clear();
+        } catch (error) {
+            failures.push(toError(error));
+        }
+        try {
+            if (failures.length === 1) throw failures[0];
+            if (failures.length > 1) throw new AggregateError(failures, 'sRPC mesh shutdown failed');
+        } catch (error) {
+            // Once normal shutdown has fenced delivery, a failed registry or
+            // membership cleanup cannot safely be followed by a fresh start.
+            // Preserve the failure as a durable lifecycle barrier.
+            this.meshCleanupFailure = toError(error);
+            throw this.meshCleanupFailure;
         } finally {
             this.meshStopping = false;
         }
     }
 
+    private disconnectAllMeshStreams(): void {
+        const streams = new Set<SrpcStream<TMeta>>([...(this.streamsByClientId?.values() ?? []), ...(this.pendingStreamsByClientId?.values() ?? [])]);
+        for (const stream of streams) {
+            if (this.isCurrentStream(stream)) this.cleanupStream(stream, 'disconnect');
+        }
+    }
+
+    private capturePendingStartDisconnects(): void {
+        this.pendingStartDisconnects ??= new Map();
+        this.rollbackGatedDisconnects ??= new WeakSet();
+        const streams = new Set<SrpcStream<TMeta>>([...(this.streamsByClientId?.values() ?? []), ...(this.pendingStreamsByClientId?.values() ?? [])]);
+        for (const stream of streams) {
+            if (!this.isCurrentStream(stream) || !this.lifecycleConnectedStreams?.has(stream) || !this.clientMetadata.has(stream.clientId)) continue;
+            this.captureDeferredDisconnect(stream);
+            this.rollbackGatedDisconnects.add(stream);
+        }
+    }
+
+    private captureDeferredDisconnect(stream: SrpcStream<TMeta>): void {
+        this.pendingStartDisconnects ??= new Map();
+        if (this.pendingStartDisconnects.has(stream) || !this.lifecycleConnectedStreams?.has(stream) || !this.clientMetadata.has(stream.clientId))
+            return;
+        this.pendingStartDisconnects.set(stream, {
+            clientId: stream.clientId,
+            connectionId: stream.id,
+            nodeId: this.meshClientService.instanceId,
+            metadata: snapshotMetadata(this.clientMetadata.get(stream.clientId) as TRegistryMeta)
+        });
+    }
+
+    private async dispatchPendingStartDisconnects(targetStream?: SrpcStream<TMeta>): Promise<void> {
+        if (!this.pendingStartDisconnects) return;
+        const pending = targetStream
+            ? (() => {
+                  const snapshot = this.pendingStartDisconnects.get(targetStream);
+                  return snapshot ? [[targetStream, snapshot] as const] : [];
+              })()
+            : [...this.pendingStartDisconnects.entries()];
+        await Promise.all(
+            pending.map(async ([stream, snapshot]) => {
+                const { clientId, metadata } = snapshot;
+                let fenceDeadline = this.pendingStartDisconnectFenceDeadlines?.get(stream);
+                if (this.rollbackGatedDisconnects?.has(stream)) {
+                    // A fence can arrive after shutdown detached the old
+                    // stream. Verify the post-rollback registry first, then
+                    // retain this exact generation through one full claim
+                    // window so a late private claim may publish safely.
+                    const detectionDeadline = fenceDeadline ?? Date.now() + this.meshSupersedeReconcileMs;
+                    if (!(await this.shouldDispatchPendingStartDisconnect(snapshot, undefined, detectionDeadline))) {
+                        this.pendingStartDisconnects?.delete(stream);
+                        this.pendingStartDisconnectFenceDeadlines?.delete(stream);
+                        return;
+                    }
+                    if (fenceDeadline === undefined) {
+                        fenceDeadline = detectionDeadline;
+                        this.pendingStartDisconnectFenceDeadlines.set(stream, fenceDeadline);
+                    }
+                }
+                if (fenceDeadline !== undefined) {
+                    this.queuePendingStartDisconnectCallback(stream, snapshot, fenceDeadline, !this.rollbackGatedDisconnects?.has(stream));
+                } else if (await this.shouldDispatchPendingStartDisconnect(snapshot)) {
+                    // An in-flight remote exact fence can consume this
+                    // snapshot while registry reconciliation awaits.
+                    if (!this.pendingStartDisconnects?.has(stream)) return;
+                    // Queue application work behind the per-client callback
+                    // chain, but do not make global restart safety depend on
+                    // user code settling. Ownership reconciliation above is
+                    // the lifecycle barrier.
+                    void this.enqueueClientCallback(clientId, async () => {
+                        for (const cb of this.disconnectedCallbacks) {
+                            try {
+                                await cb(clientId, metadata);
+                            } catch (err) {
+                                this.meshLogger.warn('client disconnected callback error', { err, clientId });
+                            }
+                        }
+                    }).catch(error => this.meshLogger.warn('deferred client disconnected callback error', { error, clientId }));
+                }
+                this.pendingStartDisconnects?.delete(stream);
+            })
+        );
+    }
+
+    private async shouldDispatchPendingStartDisconnect(
+        snapshot: {
+            clientId: string;
+            connectionId: string;
+            nodeId: number;
+            metadata: TRegistryMeta;
+        },
+        fenceDeadline?: number,
+        lookupRetryDeadline = fenceDeadline,
+        retryDelayMs = this.meshSupersedeReconcileRetryMs
+    ): Promise<boolean> {
+        const registry = this.meshClientService.clientRegistry;
+        retryDelayMs = Math.max(1, retryDelayMs ?? 10);
+        let current;
+        try {
+            current = await registry.getClient(snapshot.clientId);
+        } catch (error) {
+            if (lookupRetryDeadline !== undefined && Date.now() < lookupRetryDeadline) {
+                await new Promise<void>(resolve => {
+                    const timer = setTimeout(resolve, Math.min(retryDelayMs, lookupRetryDeadline - Date.now()));
+                    timer.unref?.();
+                });
+                return this.shouldDispatchPendingStartDisconnect(
+                    snapshot,
+                    fenceDeadline,
+                    lookupRetryDeadline,
+                    Math.min(Math.max(retryDelayMs * 2, 1), 1_000)
+                );
+            }
+            throw toError(error);
+        }
+        if (
+            (!current || (current.nodeId === snapshot.nodeId && current.connectionId === snapshot.connectionId)) &&
+            fenceDeadline !== undefined &&
+            Date.now() < fenceDeadline
+        ) {
+            await new Promise<void>(resolve => {
+                const timer = setTimeout(resolve, Math.min(retryDelayMs, fenceDeadline - Date.now()));
+                timer.unref?.();
+            });
+            return this.shouldDispatchPendingStartDisconnect(
+                snapshot,
+                fenceDeadline,
+                lookupRetryDeadline,
+                Math.min(Math.max(retryDelayMs * 2, 1), 1_000)
+            );
+        }
+        if (!current) return true;
+        if (current.nodeId !== snapshot.nodeId || current.connectionId !== snapshot.connectionId) return false;
+        throw new Error(`Cannot reconcile deferred mesh disconnect for ${snapshot.clientId}: exact old generation is still registered`);
+    }
+
+    private queuePendingStartDisconnectCallback(
+        stream: SrpcStream<TMeta>,
+        snapshot: { clientId: string; connectionId: string; nodeId: number; metadata: TRegistryMeta },
+        fenceDeadline: number,
+        pollForReplacement = true
+    ): void {
+        if (this.pendingStartDisconnectCallbackQueued.has(stream)) return;
+        this.pendingStartDisconnectCallbackQueued.add(stream);
+        if (!this.rollbackGatedDisconnects.has(stream)) this.pendingStartDisconnects?.delete(stream);
+        const { clientId, metadata } = snapshot;
+        void this.enqueueClientCallback(clientId, async () => {
+            if (!pollForReplacement && Date.now() < fenceDeadline) {
+                await new Promise<void>(resolve => {
+                    const timer = setTimeout(resolve, fenceDeadline - Date.now());
+                    timer.unref?.();
+                });
+            }
+            // Lease-loss/rollback snapshots perform one deadline lookup rather
+            // than polling Redis per client throughout the claim window. Only
+            // actual takeover fences poll early, using exponential backoff.
+            const lookupRetryDeadline = pollForReplacement ? fenceDeadline : Date.now() + Math.min(this.meshSupersedeReconcileMs ?? 30_000, 5_000);
+            const shouldDispatch = await this.shouldDispatchPendingStartDisconnect(
+                snapshot,
+                pollForReplacement ? fenceDeadline : undefined,
+                lookupRetryDeadline
+            );
+            // Reconciliation state must not retain the stream for the lifetime
+            // of arbitrary application callback work.
+            this.pendingStartDisconnectFenceDeadlines.delete(stream);
+            if (!shouldDispatch) return;
+            for (const cb of this.disconnectedCallbacks) {
+                try {
+                    await cb(clientId, metadata);
+                } catch (err) {
+                    this.meshLogger.warn('client disconnected callback error', { err, clientId });
+                }
+            }
+        })
+            .catch(error => {
+                this.failDeferredDisconnectReconciliation(toError(error), clientId);
+            })
+            .finally(() => {
+                this.pendingStartDisconnectFenceDeadlines.delete(stream);
+                this.pendingStartDisconnectCallbackQueued.delete(stream);
+            });
+    }
+
+    private markPendingStartDisconnectFence(clientId: string, connectionId: string): void {
+        for (const [stream, snapshot] of this.pendingStartDisconnects ?? []) {
+            if (snapshot.clientId === clientId && snapshot.connectionId === connectionId) {
+                this.pendingStartDisconnectFenceDeadlines.set(stream, Date.now() + this.meshSupersedeReconcileMs);
+            }
+        }
+    }
+
+    private failDeferredDisconnectReconciliation(error: Error, clientId: string): void {
+        if (this.meshFatalCleanupPromise) {
+            this.meshCleanupFailure = new AggregateError(
+                [this.meshCleanupFailure ?? error, error],
+                'Multiple deferred mesh disconnect reconciliation failures'
+            );
+            return;
+        }
+        this.meshCleanupFailure = error;
+        this.meshRunning = false;
+        const failures = [error];
+        try {
+            // Preserve immutable lifecycle snapshots before fencing membership;
+            // unregisters after the fence can no longer prove exact removal.
+            this.capturePendingStartDisconnects();
+        } catch (captureError) {
+            failures.push(toError(captureError));
+        }
+        try {
+            this.meshClientService.fenceForShutdown?.();
+        } catch (fenceError) {
+            failures.push(toError(fenceError));
+        }
+        const cleanup = (async () => {
+            try {
+                this.disconnectAllMeshStreams();
+            } catch (cleanupError) {
+                failures.push(toError(cleanupError));
+            }
+            // Let exact unregister work snapshot lifecycle metadata and queue
+            // its callbacks before link release clears the shared cache.
+            await Promise.allSettled([...(this.clientRegistryChains?.values() ?? [])]);
+            try {
+                await this.releaseMeshLinkResources(false);
+            } catch (cleanupError) {
+                failures.push(toError(cleanupError));
+            }
+            try {
+                await this.meshClientService.stop();
+                try {
+                    await this.dispatchPendingStartDisconnects();
+                } catch (dispatchError) {
+                    failures.push(toError(dispatchError));
+                }
+            } catch (cleanupError) {
+                failures.push(toError(cleanupError));
+            }
+            this.meshCleanupFailure =
+                failures.length === 1 ? failures[0] : new AggregateError(failures, 'Deferred mesh disconnect reconciliation cleanup failed');
+            this.meshLogger.warn('deferred client disconnect reconciliation failed; mesh ownership fenced', {
+                error: this.meshCleanupFailure,
+                clientId
+            });
+        })();
+        this.meshFatalCleanupPromise = cleanup.catch(cleanupError => {
+            this.meshCleanupFailure = new AggregateError(
+                [this.meshCleanupFailure, toError(cleanupError)],
+                'Deferred mesh disconnect reconciliation cleanup failed'
+            );
+            this.meshLogger.warn('deferred mesh disconnect cleanup failed unexpectedly', { cleanupError });
+        });
+    }
+
+    /** Release mesh-link resources without waiting for mesh membership I/O. */
+    private async releaseMeshLinkResources(waitForClose = true): Promise<void> {
+        const controller = this.meshLinkController;
+        const failures: Error[] = [];
+        try {
+            this.meshClientService.setRemoteTransport(undefined);
+        } catch (error) {
+            failures.push(toError(error));
+        }
+        try {
+            this.unregisterMeshLinkRoute?.();
+        } catch (error) {
+            failures.push(toError(error));
+        } finally {
+            this.unregisterMeshLinkRoute = undefined;
+        }
+        let close: Promise<void> | undefined;
+        try {
+            close = controller?.close();
+        } catch (error) {
+            failures.push(toError(error));
+        } finally {
+            if (this.meshLinkController === controller) {
+                this.meshLinkController = undefined;
+                this.meshLinkRuntime = undefined;
+            }
+            this.clientMetadata.clear();
+        }
+        if (!waitForClose && close) {
+            this.trackDetachedLinkClose(close);
+        } else if (close) {
+            try {
+                await close;
+            } catch (error) {
+                failures.push(toError(error));
+            }
+        }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) throw new AggregateError(failures, 'Failed to release sRPC mesh-link resources');
+    }
+
+    private trackDetachedLinkClose(close: Promise<void>): void {
+        this.meshPendingLinkClose = close;
+        void close.then(
+            () => {
+                if (this.meshPendingLinkClose === close) this.meshPendingLinkClose = undefined;
+            },
+            error => {
+                if (this.meshPendingLinkClose === close) {
+                    this.meshCleanupFailure = toError(error);
+                    this.meshLogger.warn('failed to close detached sRPC mesh link', { error: this.meshCleanupFailure });
+                }
+            }
+        );
+    }
+
+    private deferPendingMeshStartRollback(start: Promise<void>, setupFailure?: Error): void {
+        if (this.meshPendingStartCleanup) return;
+        // `start` already rolls itself back on cancellation. The fulfilled
+        // branch is defensive: it covers a future start path that fails to
+        // observe the generation fence. Consume every failure here because
+        // shutdown intentionally does not await the original start promise.
+        const cleanup = start.then(
+            () => this.rollbackMeshStart(),
+            // meshStart already attempted rollback before rejecting. Retry
+            // only a failed rollback so its error remains a cleanup barrier.
+            async () => {
+                if (this.meshStartRollbackFailure === undefined && setupFailure === undefined) return;
+                await this.rollbackMeshStart();
+                this.meshStartRollbackFailure = undefined;
+            }
+        );
+        const pendingLinkClose = this.meshPendingLinkClose;
+        // Registry/membership cleanup is the offline safety boundary. A
+        // controller close may be stuck behind its own request timeout, but
+        // must not indefinitely suppress an already-confirmed lifecycle
+        // disconnect callback. It remains a restart barrier below.
+        const cleanupAndCallbacks = cleanup.then(() => this.dispatchPendingStartDisconnects());
+        const barrier = pendingLinkClose ? Promise.all([cleanupAndCallbacks, pendingLinkClose]).then(() => undefined) : cleanupAndCallbacks;
+        this.meshPendingStartCleanup = barrier;
+        void barrier.then(
+            () => {
+                if (this.meshPendingStartCleanup === barrier) {
+                    this.meshPendingStartCleanup = undefined;
+                    if (this.meshPendingLinkClose === pendingLinkClose) this.meshPendingLinkClose = undefined;
+                }
+            },
+            error => {
+                this.meshCleanupFailure = toError(error);
+                this.meshLogger.warn('failed to roll back cancelled sRPC mesh startup', { error: this.meshCleanupFailure });
+            }
+        );
+    }
+
     private async rollbackMeshStart(): Promise<void> {
         this.meshRunning = false;
-        await this.meshLinkController?.close();
-        this.meshClientService.setRemoteTransport(undefined);
-        this.unregisterMeshLinkRoute?.();
-        this.unregisterMeshLinkRoute = undefined;
-        this.meshLinkController = undefined;
-        if (this.meshClientService.instanceId !== 0) await this.meshClientService.stop();
-        this.meshLinkRuntime = undefined;
-        this.clientMetadata.clear();
+        await this.releaseMeshLinkResources(false);
+        await this.meshClientService.stop();
     }
 
     override close(): void {
@@ -991,7 +1585,12 @@ export class MeshSrpcServer<
             getLocalConnection: clientId => this.streamsByClientId.get(clientId),
             hasLocalFenceConnection: (clientId, connectionId) => {
                 const stream = this.streamsById.get(connectionId);
-                return stream?.clientId === clientId;
+                return (
+                    stream?.clientId === clientId ||
+                    [...this.pendingStartDisconnects.values()].some(
+                        snapshot => snapshot.clientId === clientId && snapshot.connectionId === connectionId
+                    )
+                );
             },
             invokeLocal: async (clientId, connectionId, prefix, encoded, timeoutMs) => {
                 const stream = getLocal(clientId, connectionId);
@@ -1039,11 +1638,7 @@ export class MeshSrpcServer<
                 await super.disconnectClient(stream, reason);
                 return true;
             },
-            fenceLocal: async (clientId, connectionId) => {
-                const stream = getFenceLocal(clientId, connectionId);
-                this.cleanupStream(stream, 'supersede');
-                return true;
-            },
+            fenceLocal: async (clientId, connectionId, reason) => this.handleClientSuperseded(clientId, connectionId, reason),
             updateLocalMetadata: async (clientId, connectionId, metadata) => {
                 const stream = getLocal(clientId, connectionId);
                 const projected = this.projectMetadataWithoutMutation(stream, metadata);

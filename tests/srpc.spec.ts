@@ -164,7 +164,10 @@ describe('srpc', () => {
         server.handleStreamDataReceived(stream, { requestId, reply: true, dNotifyResponse: { received: 1 } });
         assert.deepEqual(closed, []);
 
-        await delay(15);
+        // Expire the tombstone explicitly. A real-time 10ms sleep is flaky
+        // under the full suite because event-loop load can delay the first
+        // "immediate" reply until after the tombstone has already elapsed.
+        server.lateReplyTombstonesByStream.get(stream)?.set(requestId, Date.now() - 1);
         server.handleStreamDataReceived(stream, { requestId, reply: true, dNotifyResponse: { received: 1 } });
         assert.deepEqual(closed, [[4000, 'Unknown request ID']]);
 
@@ -225,7 +228,7 @@ describe('srpc', () => {
         client.handleReply(clientWs, 1, unknownClientRequestId, { requestId: unknownClientRequestId, reply: true });
         assert.deepEqual(clientClosed, ['Unknown request ID']);
 
-        await delay(15);
+        client.lateReplyTombstones.set(timedOutRequestId, Date.now() - 1);
         client.handleReply(clientWs, 1, timedOutRequestId, { requestId: timedOutRequestId, reply: true });
         assert.deepEqual(clientClosed, ['Unknown request ID', 'Unknown request ID']);
     });

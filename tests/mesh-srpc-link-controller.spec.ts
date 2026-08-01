@@ -6,9 +6,13 @@ import { afterEach, describe, it } from 'node:test';
 
 import {
     acquireMeshLinkRuntime,
+    createLogger,
+    createApp,
     getMeshLinkProcessId,
+    getCurrentApp,
     installUpgradeClaimHandling,
     MeshLinkProtocolVersion,
+    MeshClientService,
     MeshSrpcServer,
     SrpcBackpressureError,
     SrpcByteStream,
@@ -18,6 +22,7 @@ import {
     type BaseMessage,
     type IByteStreamable,
     type RegisteredClient,
+    setCurrentApp,
     type SrpcMeta
 } from '../src';
 import { MeshLinkCapabilityError, MeshSrpcLinkController } from '../src/services/mesh-client/mesh-srpc-link-controller';
@@ -29,6 +34,15 @@ const servers: Server[] = [];
 const runtimes: ReturnType<typeof acquireMeshLinkRuntime>[] = [];
 
 type FullClientMeta = { role: string; secret: string };
+
+const JsonMessage = {
+    encode(message: BaseMessage) {
+        return Buffer.from(JSON.stringify(message));
+    },
+    decode(input: Buffer) {
+        return JSON.parse(input.toString('utf8')) as BaseMessage;
+    }
+};
 
 // Remote handles expose the registry shape while local handles retain full
 // client metadata, so reduced extractMetadata remains supported.
@@ -64,6 +78,694 @@ afterEach(async () => {
 });
 
 describe('MeshSrpcLinkController', () => {
+    it('can opt out of automatic App mesh lifecycle registration', async () => {
+        let previousApp: ReturnType<typeof getCurrentApp> | undefined;
+        try {
+            previousApp = getCurrentApp();
+        } catch {
+            // The test installs its own minimal lifecycle host below.
+        }
+        const app = createApp({ enableHealthcheck: false });
+        const originalOn = app.on.bind(app);
+        let registrations = 0;
+        (app as any).on = (token: unknown, handler: unknown) => {
+            registrations++;
+            return originalOn(token as any, handler as any);
+        };
+        try {
+            const automatic = new MeshSrpcServer({
+                logger: createLogger('MeshLifecycleDefault'),
+                clientMessage: JsonMessage,
+                serverMessage: JsonMessage,
+                wsPath: '/lifecycle-default',
+                meshKey: 'lifecycle-default'
+            });
+            assert.equal(registrations, 2);
+            automatic.close();
+
+            const manual = new MeshSrpcServer({
+                logger: createLogger('MeshLifecycleManual'),
+                clientMessage: JsonMessage,
+                serverMessage: JsonMessage,
+                wsPath: '/lifecycle-manual',
+                meshKey: 'lifecycle-manual',
+                autoLifecycle: false
+            });
+            assert.equal(registrations, 2);
+            manual.close();
+        } finally {
+            await app.stop();
+            if (previousApp) setCurrentApp(previousApp);
+        }
+    });
+
+    it('does not activate a stream while mesh startup is only partially initialized', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let activations = 0;
+        let metadataSyncs = 0;
+        const stream = { id: 'connection-1', clientId: 'client-1', lastPingAt: Date.now(), meta: { role: 'client' } };
+        server.meshClientService = {
+            instanceId: 7,
+            isRunning: false,
+            activateClient: async () => {
+                activations++;
+                return true;
+            }
+        };
+        server.clientMetadata = new Map();
+        server.isCurrentStream = (candidate: unknown) => candidate === stream;
+        server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
+        server.syncStreamMeta = () => {
+            metadataSyncs++;
+        };
+        server.enqueueClientCallback = async (_clientId: string, fn: () => Promise<void>) => fn();
+        server.streamsByClientId = new Map([[stream.clientId, stream]]);
+        server.lifecycleConnectedStreams = new WeakSet();
+        server.connectedCallbacks = new Set();
+
+        await server.onStreamWillActivate(stream);
+        await server.onStreamActivated(stream);
+
+        delete server.syncStreamMeta;
+        server.pendingSyncs = new Set();
+        server.installMetaProxy(stream);
+        stream.meta.role = 'changed-during-startup';
+        await Promise.resolve();
+
+        assert.equal(activations, 0);
+        assert.equal(metadataSyncs, 0);
+        assert.deepEqual(server.clientMetadata.get('client-1'), { role: 'changed-during-startup' });
+    });
+
+    it('waits for in-flight startup backfill when a locally reserved stream crosses into mesh activation', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseStart: (() => void) | undefined;
+        const startBlocked = new Promise<void>(resolve => {
+            releaseStart = resolve;
+        });
+        let reservations = 0;
+        let activations = 0;
+        const stream = { id: 'connection-1', clientId: 'client-1', lastPingAt: Date.now(), supersede: false, meta: { role: 'client' } };
+        const meshClientService = {
+            isRunning: false,
+            reserveClient: async () => {
+                reservations++;
+                return true;
+            },
+            activateClient: async () => {
+                activations++;
+                return true;
+            }
+        };
+        server.clientMetadata = new Map();
+        server.meshClientService = meshClientService;
+        server.isCurrentStream = (candidate: unknown) => candidate === stream;
+        server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
+        server.installMetaProxy = () => {};
+
+        // The stream reserves locally before MeshClientService reaches its
+        // running state. Startup flips that state before its backfill settles.
+        assert.equal(await server.postEstablishCheck(stream), false);
+        assert.equal(reservations, 1);
+        meshClientService.isRunning = true;
+        server.meshStartPromise = startBlocked;
+
+        const activating = server.onStreamWillActivate(stream);
+        await Promise.resolve();
+        assert.equal(activations, 0);
+
+        releaseStart!();
+        await activating;
+        assert.equal(activations, 1);
+    });
+
+    it('fences a running mesh while backfill is pending and rejects new admission', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseBackfill: (() => void) | undefined;
+        const backfillBlocked = new Promise<void>(resolve => {
+            releaseBackfill = resolve;
+        });
+        let fenced = 0;
+        const meshClientService = {
+            isRunning: false,
+            instanceId: 1,
+            setRemoteTransport: () => {},
+            prepareStart: () => {},
+            start: async () => {
+                meshClientService.isRunning = true;
+            },
+            stop: async () => {
+                meshClientService.isRunning = false;
+            },
+            fenceForShutdown: () => {
+                fenced++;
+                meshClientService.isRunning = false;
+            },
+            registerClient: async () => {
+                await backfillBlocked;
+                return true;
+            },
+            reserveClient: async () => meshClientService.isRunning,
+            activateClient: async () => meshClientService.isRunning
+        };
+        const stream = { id: 'backfill-connection', clientId: 'backfill-client', isActivated: true, supersede: false, meta: { role: 'client' } };
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.clientMetadata = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map([[stream.clientId, stream]]);
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = meshClientService;
+        server.resolveMeshLinkConfig = () => undefined;
+        server.getCurrentStreamByClientId = () => stream;
+        server.installMetaProxy = () => {};
+        server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
+        server.disconnectAllMeshStreams = () => {};
+
+        const start = server.meshStart();
+        await Promise.resolve();
+        await server.meshStop();
+
+        assert.equal(fenced, 1);
+        assert.equal(await meshClientService.reserveClient(), false);
+        assert.equal(await meshClientService.activateClient(), false);
+
+        releaseBackfill!();
+        await assert.rejects(start, /startup was cancelled/);
+        await server.meshPendingStartCleanup;
+    });
+
+    it('keeps a failed cancelled-start cleanup as a barrier for queued restarts', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let starts = 0;
+        let rollbacks = 0;
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.meshClientService = {
+            prepareStart: () => {},
+            fenceForShutdown: () => {}
+        };
+        server.startMesh = async () => {
+            starts++;
+            throw new Error('start failed');
+        };
+        server.rollbackMeshStart = async () => {
+            rollbacks++;
+            throw new Error('rollback failed');
+        };
+        server.releaseMeshLinkResources = async () => {};
+        server.disconnectAllMeshStreams = () => {};
+
+        const start = server.meshStart();
+        const stop = server.meshStop();
+        await assert.rejects(start, /rollback failed/);
+        await stop;
+        await assert.rejects(server.meshStart(), /rollback failed/);
+
+        assert.equal(starts, 1);
+        assert.equal(rollbacks, 2);
+        assert.equal(server.startupState, 'failed');
+    });
+
+    it('permits restart when a cancelled-start rollback retry succeeds', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let starts = 0;
+        let rollbacks = 0;
+        let deferredDisconnectDispatches = 0;
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.meshClientService = {
+            prepareStart: () => {},
+            fenceForShutdown: () => {},
+            setRemoteTransport: () => {}
+        };
+        server.startMesh = async () => {
+            starts++;
+            if (starts === 1) throw new Error('start failed');
+        };
+        server.rollbackMeshStart = async () => {
+            rollbacks++;
+            if (rollbacks === 1) throw undefined;
+        };
+        server.dispatchPendingStartDisconnects = async () => {
+            deferredDisconnectDispatches++;
+        };
+        server.disconnectAllMeshStreams = () => {};
+
+        const start = server.meshStart();
+        const stop = server.meshStop();
+        await assert.rejects(start, /undefined/);
+        await stop;
+        await server.meshPendingStartCleanup;
+
+        await server.meshStart();
+        assert.equal(starts, 2);
+        assert.equal(rollbacks, 2);
+        assert.equal(deferredDisconnectDispatches, 1);
+        assert.equal(server.meshCleanupFailure, undefined);
+    });
+
+    it('rejects pre-start client admission after a shutdown fence', async () => {
+        const service = new MeshClientService<{ role: string }>({
+            key: `admission-fence-${Date.now()}-${process.pid}`,
+            clientInvokeFn: async () => undefined
+        });
+        service.fenceForShutdown();
+
+        assert.equal(await service.reserveClient('client-1', { role: 'client' }, false, 'connection-1'), false);
+        assert.equal(await service.registerClient('client-1', { role: 'client' }, false, 'connection-1'), false);
+    });
+
+    it('cleans retained registry ownership when the shutdown fence stops mesh membership first', async () => {
+        const service = Object.create(MeshClientService.prototype) as any;
+        let cleaned = 0;
+        let meshStops = 0;
+        service.running = true;
+        service.hasStarted = true;
+        service.registryCleanupNodeId = 17;
+        service.admissionFenced = false;
+        service.ownershipGeneration = 0;
+        service.lifecycle = Promise.resolve();
+        service.stopRegistryTimers = () => {};
+        service.registry = { cleanupNode: async () => cleaned++ };
+        service.mesh = {
+            instanceId: 17,
+            stop: async () => {
+                meshStops++;
+                service.mesh.instanceId = 0;
+            }
+        };
+
+        service.fenceForShutdown();
+        await service.stop();
+        await service.stop();
+
+        assert.equal(cleaned, 1);
+        assert.equal(meshStops, 1);
+    });
+
+    it('fences late handshakes while a running mesh drains its existing cleanup', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseCleanup: (() => void) | undefined;
+        const cleanupBlocked = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
+        let fenced = 0;
+        let existingUnregisters = 0;
+        let disconnectedCallbacks = 0;
+        let cleanedClientId: string | undefined;
+        const existingStream = { id: 'existing-connection', clientId: 'existing-client', meta: { role: 'client' } };
+        const meshClientService = {
+            isRunning: true,
+            admissionFenced: false,
+            fenceAdmission: () => {
+                fenced++;
+                meshClientService.admissionFenced = true;
+            },
+            reserveClient: async () => !meshClientService.admissionFenced,
+            activateClient: async () => !meshClientService.admissionFenced,
+            unregisterClient: async (clientId: string) => {
+                assert.equal(clientId, existingStream.clientId);
+                existingUnregisters++;
+                return meshClientService.isRunning;
+            },
+            setRemoteTransport: () => {},
+            stop: async () => {}
+        };
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.meshLogger = { warn: () => {} };
+        server.logger = { error: () => {} };
+        server.publishedStreams = new Set([existingStream]);
+        server.streamDisconnectionHandlers = [];
+        server.lifecycleConnectedStreams = new WeakSet([existingStream]);
+        server.clientMetadata = new Map([[existingStream.clientId, { role: 'client' }]]);
+        server.clientRegistryChains = new Map([['existing-client', cleanupBlocked]]);
+        server.clientCallbackChains = new Map();
+        server.meshClientService = meshClientService;
+        server.disconnectAllMeshStreams = () => {
+            server.onStreamDisconnected(existingStream, 'disconnect');
+        };
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map();
+        server.streamsById = new Map([[existingStream.id, existingStream]]);
+        server.meshLinkController = { invalidateConnection: () => {}, close: async () => {} };
+        server.connectedCallbacks = [];
+        server.disconnectedCallbacks = [async () => disconnectedCallbacks++];
+        server.installMetaProxy = () => {};
+        server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
+        server.isCurrentStream = () => true;
+        server.cleanupStream = (stream: { clientId: string }) => {
+            cleanedClientId = stream.clientId;
+        };
+
+        const stop = server.meshStop();
+        await Promise.resolve();
+        const lateStream = { id: 'late-connection', clientId: 'late-client', lastPingAt: Date.now(), meta: { role: 'client' }, supersede: false };
+        const rejected = await server.postEstablishCheck(lateStream);
+
+        assert.equal(fenced, 1);
+        assert.equal(existingUnregisters, 1);
+        assert.equal(meshClientService.isRunning, true);
+        assert.equal(rejected, true);
+        assert.equal(cleanedClientId, lateStream.clientId);
+        assert.equal(await meshClientService.activateClient(), false);
+
+        releaseCleanup!();
+        await stop;
+        assert.equal(disconnectedCallbacks, 1);
+    });
+
+    it('returns from pending-start shutdown when mesh-link close never settles and keeps restart fenced', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseStart: (() => void) | undefined;
+        const startBlocked = new Promise<void>(resolve => {
+            releaseStart = resolve;
+        });
+        const closeBlocked = new Promise<void>(() => {});
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'client' } };
+        let disconnectedCallbacks = 0;
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.clientMetadata = new Map([[old.clientId, { role: 'client' }]]);
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map([[old.clientId, old]]);
+        server.streamsById = new Map([[old.id, old]]);
+        server.publishedStreams = new Set([old]);
+        server.streamDisconnectionHandlers = [];
+        server.logger = { error: () => {} };
+        server.meshLogger = { warn: () => {} };
+        server.lifecycleConnectedStreams = new Set([old]);
+        server.pendingStartDisconnects = new Map();
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet();
+        server.meshSupersedeReconcileMs = 1;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            instanceId: 1,
+            setRemoteTransport: () => {},
+            start: async () => startBlocked,
+            stop: async () => {},
+            fenceForShutdown: () => {},
+            unregisterClient: async () => false,
+            clientRegistry: { getClient: async () => undefined }
+        };
+        server.meshLinkController = { close: () => closeBlocked, invalidateConnection: () => {} };
+        server.resolveMeshLinkConfig = () => undefined;
+        server.connectedCallbacks = [];
+        server.disconnectedCallbacks = [async () => disconnectedCallbacks++];
+        server.isCurrentStream = () => true;
+        server.disconnectAllMeshStreams = () => server.onStreamDisconnected(old, 'disconnect');
+
+        const start = server.meshStart();
+        await Promise.resolve();
+        await server.meshStop();
+        assert.equal(server.meshLinkController, undefined);
+
+        releaseStart!();
+        await assert.rejects(start, /startup was cancelled/);
+        await waitFor(() => disconnectedCallbacks === 1);
+        assert.equal(disconnectedCallbacks, 1);
+        const queuedStart = server.meshStart();
+        let queuedSettled = false;
+        void queuedStart.then(
+            () => {
+                queuedSettled = true;
+            },
+            () => {
+                queuedSettled = true;
+            }
+        );
+        await Promise.resolve();
+        assert.equal(queuedSettled, false);
+        assert.equal(server.startupState, 'draining');
+    });
+
+    it('does not let a never-settling controller close delay normal membership cleanup or restart', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        const closeBlocked = new Promise<void>(() => {});
+        let stops = 0;
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.clientMetadata = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            fenceAdmission: () => {},
+            setRemoteTransport: () => {},
+            stop: async () => {
+                stops++;
+            },
+            prepareStart: () => {}
+        };
+        server.disconnectAllMeshStreams = () => {};
+        server.meshLinkController = { close: () => closeBlocked };
+
+        await server.meshStop();
+        assert.equal(stops, 1);
+        assert.equal(server.startupState, 'draining');
+        const restart = server.meshStart();
+        let restartSettled = false;
+        void restart.then(
+            () => (restartSettled = true),
+            () => (restartSettled = true)
+        );
+        await Promise.resolve();
+        assert.equal(restartSettled, false);
+    });
+
+    it('does not let a never-settling application callback delay normal membership cleanup', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let stops = 0;
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.clientMetadata = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map([['client-1', new Promise<void>(() => {})]]);
+        server.meshClientService = {
+            fenceAdmission: () => {},
+            setRemoteTransport: () => {},
+            stop: async () => stops++
+        };
+        server.disconnectAllMeshStreams = () => {};
+
+        const stopped = await Promise.race([
+            server.meshStop().then(() => true),
+            new Promise<boolean>(resolve => setTimeout(() => resolve(false), 50))
+        ]);
+
+        assert.equal(stopped, true);
+        assert.equal(stops, 1);
+    });
+
+    it('fails closed after a detached controller close rejects with an empty value', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            fenceAdmission: () => {},
+            setRemoteTransport: () => {},
+            stop: async () => {},
+            prepareStart: () => {}
+        };
+        server.disconnectAllMeshStreams = () => {};
+        server.meshLinkController = { close: () => Promise.reject(undefined) };
+
+        await server.meshStop();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(server.startupState, 'failed');
+        await assert.rejects(server.meshStart(), error => error instanceof Error && error.message === 'undefined');
+    });
+
+    it('fails closed after ordinary mesh membership cleanup rejects', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            fenceAdmission: () => {},
+            setRemoteTransport: () => {},
+            stop: async () => {
+                throw new Error('registry cleanup failed');
+            },
+            prepareStart: () => {}
+        };
+        server.disconnectAllMeshStreams = () => {};
+        server.meshLinkController = { close: async () => {} };
+
+        await assert.rejects(server.meshStop(), /registry cleanup failed/);
+        assert.equal(server.startupState, 'failed');
+        await assert.rejects(server.meshStart(), /registry cleanup failed/);
+    });
+
+    it('normalizes empty ordinary cleanup rejections into durable failures', async () => {
+        for (const rejection of [undefined, null]) {
+            const server = Object.create(MeshSrpcServer.prototype) as any;
+            server.meshRunning = true;
+            server.meshStopping = false;
+            server.meshClosed = false;
+            server.meshStartGeneration = 0;
+            server.meshLogger = { warn: () => {} };
+            server.clientMetadata = new Map();
+            server.clientRegistryChains = new Map();
+            server.clientCallbackChains = new Map();
+            server.meshClientService = {
+                fenceAdmission: () => {},
+                setRemoteTransport: () => {},
+                stop: async () => Promise.reject(rejection),
+                prepareStart: () => {}
+            };
+            server.disconnectAllMeshStreams = () => {};
+
+            await assert.rejects(server.meshStop(), error => error instanceof Error && error.message === String(rejection));
+            assert.equal(server.startupState, 'failed');
+            await assert.rejects(server.meshStart(), error => error === server.meshCleanupFailure);
+        }
+    });
+
+    it('attempts normal membership cleanup after synchronous mesh-link release failure', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let stops = 0;
+        server.meshRunning = true;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            fenceAdmission: () => {},
+            stop: async () => stops++
+        };
+        server.disconnectAllMeshStreams = () => {};
+        server.releaseMeshLinkResources = async () => {
+            throw new Error('route release failed');
+        };
+
+        await assert.rejects(server.meshStop(), /route release failed/);
+        assert.equal(stops, 1);
+        assert.equal(server.startupState, 'failed');
+    });
+
+    it('returns from shutdown while mesh startup is pending and rolls it back once it settles', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseStart: (() => void) | undefined;
+        const startBlocked = new Promise<void>(resolve => {
+            releaseStart = resolve;
+        });
+        let stops = 0;
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.clientMetadata = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            instanceId: 1,
+            setRemoteTransport: () => {},
+            start: async () => startBlocked,
+            stop: async () => {
+                stops++;
+            }
+        };
+        server.resolveMeshLinkConfig = () => undefined;
+
+        const start = server.meshStart();
+        await Promise.resolve();
+        await server.meshStop();
+        assert.equal(stops, 0, 'shutdown must not wait for or stop through the blocked startup lifecycle');
+
+        releaseStart!();
+        await assert.rejects(start, /startup was cancelled/);
+        await server.meshPendingStartCleanup;
+        assert.equal(stops, 1);
+        assert.equal(server.meshRunning, false);
+    });
+
+    it('installs cancelled-start rollback despite a pending-stop route-release failure', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        let releaseStart!: () => void;
+        const startBlocked = new Promise<void>(resolve => {
+            releaseStart = resolve;
+        });
+        let starts = 0;
+        let rollbacks = 0;
+        let releases = 0;
+        server.meshRunning = false;
+        server.meshStopping = false;
+        server.meshClosed = false;
+        server.meshStartGeneration = 0;
+        server.meshLogger = { warn: () => {} };
+        server.clientMetadata = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.meshClientService = {
+            prepareStart: () => {},
+            fenceForShutdown: () => {}
+        };
+        server.startMesh = async (generation: number) => {
+            starts++;
+            if (starts === 1) {
+                await startBlocked;
+                server.assertMeshStartCurrent(generation);
+            }
+        };
+        server.rollbackMeshStart = async () => {
+            rollbacks++;
+        };
+        server.disconnectAllMeshStreams = () => {};
+        server.releaseMeshLinkResources = async () => {
+            releases++;
+            if (releases === 1) throw new Error('route release failed');
+        };
+
+        const start = server.meshStart();
+        await Promise.resolve();
+        await assert.rejects(server.meshStop(), /route release failed/);
+
+        releaseStart();
+        await assert.rejects(start, /startup was cancelled/);
+        await server.meshPendingStartCleanup;
+        assert.equal(rollbacks, 2);
+
+        await server.meshStart();
+        assert.equal(starts, 2);
+        assert.equal(server.meshCleanupFailure, undefined);
+    });
+
     it('rejects unsafe public invocation and mesh-link request timers eagerly', async () => {
         const server = Object.create(MeshSrpcServer.prototype) as any;
         for (const timeout of [0, Number.NaN, Number.POSITIVE_INFINITY, 1.5, 0x80000000]) {
@@ -154,13 +856,77 @@ describe('MeshSrpcLinkController', () => {
         const server = Object.create(MeshSrpcServer.prototype) as any;
         server.streamsById = new Map([[stream.id, stream]]);
         server.streamsByClientId = new Map([[stream.clientId, stream]]);
+        server.pendingStartDisconnects = new Map();
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.rollbackGatedDisconnects = new WeakSet();
         server.meshLogger = { info: () => {} };
         server.cleanupStream = (_stream: unknown, cause: string) => {
             cleanupCause = cause;
         };
 
-        assert.equal(await server.handleClientSuperseded(stream.clientId, stream.id, 'superseded by another node'), true);
+        assert.equal(await server.handleClientSuperseded(stream.clientId, stream.id, 'supersede'), true);
         assert.equal(cleanupCause, 'supersede');
+    });
+
+    it('reconciles live takeover lifecycle callbacks: committed replacement suppresses, abort emits once, and ordinary exact disconnect is immediate', async () => {
+        const run = async (reason: 'supersede' | 'disconnect', committed: boolean, queueConnected = false) => {
+            const stream = { id: 'generation-old', clientId: 'client-1', meta: { role: 'old' } };
+            let callbacks = 0;
+            const callbackOrder: string[] = [];
+            const server = Object.create(MeshSrpcServer.prototype) as any;
+            server.meshLogger = { info: () => {}, warn: () => {} };
+            server.logger = { error: () => {} };
+            server.publishedStreams = new Set([stream]);
+            server.streamDisconnectionHandlers = [];
+            server.lifecycleConnectedStreams = new Set([stream]);
+            server.pendingStartDisconnects = new Map();
+            server.pendingStartDisconnectFenceDeadlines = new Map();
+            server.pendingStartDisconnectCallbackQueued = new WeakSet();
+            server.rollbackGatedDisconnects = new WeakSet();
+            server.meshSupersedeReconcileMs = 1;
+            server.meshSupersedeReconcileRetryMs = 1;
+            server.clientRegistryChains = new Map();
+            server.clientCallbackChains = new Map();
+            server.clientMetadata = new Map([[stream.clientId, stream.meta]]);
+            server.streamsById = new Map([[stream.id, stream]]);
+            server.streamsByClientId = new Map([[stream.clientId, stream]]);
+            server.pendingStreamsByClientId = new Map();
+            server.connectedCallbacks = [];
+            server.disconnectedCallbacks = [
+                async () => {
+                    callbacks++;
+                    callbackOrder.push('disconnected');
+                }
+            ];
+            server.meshLinkController = { invalidateConnection: () => {} };
+            server.meshClientService = {
+                instanceId: 1,
+                unregisterClient: async () => true,
+                clientRegistry: {
+                    getClient: async () => (committed ? { clientId: stream.clientId, nodeId: 2, connectionId: 'replacement' } : undefined)
+                }
+            };
+            server.cleanupStream = (target: any, cause: any) => server.onStreamDisconnected(target, cause);
+
+            await server.handleClientSuperseded(stream.clientId, stream.id, reason);
+            if (queueConnected) {
+                void server.enqueueClientCallback(stream.clientId, async () => {
+                    callbackOrder.push('connected');
+                });
+            }
+            await Promise.all([...server.clientRegistryChains.values()]);
+            await new Promise(resolve => setTimeout(resolve, 5));
+            await Promise.all([...server.clientCallbackChains.values()]);
+            return { callbacks, callbackOrder, server };
+        };
+
+        assert.equal((await run('supersede', true)).callbacks, 0);
+        assert.equal((await run('supersede', false)).callbacks, 1);
+        const ordinary = await run('disconnect', false);
+        assert.equal(ordinary.callbacks, 1);
+        assert.equal(ordinary.server.pendingStartDisconnectFenceDeadlines.size, 0);
+        const ordered = await run('supersede', false, true);
+        assert.deepEqual(ordered.callbackOrder, ['disconnected', 'connected']);
     });
 
     it('uses the supersede fence rather than an ordinary disconnect for remote ownership handoffs', async () => {
@@ -207,30 +973,194 @@ describe('MeshSrpcLinkController', () => {
         }
     });
 
-    it('releases the mesh route and transport when a lease failure marks the server stopped', async () => {
+    it('routes production controller fences through deferred generations after stream removal', async () => {
+        const removed = { id: 'generation-removed', clientId: 'client-1' };
+        const calls: Array<{ clientId: string; connectionId: string; reason: string | undefined }> = [];
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshKey = 'server-controller-fence';
+        server.meshLinkRequestTimeoutMs = 1_000;
+        server.meshClientService = { mesh: {}, clientRegistry: {}, instanceId: 1 };
+        server.streamsByClientId = new Map();
+        server.streamsById = new Map();
+        server.pendingStartDisconnects = new Map([[removed, { clientId: removed.clientId, connectionId: removed.id, nodeId: 1, metadata: {} }]]);
+        server.handleClientSuperseded = async (clientId: string, connectionId: string, reason: string | undefined) => {
+            calls.push({ clientId, connectionId, reason });
+            return true;
+        };
+
+        const controller = server.createMeshLinkController({ onPeerClosed: () => () => {} } as any);
+        const options = (controller as any).options;
+        try {
+            assert.equal(options.hasLocalFenceConnection(removed.clientId, removed.id), true);
+            assert.equal(await options.fenceLocal(removed.clientId, removed.id, 'supersede'), true);
+            assert.deepEqual(calls, [{ clientId: removed.clientId, connectionId: removed.id, reason: 'supersede' }]);
+        } finally {
+            await controller.close();
+        }
+    });
+
+    it('cleans registry ownership before callbacks and releases the mesh route after lease failure', async () => {
         let controllerCloses = 0;
         let routeUnregistrations = 0;
         const remoteTransports: unknown[] = [];
+        const lifecycle: string[] = [];
+        let releaseCleanup!: () => void;
+        const cleanupBlocked = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
         const server = Object.create(MeshSrpcServer.prototype) as any;
         server.meshLogger = { warn: () => {} };
         server.meshRunning = true;
         server.streamsByClientId = new Map();
         server.pendingStreamsByClientId = new Map();
+        server.clientMetadata = new Map();
         server.meshLinkRuntime = {};
         server.meshLinkController = { close: async () => controllerCloses++ };
         server.unregisterMeshLinkRoute = () => routeUnregistrations++;
-        server.meshClientService = { setRemoteTransport: (transport: unknown) => remoteTransports.push(transport) };
+        server.meshClientService = {
+            cleanupRegistryOwnership: async () => {
+                await cleanupBlocked;
+                lifecycle.push('registry-cleanup');
+            },
+            setRemoteTransport: (transport: unknown) => remoteTransports.push(transport)
+        };
+        server.dispatchPendingStartDisconnects = async () => lifecycle.push('callbacks');
 
         const failure = new Error('lease lost');
-        await server.handleMeshLeaseLost(failure);
+        const cleanup = server.handleMeshLeaseLost(failure);
+        await new Promise<void>(resolve => setImmediate(resolve));
+
+        assert.deepEqual(lifecycle, []);
+        assert.equal(controllerCloses, 0);
+        assert.equal(routeUnregistrations, 0);
+
+        releaseCleanup();
+        await cleanup;
 
         assert.equal(server.meshRunning, false);
         assert.strictEqual(server.meshLeaseFailure, failure);
+        assert.deepEqual(lifecycle, ['registry-cleanup', 'callbacks']);
         assert.equal(controllerCloses, 1);
         assert.deepEqual(remoteTransports, [undefined]);
         assert.equal(routeUnregistrations, 1);
         assert.equal(server.meshLinkController, undefined);
         assert.equal(server.meshLinkRuntime, undefined);
+    });
+
+    it('preinstalls the lease cleanup join barrier before synchronous teardown can reenter meshStop', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseCleanupJoin'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-cleanup-join',
+            meshKey: 'lease-cleanup-join',
+            autoLifecycle: false
+        });
+        let releaseCleanup!: () => void;
+        const cleanupBlocked = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
+        let stopped = false;
+        let reentrantStop: Promise<void> | undefined;
+        (server as any).handleMeshLeaseLost = () => {
+            reentrantStop = server.meshStop().then(() => {
+                stopped = true;
+            });
+            return cleanupBlocked;
+        };
+        const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+        const leaseCleanup = leaseCallback(new Error('lease lost'));
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(stopped, false);
+        assert.ok(reentrantStop);
+
+        releaseCleanup();
+        await Promise.all([leaseCleanup, reentrantStop]);
+        assert.equal(stopped, true);
+        server.close();
+    });
+
+    it('retains failed lease cleanup for explicit meshStop retries', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseCleanupRetry'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-cleanup-retry',
+            meshKey: 'lease-cleanup-retry',
+            autoLifecycle: false
+        });
+        // Keep the test deterministic: production schedules the same retry on
+        // an unref timer, while meshStop always retries immediately.
+        (server as any).meshClosed = true;
+        let attempts = 0;
+        (server as any).handleMeshLeaseLost = async () => {
+            attempts++;
+            if (attempts <= 2) throw new Error(`cleanup unavailable ${attempts}`);
+        };
+        const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+
+        await assert.rejects(leaseCallback(new Error('lease lost')), /cleanup unavailable 1/);
+        assert.equal((server as any).meshLeaseCleanupRequired, true);
+        await assert.rejects(server.meshStop(), /cleanup unavailable 2/);
+        assert.equal((server as any).meshLeaseCleanupRequired, true);
+        await server.meshStop();
+
+        assert.equal(attempts, 3);
+        assert.equal((server as any).meshLeaseCleanupRequired, false);
+        server.close();
+    });
+
+    it('automatically retries lease cleanup without overlapping or escaping a concurrent meshStop join', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseCleanupAutomaticRetry'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-cleanup-automatic-retry',
+            meshKey: 'lease-cleanup-automatic-retry',
+            autoLifecycle: false
+        });
+        (server as any).meshLeaseCleanupRetryMs = 20;
+        let attempts = 0;
+        let activeAttempts = 0;
+        let maxActiveAttempts = 0;
+        let releaseRetry!: () => void;
+        const retryBlocked = new Promise<void>(resolve => {
+            releaseRetry = resolve;
+        });
+        (server as any).handleMeshLeaseLost = async () => {
+            attempts++;
+            activeAttempts++;
+            maxActiveAttempts = Math.max(maxActiveAttempts, activeAttempts);
+            try {
+                if (attempts === 1) throw new Error('initial cleanup unavailable');
+                await retryBlocked;
+            } finally {
+                activeAttempts--;
+            }
+        };
+        const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+
+        await assert.rejects(leaseCallback(new Error('lease lost')), /initial cleanup unavailable/);
+        const retryTimer = (server as any).meshLeaseCleanupRetryTimer as ReturnType<typeof setTimeout>;
+        assert.ok(retryTimer);
+        assert.equal(retryTimer.hasRef(), false);
+        await waitFor(() => attempts === 2);
+
+        let stopped = false;
+        const stop = server.meshStop().then(() => {
+            stopped = true;
+        });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(stopped, false);
+        assert.equal(attempts, 2);
+        assert.equal(maxActiveAttempts, 1);
+
+        releaseRetry();
+        await stop;
+        assert.equal(stopped, true);
+        assert.equal((server as any).meshLeaseCleanupRequired, false);
+        assert.equal((server as any).meshLeaseCleanupRetryTimer, undefined);
+        server.close();
     });
 
     it('does not emit an offline lifecycle event after a remote ownership fence', async () => {
@@ -453,6 +1383,404 @@ describe('MeshSrpcLinkController', () => {
         assert.equal(callbacks, 1);
     });
 
+    it('defers a cancelled-start disconnect callback until ownership cleanup completes', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'old' } };
+        let callbacks = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.publishedStreams = new Set([old]);
+        server.streamDisconnectionHandlers = [];
+        server.logger = { error: () => {} };
+        server.meshLogger = { warn: () => {} };
+        server.lifecycleConnectedStreams = new Set([old]);
+        server.pendingStartDisconnects = new Map();
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet();
+        server.meshSupersedeReconcileMs = 1;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map([[old.clientId, old]]);
+        server.streamsById = new Map([[old.id, old]]);
+        server.clientMetadata = new Map([[old.clientId, { role: 'old' }]]);
+        server.connectedCallbacks = [];
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.meshLinkController = { invalidateConnection: () => {} };
+        server.meshClientService = {
+            instanceId: 1,
+            unregisterClient: async () => false,
+            clientRegistry: { getClient: async () => undefined }
+        };
+        server.isCurrentStream = () => true;
+
+        server.capturePendingStartDisconnects();
+        server.streamsByClientId.clear();
+        server.onStreamDisconnected(old, 'disconnect');
+        await Promise.all([...server.clientRegistryChains.values()]);
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.equal(callbacks, 0);
+        assert.equal(server.pendingStartDisconnects.size, 1);
+
+        await server.dispatchPendingStartDisconnects();
+        await Promise.all([...server.clientCallbackChains.values()]);
+        assert.equal(callbacks, 1);
+        assert.equal(server.pendingStartDisconnects.size, 0);
+
+        await server.dispatchPendingStartDisconnects();
+        assert.equal(callbacks, 1);
+    });
+
+    it('retains a deferred disconnect snapshot through a rejected local replacement', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'old' } };
+        const replacement = { id: 'connection-replacement', clientId: 'client-1', meta: { role: 'replacement' } };
+        let callbacks = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.publishedStreams = new Set([old]);
+        server.streamDisconnectionHandlers = [];
+        server.logger = { error: () => {} };
+        server.meshLogger = { warn: () => {} };
+        server.lifecycleConnectedStreams = new Set([old]);
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: { role: 'old' } }]]);
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map([[old.clientId, replacement]]);
+        server.streamsById = new Map([
+            [old.id, old],
+            [replacement.id, replacement]
+        ]);
+        server.clientMetadata = new Map([[old.clientId, { role: 'old' }]]);
+        server.connectedCallbacks = [];
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.meshLinkController = { invalidateConnection: () => {} };
+        server.meshClientService = {
+            unregisterClient: async () => false,
+            clientRegistry: { getClient: async () => undefined }
+        };
+
+        server.onStreamDisconnected(old, 'disconnect');
+        await Promise.all([...server.clientRegistryChains.values()]);
+        assert.equal(server.pendingStartDisconnects.size, 1);
+
+        server.streamsByClientId.clear();
+        await server.dispatchPendingStartDisconnects();
+        assert.equal(callbacks, 1);
+    });
+
+    it('suppresses a deferred disconnect when a remote exact fence commits before reconciliation', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'old' } };
+        let callbacks = 0;
+        let committed = false;
+        let lookups = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLogger = { info: () => {}, warn: () => {} };
+        server.meshSupersedeReconcileMs = 50;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: { role: 'old' } }]]);
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet();
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.streamsById = new Map();
+        server.meshClientService = {
+            clientRegistry: {
+                getClient: async () => {
+                    lookups++;
+                    return committed ? { clientId: old.clientId, nodeId: 2, connectionId: 'remote-connection' } : undefined;
+                }
+            }
+        };
+
+        assert.equal(await server.handleClientSuperseded(old.clientId, old.id, 'supersede'), true);
+        await server.dispatchPendingStartDisconnects();
+        await waitFor(() => lookups > 0);
+        committed = true;
+        await Promise.all([...server.clientCallbackChains.values()]);
+        assert.equal(callbacks, 0);
+        assert.equal(server.pendingStartDisconnects.size, 0);
+    });
+
+    it('suppresses rollback offline when a delayed fence commits after physical stream removal', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1' };
+        let committed = false;
+        let callbacks = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLogger = { info: () => {}, warn: () => {} };
+        server.meshSupersedeReconcileMs = 50;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: {} }]]);
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet([old]);
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.streamsById = new Map();
+        server.meshClientService = {
+            clientRegistry: {
+                getClient: async () => (committed ? { clientId: old.clientId, nodeId: 2, connectionId: 'remote-connection' } : undefined)
+            }
+        };
+
+        await server.dispatchPendingStartDisconnects();
+        assert.equal(server.pendingStartDisconnects.size, 0);
+        assert.equal(await server.handleClientSuperseded(old.clientId, old.id, 'supersede'), true);
+        committed = true;
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.equal(callbacks, 0);
+    });
+
+    it('emits the deferred offline callback when a remote fence claim aborts', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'old' } };
+        let callbacks = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLogger = { info: () => {}, warn: () => {} };
+        server.meshSupersedeReconcileMs = 1;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: { role: 'old' } }]]);
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet();
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.streamsById = new Map();
+        server.meshClientService = { clientRegistry: { getClient: async () => undefined } };
+
+        assert.equal(await server.handleClientSuperseded(old.clientId, old.id, 'supersede'), true);
+        await server.dispatchPendingStartDisconnects();
+        await Promise.all([...server.clientCallbackChains.values()]);
+        assert.equal(callbacks, 1);
+    });
+
+    it('recovers from transient registry lookup failure inside the takeover reconciliation window', async () => {
+        let attempts = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.meshClientService = {
+            clientRegistry: {
+                getClient: async () => {
+                    attempts++;
+                    if (attempts === 1) throw new Error('transient registry failure');
+                    return { clientId: 'client-1', nodeId: 2, connectionId: 'replacement' };
+                }
+            }
+        };
+
+        assert.equal(
+            await server.shouldDispatchPendingStartDisconnect(
+                { clientId: 'client-1', connectionId: 'old', nodeId: 1, metadata: {} },
+                Date.now() + 50
+            ),
+            false
+        );
+        assert.equal(attempts, 2);
+    });
+
+    it('keeps normal supersede reconciliation scoped away from unrelated rollback-gated snapshots', async () => {
+        const normal = { id: 'connection-normal', clientId: 'client-normal' };
+        const rollback = { id: 'connection-rollback', clientId: 'client-rollback' };
+        const callbacks: string[] = [];
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map([
+            [normal, { clientId: normal.clientId, connectionId: normal.id, nodeId: 1, metadata: { role: 'normal' } }],
+            [rollback, { clientId: rollback.clientId, connectionId: rollback.id, nodeId: 1, metadata: { role: 'rollback' } }]
+        ]);
+        server.pendingStartDisconnectFenceDeadlines = new Map([[normal, Date.now() + 1]]);
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet([rollback]);
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async (clientId: string) => callbacks.push(clientId)];
+        server.meshLogger = { warn: () => {} };
+        server.meshClientService = { clientRegistry: { getClient: async () => undefined } };
+
+        await server.dispatchPendingStartDisconnects(normal);
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.deepEqual(callbacks, [normal.clientId]);
+        assert.equal(server.pendingStartDisconnects.has(normal), false);
+        assert.equal(server.pendingStartDisconnects.has(rollback), true);
+    });
+
+    it('bounds rollback reconciliation reads across many disconnected clients', async () => {
+        const clientCount = 250;
+        const entries: Array<[object, { clientId: string; connectionId: string; nodeId: number; metadata: object }]> = [];
+        const rollbackStreams: object[] = [];
+        for (let index = 0; index < clientCount; index++) {
+            const stream = { id: `connection-${index}`, clientId: `client-${index}` };
+            rollbackStreams.push(stream);
+            entries.push([stream, { clientId: stream.clientId, connectionId: stream.id, nodeId: 1, metadata: {} }]);
+        }
+        let registryReads = 0;
+        let callbacks = 0;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshSupersedeReconcileMs = 15;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map(entries);
+        server.pendingStartDisconnectFenceDeadlines = new Map();
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet(rollbackStreams);
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async () => callbacks++];
+        server.meshLogger = { warn: () => {} };
+        server.meshClientService = {
+            clientRegistry: {
+                getClient: async () => {
+                    registryReads++;
+                    return undefined;
+                }
+            }
+        };
+
+        await server.dispatchPendingStartDisconnects();
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.equal(callbacks, clientCount);
+        // One post-cleanup observation plus one claim-deadline observation per
+        // client. The previous 1ms fixed polling loop performs thousands here
+        // and scales that churn linearly into an outage.
+        assert.ok(registryReads <= clientCount * 2, `expected at most ${clientCount * 2} registry reads, got ${registryReads}`);
+    });
+
+    it('requires rollback-gated registry reconciliation before releasing its restart barrier', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1' };
+        for (const current of ['lookup-error', 'exact-old'] as const) {
+            const server = Object.create(MeshSrpcServer.prototype) as any;
+            server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: {} }]]);
+            server.pendingStartDisconnectFenceDeadlines = new Map([[old, Date.now() + 50]]);
+            server.pendingStartDisconnectCallbackQueued = new WeakSet();
+            server.rollbackGatedDisconnects = new WeakSet([old]);
+            server.clientCallbackChains = new Map();
+            server.disconnectedCallbacks = [];
+            server.meshClientService = {
+                clientRegistry: {
+                    getClient: async () => {
+                        if (current === 'lookup-error') throw new Error('registry unavailable');
+                        return { clientId: old.clientId, nodeId: 1, connectionId: old.id };
+                    }
+                }
+            };
+
+            await assert.rejects(
+                server.dispatchPendingStartDisconnects(),
+                current === 'lookup-error' ? /registry unavailable/ : /exact old generation is still registered/
+            );
+            assert.equal(server.pendingStartDisconnects.has(old), true);
+            assert.equal(server.clientCallbackChains.size, 0);
+        }
+
+        const replaced = Object.create(MeshSrpcServer.prototype) as any;
+        replaced.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: {} }]]);
+        replaced.pendingStartDisconnectFenceDeadlines = new Map([[old, Date.now() + 50]]);
+        replaced.pendingStartDisconnectCallbackQueued = new WeakSet();
+        replaced.rollbackGatedDisconnects = new WeakSet([old]);
+        replaced.clientCallbackChains = new Map();
+        replaced.disconnectedCallbacks = [];
+        replaced.meshClientService = {
+            clientRegistry: { getClient: async () => ({ clientId: old.clientId, nodeId: 2, connectionId: 'replacement' }) }
+        };
+        await replaced.dispatchPendingStartDisconnects();
+        assert.equal(replaced.pendingStartDisconnects.size, 0);
+        assert.equal(replaced.pendingStartDisconnectFenceDeadlines.size, 0);
+    });
+
+    it('fences delivery and performs explicit cleanup when deferred reconciliation fails', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1' };
+        const other = { id: 'connection-other', clientId: 'client-2', meta: { role: 'other' } };
+        let admissionFences = 0;
+        let deliveryDisconnects = 0;
+        let linkReleases = 0;
+        let serviceStops = 0;
+        let otherDisconnects = 0;
+        let releaseServiceStop!: () => void;
+        const serviceStopBlocked = new Promise<void>(resolve => {
+            releaseServiceStop = resolve;
+        });
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshRunning = true;
+        server.meshClosed = false;
+        server.meshSupersedeReconcileMs = 1;
+        server.meshSupersedeReconcileRetryMs = 1;
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: {} }]]);
+        server.pendingStartDisconnectFenceDeadlines = new Map([[old, Date.now()]]);
+        server.pendingStartDisconnectCallbackQueued = new WeakSet();
+        server.rollbackGatedDisconnects = new WeakSet();
+        server.clientRegistryChains = new Map();
+        server.clientCallbackChains = new Map();
+        server.pendingStreamsByClientId = new Map();
+        server.streamsByClientId = new Map([[other.clientId, other]]);
+        server.streamsById = new Map([[other.id, other]]);
+        server.lifecycleConnectedStreams = new Set([other]);
+        server.clientMetadata = new Map([[other.clientId, other.meta]]);
+        server.isCurrentStream = (stream: unknown) => stream === other;
+        server.disconnectedCallbacks = [
+            async (clientId: string) => {
+                if (clientId === other.clientId) otherDisconnects++;
+            }
+        ];
+        server.meshLogger = { warn: () => {} };
+        server.meshClientService = {
+            instanceId: 1,
+            clientRegistry: {
+                getClient: async (clientId: string) =>
+                    clientId === old.clientId ? { clientId: old.clientId, nodeId: 1, connectionId: old.id } : undefined
+            },
+            fenceForShutdown: () => admissionFences++,
+            stop: async () => {
+                serviceStops++;
+                await serviceStopBlocked;
+            }
+        };
+        server.disconnectAllMeshStreams = () => deliveryDisconnects++;
+        server.releaseMeshLinkResources = async () => linkReleases++;
+
+        server.queuePendingStartDisconnectCallback(old, server.pendingStartDisconnects.get(old), Date.now());
+        await Promise.all([...server.clientCallbackChains.values()]);
+        await waitFor(() => serviceStops === 1);
+        const joinedStop = server.meshStop();
+        let joined = false;
+        void joinedStop.then(() => (joined = true));
+        await Promise.resolve();
+        assert.equal(joined, false);
+        releaseServiceStop();
+        await joinedStop;
+        await Promise.all([...server.clientCallbackChains.values()]);
+
+        assert.equal(admissionFences, 1);
+        assert.equal(deliveryDisconnects, 1);
+        assert.equal(linkReleases, 1);
+        assert.equal(otherDisconnects, 1);
+        assert.equal(server.meshRunning, false);
+        assert.match(server.meshCleanupFailure.message, /exact old generation is still registered/);
+        await assert.rejects(server.meshStart(), error => error === server.meshCleanupFailure);
+    });
+
+    it('does not let a deferred disconnect callback block global restart work while preserving same-client order', async () => {
+        const old = { id: 'connection-old', clientId: 'client-1', meta: { role: 'old' } };
+        let sameClientFollowup = false;
+        let otherClientWork = false;
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        server.meshLogger = { warn: () => {} };
+        server.pendingStartDisconnects = new Map([[old, { clientId: old.clientId, connectionId: old.id, nodeId: 1, metadata: { role: 'old' } }]]);
+        server.clientCallbackChains = new Map();
+        server.disconnectedCallbacks = [async () => new Promise<void>(() => {})];
+        server.meshClientService = { clientRegistry: { getClient: async () => undefined } };
+
+        await server.dispatchPendingStartDisconnects();
+        void server.enqueueClientCallback(old.clientId, async () => {
+            sameClientFollowup = true;
+        });
+        await server.enqueueClientCallback('other-client', async () => {
+            otherClientWork = true;
+        });
+
+        assert.equal(sameClientFollowup, false);
+        assert.equal(otherClientWork, true);
+    });
+
     it('routes public resolution through the mesh generation fence', async () => {
         const stale = { id: 'connection-1', clientId: 'client-1', meta: { role: 'stale' } };
         const current = { id: 'connection-2', clientId: 'client-1', meta: { role: 'current' } };
@@ -511,6 +1839,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshLogger = { warn: () => {} };
         server.extractMetadataFn = (clientStream: { meta: SrpcMeta }) => ({ ...clientStream.meta });
         server.meshClientService = {
+            isRunning: true,
             clientRegistry: {
                 updateMetadata: async () => {
                     attempts++;
@@ -583,6 +1912,7 @@ describe('MeshSrpcLinkController', () => {
         const failing = Object.create(MeshSrpcServer.prototype) as any;
         failing.meshRunning = false;
         failing.meshClosed = false;
+        failing.meshStartGeneration = 0;
         failing.meshMessageSecurityResolved = false;
         failing.meshLogger = { warn: () => {}, debug: () => {} };
         failing.clientMetadata = new Map([['backfill-client', { role: 'backfill' }]]);
@@ -599,6 +1929,7 @@ describe('MeshSrpcLinkController', () => {
         failing.streamsByClientId = new Map([[backfillStream.clientId, backfillStream]]);
         failing.clientRegistryChains = new Map();
         failing.clientCallbackChains = new Map();
+        failing.disconnectAllMeshStreams = () => {};
         failing.options = { httpServer };
         failing.resolveMeshLinkConfig = () => ({
             path,
@@ -633,8 +1964,9 @@ describe('MeshSrpcLinkController', () => {
 
         const start = failing.meshStart();
         const stop = failing.meshStop();
-        await assert.rejects(start, /startup failed/);
+        await assert.rejects(start, /startup was cancelled/);
         await stop;
+        await assert.rejects(failing.meshStart(), /startup failed/);
         await assert.rejects(failing.meshStart(), /backfill failed/);
         await failing.meshStart();
         assert.equal(backfillAttempts, 2);

@@ -246,7 +246,7 @@ await clientService.stop();
 | `broadcast(type, data, options?)`                                                       | Broadcast to all nodes in the mesh                                                           |
 | `onLeaseLost(handler)`                                                                  | Fence local delivery after the mesh lease is lost                                            |
 
-Before `start()`, registration and reservation are accepted as no-op calls, activation/update/unregister return `false`, and `invoke()` throws `ClientNotFoundError`. Callers that need discoverable state must await `start()` first. `start()`/`stop()` are serialized and `clientRegistry` remains the same facade throughout the service lifetime. Local invocation calls `clientInvokeFn` directly. With `MeshSrpcServer`, remote invocation, metadata updates, disconnects, and ownership fences go to the owning stream over its pinned, authenticated mesh WebSocket. A node that does not advertise a direct link fails closed; there is no Redis RPC fallback. A supplied timeout is an end-to-end deadline: routing time is deducted before delivery. Remote metadata updates run `clientUpdateMetaFn` on the owner and persist the accepted metadata in the registry. On lease loss, the service blocks new delivery before running its `onLeaseLost` handlers; `MeshSrpcServer` uses this to close local streams and mesh links.
+Before `start()`, registration and reservation are accepted as no-op calls, activation/update/unregister return `false`, and `invoke()` throws `ClientNotFoundError`. Callers that need discoverable state must await `start()` first. `start()`/`stop()` are serialized and `clientRegistry` remains the same facade throughout the service lifetime. Local invocation calls `clientInvokeFn` directly. With `MeshSrpcServer`, remote invocation, metadata updates, disconnects, and ownership fences go to the owning stream over its pinned, authenticated mesh WebSocket. A node that does not advertise a direct link fails closed; there is no Redis RPC fallback. A supplied timeout is an end-to-end deadline: routing time is deducted before delivery. Remote metadata updates run `clientUpdateMetaFn` on the owner and persist the accepted metadata in the registry. On lease loss, the service blocks new delivery before running every `onLeaseLost` handler, contains synchronous handler failures, and performs an exact-node registry sweep. That early sweep retains its cleanup obligation so a consumer such as `MeshSrpcServer` can repeat it after queued ownership mutations settle.
 
 ---
 
@@ -334,39 +334,45 @@ new MeshSrpcServer(options: ISrpcServerOptions & MeshSrpcServerOptions)
 
 `MeshSrpcServerOptions`:
 
-| Option            | Type                             | Description                                                                                           |
-| ----------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `meshKey`         | `string`                         | Mesh key                                                                                              |
-| `meshOptions`     | `MeshServiceOptions`             | Optional mesh tuning                                                                                  |
-| `registryBackend` | `MeshClientRegistryBackend`      | Optional custom backend                                                                               |
-| `registryOptions` | `MeshClientRedisRegistryOptions` | Optional limits for the built-in Redis backend                                                        |
-| `extractMetadata` | `(stream) => TRegistryMeta`      | Optional metadata extraction from SRPC streams                                                        |
-| `meshLink`        | `object`                         | Direct WebSocket configuration; `secret` (or `MESH_LINK_SECRET`) enables cross-node client operations |
+| Option            | Type                             | Description                                                                                                       |
+| ----------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `meshKey`         | `string`                         | Mesh key                                                                                                          |
+| `meshOptions`     | `MeshServiceOptions`             | Optional mesh tuning                                                                                              |
+| `autoLifecycle`   | `boolean`                        | Defaults to `true`; set `false` to call `meshStart()` / `meshStop()` through application-owned lifecycle handling |
+| `registryBackend` | `MeshClientRegistryBackend`      | Optional custom backend                                                                                           |
+| `registryOptions` | `MeshClientRedisRegistryOptions` | Optional limits for the built-in Redis backend                                                                    |
+| `extractMetadata` | `(stream) => TRegistryMeta`      | Optional metadata extraction from SRPC streams                                                                    |
+| `meshLink`        | `object`                         | Direct WebSocket configuration; `secret` (or `MESH_LINK_SECRET`) enables cross-node client operations             |
 
 #### Properties
 
-| Property         | Type                                | Description                   |
-| ---------------- | ----------------------------------- | ----------------------------- |
-| `meshInstanceId` | `number`                            | This node's mesh instance ID  |
-| `clientRegistry` | `MeshClientRegistry<TRegistryMeta>` | Direct access to the registry |
+| Property         | Type                                                           | Description                                                                           |
+| ---------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `meshInstanceId` | `number`                                                       | This node's mesh instance ID                                                          |
+| `clientRegistry` | `MeshClientRegistry<TRegistryMeta>`                            | Direct access to the registry                                                         |
+| `startupState`   | `'stopped' \| 'starting' \| 'ready' \| 'draining' \| 'failed'` | Current mesh lifecycle state, including detached cleanup or a durable cleanup failure |
 
 #### Methods
 
-| Method                                       | Description                                                                               |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `meshStart()`                                | Start mesh client tracking                                                                |
-| `meshStop()`                                 | Stop mesh client tracking (call before `close()`)                                         |
-| `updateClientMetadata(clientId, metadata)`   | Update metadata (returns false if client moved); also updates local cache                 |
-| `invoke(clientId, prefix, data, timeoutMs?)` | Type-safe invoke on any client across any node                                            |
-| `registerBroadcastHandler(type, handler)`    | Register a handler for a broadcast type (see [MeshService broadcasts](./mesh-service.md)) |
-| `broadcast(type, data, options?)`            | Broadcast to all nodes in the mesh                                                        |
-| `onClientConnected(handler)`                 | Fires on the node the client connected to                                                 |
-| `onClientDisconnected(handler)`              | Fires on the node the client disconnected from                                            |
-| `onNodeClientsOrphaned(handler)`             | Fires on one durable single-claimer when a dead node's client chunk is cleaned up         |
+| Method                                       | Description                                                                                                                                                                  |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `meshStart()`                                | Start mesh client tracking                                                                                                                                                   |
+| `meshStop()`                                 | Stop mesh client tracking (call before `close()`); detaches controller close work so membership cleanup is bounded, while cancelled startup still rolls back when it settles |
+| `updateClientMetadata(clientId, metadata)`   | Update metadata (returns false if client moved); also updates local cache                                                                                                    |
+| `invoke(clientId, prefix, data, timeoutMs?)` | Type-safe invoke on any client across any node                                                                                                                               |
+| `registerBroadcastHandler(type, handler)`    | Register a handler for a broadcast type (see [MeshService broadcasts](./mesh-service.md))                                                                                    |
+| `broadcast(type, data, options?)`            | Broadcast to all nodes in the mesh                                                                                                                                           |
+| `onClientConnected(handler)`                 | Fires on the node the client connected to                                                                                                                                    |
+| `onClientDisconnected(handler)`              | Fires on the node the client disconnected from                                                                                                                               |
+| `onNodeClientsOrphaned(handler)`             | Fires on one durable single-claimer when a dead node's client chunk is cleaned up                                                                                            |
 
 Plus all `SrpcServer` methods: `registerMessageHandler`, `registerConnectionHandler`, `registerDisconnectHandler`, `setClientAuthorizer`, etc.
 
 `MeshSrpcServer` reserves client ownership before SRPC activation, so pending connections never appear in active registry lookups. After activation, top-level assignments and deletions on `stream.meta` are batched in a microtask and synchronized to the registry. Nested mutations are not observable through the proxy; replace the top-level value or call `updateClientMetadata()`. Explicit metadata updates currently merge supplied keys into the live `stream.meta` object while replacing the registry metadata value, so callers that need deletion parity should delete top-level stream keys directly. Calls for a remote client route through the pinned, authenticated mesh WebSocket to the owning SRPC stream. Connected/disconnected callbacks are serialized per client. Exact disconnect unregisters are retained and retried while the lease is safe; absence or a different generation completes the obligation without deleting a reconnect. Offline callbacks run once only after that obligation is confirmed. Persistent ambiguity fences the service so leader cleanup can remove any ghost owner.
+
+Shutdown fences client admission immediately. Controller close is detached from normal and cancelled-start shutdowns so a stuck request cannot delay membership cleanup; `startupState` remains `draining` while that close or a cancelled-start rollback is still pending. A new `meshStart()` waits for the pending cleanup and then starts fresh. If membership, registry, rollback, or detached-close cleanup fails, `startupState` becomes `failed` and later starts fail closed with that error rather than risking overlapping ownership. Lease-loss cleanup drains queued registry mutations before its final exact-node sweep. A failed attempt retains the obligation and schedules an unref retry; `meshStop()` joins an active attempt or starts an immediate retry. Pending-start offline callbacks wait for successful ownership rollback, but do not wait for an unrelated detached controller close.
+
+An exact remote takeover fence defers its offline lifecycle transition through the bounded claim window: a committed replacement suppresses it, while an aborted takeover emits it. Active takeover reconciliation uses exponential backoff. Bulk lease-loss and rollback snapshots make one observation after cleanup and one at the claim deadline instead of polling Redis per client throughout the window. Lifecycle callbacks remain serialized per client, but reconciliation and application callback work do not block membership cleanup or unrelated global restart work.
 
 ## Resource limits and orphan delivery
 
