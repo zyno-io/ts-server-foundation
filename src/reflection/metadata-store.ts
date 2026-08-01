@@ -1,9 +1,17 @@
 import type { ClassMetadata, EntityIndexMetadata } from './model';
 
+export type GeneratedColumnStorage = 'virtual' | 'stored';
+
+export interface GeneratedColumnOptions {
+    expression: string;
+    storage: GeneratedColumnStorage;
+}
+
 export type EntityOptions = {
     collectionName?: string;
     indexes?: EntityIndexMetadata[];
     excludeMigration?: boolean;
+    generatedColumns?: Record<string, GeneratedColumnOptions>;
 };
 
 export type EntityClassDecorator = ClassDecorator & {

@@ -108,6 +108,16 @@ class MigrationDefaultUser extends BaseEntity {
     enabled = true;
 }
 
+@entity.name('migration_generated_users')
+@entity.index(['normalizedName'])
+class MigrationGeneratedUser extends BaseEntity {
+    id!: number & PrimaryKey & AutoIncrement;
+    name!: string;
+
+    @entity.generated('LOWER(`name`)')
+    normalizedName!: string;
+}
+
 @entity.name('migration_posts')
 class MigrationPost extends BaseEntity {
     id!: number & PrimaryKey & AutoIncrement;
@@ -743,6 +753,20 @@ describe('migration create database reader', () => {
 });
 
 describe('migration create comparison and DDL', () => {
+    it('generates indexed virtual columns from entity metadata', () => {
+        const db = new BaseDatabase(new FakeDriver('mysql'), [MigrationGeneratedUser]);
+        const schema = readEntitiesSchema(db).get('migration_generated_users')!;
+        const diff = compareSchemas(new Map([[schema.name, schema]]), new Map(), 'mysql');
+        const ddl = generateDDL(diff).join('\n');
+
+        assert.deepStrictEqual(schema.columns.find(column => column.name === 'normalizedName')?.generated, {
+            expression: 'LOWER(`name`)',
+            storage: 'virtual'
+        });
+        assert.match(ddl, /`normalizedName` varchar\(255\) GENERATED ALWAYS AS \(LOWER\(`name`\)\) VIRTUAL NOT NULL/);
+        assert.match(ddl, /CREATE INDEX `idx_migration_generated_users_normalizedName` ON `migration_generated_users` \(`normalizedName`\)/);
+    });
+
     it('detects added tables and generates create table DDL', () => {
         const db = new BaseDatabase(new FakeDriver('mysql'), [MigrationUser]);
         const diff = compareSchemas(readEntitiesSchema(db), new Map(), 'mysql');

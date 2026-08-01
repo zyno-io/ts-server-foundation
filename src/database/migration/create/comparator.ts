@@ -252,8 +252,9 @@ function compareColumn(entityColumn: ColumnSchema, dbColumn: ColumnSchema, diale
     const nullableChanged = entityColumn.nullable !== dbColumn.nullable;
     const defaultChanged = !defaultsMatch(entityColumn, dbColumn);
     const autoIncrementChanged = entityColumn.autoIncrement !== dbColumn.autoIncrement;
+    const generatedChanged = !generatedColumnsMatch(entityColumn, dbColumn);
 
-    if (!typeChanged && !nullableChanged && !defaultChanged && !autoIncrementChanged) return undefined;
+    if (!typeChanged && !nullableChanged && !defaultChanged && !autoIncrementChanged && !generatedChanged) return undefined;
 
     return {
         name: entityColumn.name,
@@ -262,8 +263,22 @@ function compareColumn(entityColumn: ColumnSchema, dbColumn: ColumnSchema, diale
         typeChanged,
         nullableChanged,
         defaultChanged,
-        autoIncrementChanged
+        autoIncrementChanged,
+        generatedChanged
     };
+}
+
+function generatedColumnsMatch(a: ColumnSchema, b: ColumnSchema): boolean {
+    if (!a.generated && !b.generated) return true;
+    if (!a.generated || !b.generated) return false;
+    return (
+        a.generated.storage === b.generated.storage &&
+        normalizeGeneratedExpression(a.generated.expression) === normalizeGeneratedExpression(b.generated.expression)
+    );
+}
+
+function normalizeGeneratedExpression(expression: string): string {
+    return expression.replace(/\s+/g, '').replace(/`/g, '');
 }
 
 function typesMatch(a: ColumnSchema, b: ColumnSchema, dialect: Dialect): boolean {

@@ -48,7 +48,7 @@ export async function readInboundForeignKeys(
 async function readMySQLTable(db: BaseDatabase, tableName: string): Promise<TableSchema | undefined> {
     const rows = await db.rawFind<Record<string, unknown>>(sql`
         SELECT COLUMN_NAME, ORDINAL_POSITION, COLUMN_DEFAULT, IS_NULLABLE,
-               DATA_TYPE, COLUMN_TYPE, CHARACTER_MAXIMUM_LENGTH,
+               DATA_TYPE, COLUMN_TYPE, CHARACTER_MAXIMUM_LENGTH, GENERATION_EXPRESSION,
                NUMERIC_PRECISION, NUMERIC_SCALE, EXTRA, COLUMN_KEY
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ${tableName}
@@ -77,6 +77,7 @@ async function readMySQLTable(db: BaseDatabase, tableName: string): Promise<Tabl
                     .includes('auto_increment'),
                 primaryKey: row.COLUMN_KEY === 'PRI',
                 defaultValue: normalizeDefault(row.COLUMN_DEFAULT, parsed.type),
+                generated: readMySQLGeneratedColumn(row),
                 enumValues: parsed.enumValues,
                 ordinalPosition: Number(row.ORDINAL_POSITION)
             };
@@ -86,6 +87,19 @@ async function readMySQLTable(db: BaseDatabase, tableName: string): Promise<Tabl
         primaryKeyColumns: primaryKeyColumns.length
             ? primaryKeyColumns
             : rows.filter(row => row.COLUMN_KEY === 'PRI').map(row => String(row.COLUMN_NAME))
+    };
+}
+
+function readMySQLGeneratedColumn(row: Record<string, unknown>): TableSchema['columns'][number]['generated'] {
+    const expression = String(row.GENERATION_EXPRESSION ?? '').trim();
+    if (!expression) return undefined;
+    return {
+        expression,
+        storage: String(row.EXTRA ?? '')
+            .toLowerCase()
+            .includes('stored generated')
+            ? 'stored'
+            : 'virtual'
     };
 }
 

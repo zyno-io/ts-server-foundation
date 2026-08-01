@@ -86,6 +86,15 @@ class ResetMigrationUser extends BaseEntity {
     name!: string & MaxLength<80>;
 }
 
+@entity.name('tsf_generated_reset_users')
+class ResetMigrationGeneratedUser extends BaseEntity {
+    id!: number & PrimaryKey & AutoIncrement;
+    name!: string;
+
+    @entity.generated('LOWER(`name`)')
+    normalizedName!: string;
+}
+
 describe('MigrationRunner', () => {
     it('runs unexecuted migrations in name order and records them', async () => {
         const driver = new FakeDriver('postgres');
@@ -289,6 +298,16 @@ describe('MigrationRunner', () => {
         const content = readFileSync(result.migrationPath, 'utf8');
         assert.match(content, /CREATE TABLE \\`tsf_reset_users\\`/);
         assert.match(content, /\\`name\\` varchar\(80\) NOT NULL/);
+    });
+
+    it('retains generated columns when it resets migrations', async () => {
+        const migrationsDir = tempDir();
+        const db = new BaseDatabase(new FakeDriver('mysql'), [ResetMigrationGeneratedUser]);
+
+        await resetMigrations(db, { migrationsDir });
+
+        const content = readFileSync(join(migrationsDir, '00000000_000000_base.ts'), 'utf8');
+        assert.match(content, /\\`normalizedName\\` varchar\(255\) GENERATED ALWAYS AS \(LOWER\(\\`name\\`\)\) VIRTUAL NOT NULL/);
     });
 
     it('creates a migrations directory during reset and skips base file creation without entities', async () => {

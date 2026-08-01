@@ -323,6 +323,7 @@ export class BaseDatabase {
             }
 
             const insertColumns = metadata.columns.filter(column => {
+                if (column.generated) return false;
                 if (column.primaryKey && column.autoIncrement && isAutoIncrementSentinel(pkValue)) return false;
                 return !(column.hasDefault && fields[column.propertyName] === undefined);
             });
@@ -353,7 +354,11 @@ export class BaseDatabase {
             assertPrimaryKeyValues(metadata, fields, 'update');
 
             const dirtyDetails = getDirtyDetails(entity);
-            const dirty = metadata.columns.filter(column => !column.primaryKey && Object.hasOwn(dirtyDetails, column.propertyName));
+            const generatedColumn = metadata.columns.find(column => column.generated && Object.hasOwn(dirtyDetails, column.propertyName));
+            if (generatedColumn) throw new Error(`Cannot update generated column ${metadata.classType.name}.${generatedColumn.propertyName}`);
+            const dirty = metadata.columns.filter(
+                column => !column.primaryKey && !column.generated && Object.hasOwn(dirtyDetails, column.propertyName)
+            );
             if (dirty.length) {
                 before = observed
                     ? await this.loadEntitySnapshotForUpdate(metadata, fields, session)

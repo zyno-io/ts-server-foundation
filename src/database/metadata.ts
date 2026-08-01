@@ -1,4 +1,5 @@
 import { ReflectionClass, ReflectionKind, Type, typeAnnotation } from '../reflection';
+import { classOptions, type GeneratedColumnOptions } from '../reflection/metadata-store';
 
 import type { ClassType } from '../types';
 
@@ -12,6 +13,7 @@ export interface ColumnMetadata {
     nullable: boolean;
     hasDefault: boolean;
     defaultValue?: unknown;
+    generated?: GeneratedColumnOptions;
     type: Type;
 }
 
@@ -38,6 +40,7 @@ export function getEntityMetadata<T extends BaseEntityLike>(classType: EntityCla
     const reflection = ReflectionClass.from(classType);
     const tableName = reflection.getCollectionName() || reflection.name || classType.name;
     const defaultValues = getDefaultValues(classType);
+    const generatedColumns = classOptions.get(classType)?.generatedColumns;
     const columns = reflection
         .getProperties()
         .filter(prop => prop.type.kind !== ReflectionKind.method && !prop.isBackReference() && !prop.isDatabaseSkipped('*'))
@@ -56,6 +59,7 @@ export function getEntityMetadata<T extends BaseEntityLike>(classType: EntityCla
                 nullable: optional || allowsNull,
                 hasDefault: hasTypeAnnotation(prop.getType(), 'tsf:hasDefault'),
                 defaultValue: defaultValues?.[propertyName],
+                generated: generatedColumns?.[propertyName],
                 type: prop.getType()
             };
         });

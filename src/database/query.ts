@@ -361,6 +361,13 @@ export class QueryBuilder<T extends object> {
     private renderPatchSet(patch: PatchRecord<T>): SqlQuery | undefined {
         const metadata = getEntityMetadata(this.Entity);
         const patchRecord = patch as Record<string, unknown>;
+        const generatedColumn = metadata.columns.find(
+            column =>
+                column.generated &&
+                (Object.hasOwn(patchRecord, column.propertyName) ||
+                    (isRecord(patchRecord.$inc) && Object.hasOwn(patchRecord.$inc, column.propertyName)))
+        );
+        if (generatedColumn) throw new Error(`Cannot update generated column ${metadata.classType.name}.${generatedColumn.propertyName}`);
         const patchColumns = metadata.columns.filter(column => Object.hasOwn(patchRecord, column.propertyName));
         const incPatch = isRecord(patchRecord.$inc) ? patchRecord.$inc : undefined;
         const incrementColumns = incPatch

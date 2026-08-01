@@ -47,9 +47,10 @@ export function readEntitiesSchema(db: BaseDatabase, options: ReadEntitiesSchema
                     nullable: column.nullable,
                     autoIncrement: column.autoIncrement,
                     primaryKey: column.primaryKey,
+                    generated: column.generated,
                     ordinalPosition: index + 1
                 };
-                applyDefaultInitializer(schema, defaultValue, db.driver.dialect);
+                if (!schema.generated) applyDefaultInitializer(schema, defaultValue, db.driver.dialect);
                 return schema;
             }),
             indexes: readEntityIndexes(metadata.tableName, reflection, columnNameForProperty, db.driver.dialect),

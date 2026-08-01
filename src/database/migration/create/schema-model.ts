@@ -4,6 +4,11 @@ export { Dialect };
 
 export const INTERNAL_TABLES = new Set(['_migrations', '_locks', '_jobs']);
 
+export interface GeneratedColumnSchema {
+    expression: string;
+    storage: 'virtual' | 'stored';
+}
+
 export interface ColumnSchema {
     name: string;
     type: string;
@@ -16,6 +21,7 @@ export interface ColumnSchema {
     defaultValue?: string | number | boolean | null;
     defaultExpression?: string;
     onUpdateExpression?: string;
+    generated?: GeneratedColumnSchema;
     enumValues?: string[];
     enumTypeName?: string;
     afterColumn?: string | null;
@@ -95,6 +101,7 @@ export interface ColumnModification {
     nullableChanged: boolean;
     defaultChanged: boolean;
     autoIncrementChanged: boolean;
+    generatedChanged: boolean;
 }
 
 export interface IndexModification {
