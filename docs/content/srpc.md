@@ -193,13 +193,15 @@ Client options:
 
 The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
 
-Duplicate `clientId` connections are rejected unless `connect({ supersede: true })` is used.
+Protocol-v2 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
 
 After the initial ping handshake, the client sends a ping every 55 seconds. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate ping-based liveness check.
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256. Raw clients must send `authv=2`, `_v=2`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters.
+Clients sign connection metadata with HMAC-SHA256. Raw clients normally send `authv=2`, `_v=2`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters.
+
+Servers require an explicit `_v` by default. Set `defaultUnspecifiedProtocolVersion: 1` to classify an unmarked legacy handshake as protocol v1, or `defaultUnspecifiedProtocolVersion: 2` to accept an unmarked handshake with v2 semantics. An explicit `_v=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
 
 By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
 

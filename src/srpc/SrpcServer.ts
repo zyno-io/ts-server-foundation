@@ -57,7 +57,7 @@ interface StreamInfo {
     clientId: string;
     appVersion: string;
     configureTs: number;
-    protocolVersion: 2;
+    protocolVersion: 1 | 2;
     features: ReadonlySet<string>;
     supersede: boolean;
     address: string;
@@ -152,8 +152,8 @@ export class SrpcServer<
         const { id: clientStreamId, cid: clientId, appv: appVersion } = query;
         const address = this.getRemoteAddress(info.req);
 
-        const protocolVersion = query._v === undefined && this.options.allowMissingProtocolVersion ? 2 : Number(query._v);
-        if (!clientStreamId || !clientId || !appVersion || protocolVersion !== 2) {
+        const protocolVersion = query._v === undefined ? this.options.defaultUnspecifiedProtocolVersion : Number(query._v);
+        if (!clientStreamId || !clientId || !appVersion || (protocolVersion !== 1 && protocolVersion !== 2)) {
             cb(false, 400, 'Missing required query parameters');
             return;
         }
@@ -202,7 +202,7 @@ export class SrpcServer<
                         clientId,
                         appVersion,
                         configureTs: Number(query.ts ?? 0),
-                        protocolVersion: 2,
+                        protocolVersion,
                         features: new Set(
                             normalizeFeatures((query._f ?? '').split(',').filter(feature => feature.length > 0))
                                 .split(',')
@@ -305,7 +305,7 @@ export class SrpcServer<
     private handleStreamEstablished(stream: SrpcStream<TMeta>): void {
         const conflictingStream = this.getCurrentStreamByClientId(stream.clientId);
         if (conflictingStream) {
-            if (!stream.supersede) {
+            if (stream.protocolVersion >= 2 && !stream.supersede) {
                 this.closeStreamWithError(stream, 'conflict', 'Client ID already connected');
                 return;
             }
@@ -1230,6 +1230,13 @@ function encodedJsonBytes(value: unknown): number {
 }
 
 function validateServerResourceOptions(options: ISrpcServerOptions<BaseMessage, BaseMessage>): void {
+    if (
+        options.defaultUnspecifiedProtocolVersion !== undefined &&
+        options.defaultUnspecifiedProtocolVersion !== 1 &&
+        options.defaultUnspecifiedProtocolVersion !== 2
+    ) {
+        throw new Error('sRPC server defaultUnspecifiedProtocolVersion must be 1 or 2');
+    }
     for (const [name, value] of [
         ['maxPendingClientRequests', options.maxPendingClientRequests],
         ['maxPendingClientRequestBytes', options.maxPendingClientRequestBytes],

@@ -81,8 +81,12 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     clientMessage: SrpcMessageFns<TClientOutput>;
     serverMessage: SrpcMessageFns<TServerOutput>;
     wsPath: string;
-    /** Temporarily accept clients that predate the mandatory `_v=2` handshake parameter. */
-    allowMissingProtocolVersion?: boolean;
+    /**
+     * Protocol version assigned to a handshake that omits `_v`. Leave unset to
+     * require an explicit transport version. Use `1` only where legacy
+     * same-client replacement semantics are intentional.
+     */
+    defaultUnspecifiedProtocolVersion?: 1 | 2;
     debug?: boolean;
     logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;
@@ -127,7 +131,7 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly clientId: string;
     readonly appVersion: string;
     readonly configureTs: number;
-    readonly protocolVersion: 2;
+    readonly protocolVersion: 1 | 2;
     /** Optional client capabilities negotiated during the WebSocket upgrade. */
     readonly features?: ReadonlySet<string>;
     readonly supersede: boolean;

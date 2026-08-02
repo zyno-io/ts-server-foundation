@@ -25,7 +25,7 @@ import {
     deferred,
     registerSrpcObserver
 } from '../src';
-import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcObservation } from '../src';
+import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
 
 const originalEnv = { ...process.env };
 const secret = 'srpc-test-secret';
@@ -106,6 +106,7 @@ describe('srpc', () => {
             assert.throws(() => new SrpcServer({ ...serverOptions, [name]: 0 }), new RegExp(name));
         }
         assert.throws(() => new SrpcServer({ ...serverOptions, lateReplyTombstoneTtlMs: 0x80000000 }), /lateReplyTombstoneTtlMs/);
+        assert.throws(() => new SrpcServer({ ...serverOptions, defaultUnspecifiedProtocolVersion: 3 as never }), /defaultUnspecifiedProtocolVersion/);
 
         const createClient = (clientOptions: SrpcClientOptions) =>
             new SrpcClient<ClientMessage, ServerMessage>(
@@ -2089,20 +2090,24 @@ describe('srpc', () => {
         await closedPromise;
     });
 
-    it('rejects non-v2 handshakes', async () => {
+    it('rejects an unspecified or unsupported protocol version by default', async () => {
         const harness = await createHarness();
         harness.server.registerMessageHandler('uEcho', (_stream, data) => ({ message: data.message }));
         try {
-            const url = new URL(createSignedRawWebSocketUrl(harness.port, 'non-v2-auth'));
-            url.searchParams.set('_v', '1');
-            await assertWebSocketRejected(url.toString(), 400);
+            const unspecified = new URL(createSignedRawWebSocketUrl(harness.port, 'unspecified-protocol'));
+            unspecified.searchParams.delete('_v');
+            await assertWebSocketRejected(unspecified.toString(), 400);
+
+            const unsupported = new URL(createSignedRawWebSocketUrl(harness.port, 'unsupported-protocol'));
+            unsupported.searchParams.set('_v', '3');
+            await assertWebSocketRejected(unsupported.toString(), 400);
         } finally {
             await harness.close();
         }
     });
 
-    it('optionally accepts legacy handshakes that omit the protocol version', async () => {
-        const harness = await createHarness({ allowMissingProtocolVersion: true });
+    it('uses the configured protocol version when a handshake omits _v', async () => {
+        const harness = await createHarness({ defaultUnspecifiedProtocolVersion: 1 });
         const connected = deferred<SrpcStream<SrpcMeta>>();
         harness.server.setClientAuthorizer(() => true);
         harness.server.registerConnectionHandler(stream => connected.resolve(stream));
@@ -2112,10 +2117,34 @@ describe('srpc', () => {
         try {
             await waitForWebSocketOpen(client);
             const stream = await connected.promise;
-            assert.equal(stream.protocolVersion, 2);
+            assert.equal(stream.protocolVersion, 1);
             await waitForCondition(() => stream.isActivated, 1_000, 'Legacy stream was not activated without a ping response');
         } finally {
             client.close();
+            await harness.close();
+        }
+    });
+
+    it('allows legacy protocol-v1 clients to replace a duplicate client ID', async () => {
+        const harness = await createHarness({ defaultUnspecifiedProtocolVersion: 1 });
+        const disconnected = deferred<SrpcDisconnectCause>();
+        harness.server.setClientAuthorizer(() => true);
+        harness.server.registerDisconnectHandler((_stream, cause) => disconnected.resolve(cause));
+        const legacyUrl = (id: string, version?: 1) =>
+            `ws://127.0.0.1:${harness.port}/srpc-test?id=${id}&cid=legacy-duplicate&appv=1${version === 1 ? '&_v=1' : ''}`;
+        const first = new WebSocket(legacyUrl(randomUUID()));
+        let second: WebSocket | undefined;
+
+        try {
+            await waitForWebSocketOpen(first);
+            await waitForCondition(() => harness.server.streamsByClientId.has('legacy-duplicate'), 1_000, 'First legacy stream was not activated');
+            second = new WebSocket(legacyUrl(randomUUID(), 1));
+            await waitForWebSocketOpen(second);
+            assert.equal(await disconnected.promise, 'supersede');
+            assert.equal(harness.server.streamsByClientId.get('legacy-duplicate')?.protocolVersion, 1);
+        } finally {
+            first.terminate();
+            second?.terminate();
             await harness.close();
         }
     });
