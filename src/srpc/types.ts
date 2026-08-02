@@ -35,6 +35,25 @@ export interface BaseMessage {
     };
 }
 
+const SrpcTraceIdPattern = /^[0-9a-f]{32}$/i;
+const SrpcSpanIdPattern = /^[0-9a-f]{16}$/i;
+
+/** Ensures untrusted envelope tracing data is safe to pass to OpenTelemetry. */
+export function isValidSrpcTrace(trace: BaseMessage['trace']): trace is NonNullable<BaseMessage['trace']> {
+    return (
+        trace != null &&
+        typeof trace.traceId === 'string' &&
+        SrpcTraceIdPattern.test(trace.traceId) &&
+        !/^0{32}$/i.test(trace.traceId) &&
+        typeof trace.spanId === 'string' &&
+        SrpcSpanIdPattern.test(trace.spanId) &&
+        !/^0{16}$/i.test(trace.spanId) &&
+        Number.isInteger(trace.traceFlags) &&
+        trace.traceFlags >= 0 &&
+        trace.traceFlags <= 0xff
+    );
+}
+
 export interface SrpcMessageFns<T> {
     encode(message: T, writer?: unknown): { finish(): Uint8Array } | Uint8Array;
     decode(input: Uint8Array, length?: number): T;
@@ -112,8 +131,6 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
      */
     defaultUnspecifiedProtocolVersion?: 1 | 2;
     logTraffic?: SrpcTrafficLogging;
-    debug?: boolean;
-    logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;

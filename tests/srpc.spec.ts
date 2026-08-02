@@ -7,11 +7,13 @@ import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { afterEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 
 import {
     BaseAppConfig,
     createApp,
     createLogger,
+    HttpBadRequestError,
     SrpcBackpressureError,
     SrpcByteStream,
     SrpcClient,
@@ -26,6 +28,7 @@ import {
     registerSrpcObserver
 } from '../src';
 import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
+import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
 
 const originalEnv = { ...process.env };
 const secret = 'srpc-test-secret';
@@ -144,7 +147,13 @@ describe('srpc', () => {
             debug() {}
         };
         const message = { requestId: 'request-id', uEchoRequest: { message: 'hello' } };
-        const stream = { id: 'stream-id', clientId: 'client-id' };
+        const stream = {
+            id: 'stream-id',
+            clientId: 'client-id',
+            clientStreamId: 'client-stream-id',
+            address: '127.0.0.1',
+            protocolVersion: 2
+        };
         const server = Object.create(SrpcServer.prototype) as any;
         server.logger = logger;
         server.options = { logTraffic: true };
@@ -1227,6 +1236,53 @@ describe('srpc', () => {
         }
     });
 
+    it('preserves HttpError status codes thrown by custom WebSocket authorizers', async () => {
+        const harness = await createHarness();
+        harness.server.setClientAuthorizer(() => {
+            throw new HttpBadRequestError('Invalid SRPC authorization metadata');
+        });
+
+        try {
+            await assertWebSocketRejected(createSignedRawWebSocketUrl(harness.port, 'http-error-authorizer'), 400);
+        } finally {
+            await harness.close();
+        }
+    });
+
+    it('propagates trace context through client and server SRPC invocations', async () => {
+        const exporter = new InMemorySpanExporter();
+        initTelemetry({ serviceName: 'srpc-trace-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        const harness = await createHarness();
+        harness.server.registerMessageHandler('uEcho', async (_stream, data) => ({ message: data.message }));
+        const client = harness.createClient('trace-client');
+        client.registerMessageHandler('dCompute', async data => ({ result: data.number * 2 }));
+
+        try {
+            await client.connect();
+            assert.deepEqual(await client.invoke('uEcho', { message: 'traced' }), { message: 'traced' });
+            const stream = harness.server.streamsByClientId.get('trace-client');
+            assert.ok(stream);
+            assert.deepEqual(await harness.server.invoke(stream, 'dCompute', { number: 21, operation: 'double' }), { result: 42 });
+
+            const spans = exporter.getFinishedSpans();
+            const clientInvocation = spans.find(span => span.name === 'srpc:invokeServer');
+            const serverHandler = spans.find(span => span.name === 'srpc:handleClientRequest');
+            const serverInvocation = spans.find(span => span.name === 'srpc:invokeClient');
+            const clientHandler = spans.find(span => span.name === 'srpc:handleServerRequest');
+            assert.ok(clientInvocation);
+            assert.ok(serverHandler);
+            assert.ok(serverInvocation);
+            assert.ok(clientHandler);
+            assert.equal(serverHandler.spanContext().traceId, clientInvocation.spanContext().traceId);
+            assert.equal(serverHandler.parentSpanContext?.spanId, clientInvocation.spanContext().spanId);
+            assert.equal(clientHandler.spanContext().traceId, serverInvocation.spanContext().traceId);
+            assert.equal(clientHandler.parentSpanContext?.spanId, serverInvocation.spanContext().spanId);
+        } finally {
+            await harness.close();
+            resetTelemetryForTests();
+        }
+    });
+
     it('rejects signed handshakes outside a finite, positive, bounded clock drift', async () => {
         const harness = await createHarness();
 
@@ -1580,8 +1636,7 @@ describe('srpc', () => {
             clientMessage: JsonMessage,
             serverMessage: JsonMessage,
             wsPath: '/external-srpc',
-            httpServer,
-            logLevel: false
+            httpServer
         });
         const afterFirst = httpServer.rawListeners('upgrade').length;
 
@@ -1590,8 +1645,7 @@ describe('srpc', () => {
             clientMessage: JsonMessage,
             serverMessage: JsonMessage,
             wsPath: '/external-srpc',
-            httpServer,
-            logLevel: false
+            httpServer
         });
 
         try {
@@ -1622,8 +1676,7 @@ describe('srpc', () => {
             clientMessage: JsonMessage,
             serverMessage: JsonMessage,
             wsPath: '/srpc',
-            httpServer,
-            logLevel: false
+            httpServer
         });
         await listenHttpServer(httpServer);
         const port = (httpServer.address() as AddressInfo).port;
@@ -2589,7 +2642,6 @@ async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMes
         clientMessage: JsonMessage,
         serverMessage: JsonMessage,
         wsPath: '/srpc-test',
-        logLevel: false,
         ...serverOptions
     });
     server.setClientKeyFetcher(clientId => (clientId ? secret : false));

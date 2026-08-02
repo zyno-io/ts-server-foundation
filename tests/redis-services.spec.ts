@@ -897,7 +897,6 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             clientMessage: JsonMessage,
             serverMessage: JsonMessage,
             wsPath: '/mesh-srpc',
-            logLevel: false,
             meshKey: key,
             meshOptions
         });
@@ -993,7 +992,6 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             serverMessage: DirectServerCodec,
             wsPath: '/direct-client',
             httpServer: firstHttp,
-            logLevel: false,
             meshKey: key,
             meshOptions,
             meshLink: {
@@ -1008,7 +1006,6 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
             serverMessage: DirectServerCodec,
             wsPath: '/direct-client',
             httpServer: secondHttp,
-            logLevel: false,
             meshKey: key,
             meshOptions,
             meshLink: {

@@ -4,6 +4,9 @@ import WebSocket from 'ws';
 
 import { getCurrentApp } from '../app';
 import { assertSafeTimerMs, MAX_SAFE_TIMER_MS, uuid7 } from '../helpers';
+import { HttpError } from '../http';
+import { withLoggerContext } from '../services';
+import { getTraceContext, withRemoteSpan, withSpan } from '../telemetry';
 import { byteStreamDestroyReason, SrpcByteStream } from './SrpcByteStream';
 import { notifySrpcObservers } from './observer';
 import {
@@ -27,6 +30,7 @@ import {
     TSrpcMessageHandlerFnOrClass,
     encodeSrpcMessage,
     isSrpcMessageHandlerClass,
+    isValidSrpcTrace,
     serializeSrpcError,
     srpcMessageTypes
 } from './types';
@@ -65,12 +69,9 @@ interface StreamInfo {
     meta: Record<string, unknown>;
 }
 
-const noopLogger: ISrpcLogger = {
-    info() {},
-    warn() {},
-    error() {},
-    debug() {}
-};
+class AuthenticationFailure {
+    constructor(readonly reason: string) {}
+}
 
 export class SrpcServer<
     TMeta extends SrpcMeta = SrpcMeta,
@@ -117,7 +118,7 @@ export class SrpcServer<
 
     constructor(protected readonly options: ISrpcServerOptions<TClientOutput, TServerOutput>) {
         validateServerResourceOptions(options);
-        this.logger = createLogger(options.logger, options.logLevel);
+        this.logger = options.logger;
         this.wsServer = new WebSocket.Server({ noServer: true, maxPayload: this.maxMessageBytes });
         this.wsServer.on('connection', (ws, request) => this.attachConnection(ws, request));
 
@@ -154,20 +155,32 @@ export class SrpcServer<
         const address = this.getRemoteAddress(info.req);
 
         const protocolVersion = query._v === undefined ? this.options.defaultUnspecifiedProtocolVersion : Number(query._v);
+        const handshakeLogData = {
+            address: logSafeText(address),
+            clientId: logSafeText(clientId),
+            clientStreamId: logSafeText(clientStreamId),
+            protocolVersion: Number.isSafeInteger(protocolVersion) ? protocolVersion : undefined
+        };
+        const rejectHandshake = (event: string, code: number, message: string, extra?: Record<string, unknown>) => {
+            this.logger.warn(event, { srpc: { ...handshakeLogData, ...extra } });
+            cb(false, code, safeHandshakeMessage(message));
+        };
         if (!clientStreamId || !clientId || !appVersion || (protocolVersion !== 1 && protocolVersion !== 2)) {
-            cb(false, 400, 'Missing required query parameters');
+            rejectHandshake('SRPC client missing required handshake parameters', 400, 'Missing required query parameters');
             return;
         }
         if (Buffer.byteLength(clientId) > this.maxClientIdBytes) {
-            cb(false, 400, 'Client ID exceeds the configured limit');
+            rejectHandshake('SRPC client ID exceeds the configured limit', 400, 'Client ID exceeds the configured limit');
             return;
         }
         if (this.pendingHandshakeCount >= this.maxPendingHandshakes) {
-            cb(false, 503, 'Too many pending client handshakes');
+            rejectHandshake('SRPC handshake capacity exceeded', 503, 'Too many pending client handshakes', {
+                pendingHandshakes: this.pendingHandshakeCount
+            });
             return;
         }
         if (this.streamsById.size >= this.maxActiveStreams) {
-            cb(false, 503, 'Too many active client streams');
+            rejectHandshake('SRPC active-stream capacity exceeded', 503, 'Too many active client streams', { activeStreams: this.streamsById.size });
             return;
         }
 
@@ -175,8 +188,10 @@ export class SrpcServer<
         this.validateClientAuth(query, info.req)
             .then(
                 result => {
-                    if (!result) {
-                        cb(false, 403, 'Failed authentication');
+                    if (!result || result instanceof AuthenticationFailure) {
+                        rejectHandshake('SRPC client authentication failed', 403, 'Failed authentication', {
+                            reason: result instanceof AuthenticationFailure ? result.reason : 'custom authorizer rejected'
+                        });
                         return;
                     }
 
@@ -191,11 +206,13 @@ export class SrpcServer<
                     try {
                         metadataBytes = encodedJsonBytes(mergedMeta);
                     } catch {
-                        cb(false, 400, 'Client metadata must be JSON-serializable');
+                        rejectHandshake('SRPC client metadata is not JSON-serializable', 400, 'Client metadata must be JSON-serializable');
                         return;
                     }
                     if (metadataBytes > this.maxClientMetadataBytes) {
-                        cb(false, 400, 'Client metadata exceeds the configured limit');
+                        rejectHandshake('SRPC client metadata exceeds the configured limit', 400, 'Client metadata exceeds the configured limit', {
+                            metadataBytes
+                        });
                         return;
                     }
                     (info.req as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol] = {
@@ -216,8 +233,15 @@ export class SrpcServer<
                     cb(true);
                 },
                 error => {
-                    this.logger.warn('Error validating SRPC client auth', error);
-                    cb(false, 403, 'Failed authentication');
+                    if (error instanceof HttpError) {
+                        rejectHandshake('SRPC client authorization rejected the handshake', error.httpCode, error.message, {
+                            statusCode: error.httpCode,
+                            message: logSafeText(error.message)
+                        });
+                        return;
+                    }
+                    this.logger.error('Error validating SRPC client auth', error, { srpc: handshakeLogData });
+                    cb(false, 500, 'Error during authentication');
                 }
             )
             .finally(() => {
@@ -228,17 +252,29 @@ export class SrpcServer<
     private attachConnection(ws: WebSocket, request: IncomingMessage): void {
         const info = (request as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol];
         if (!info) {
+            this.logger.warn('SRPC WebSocket connection is missing verified stream information');
             ws.close(4000, 'Missing stream info');
             return;
         }
         if (this.streamsById.size >= this.maxActiveStreams) {
+            this.logger.warn('SRPC active-stream capacity exceeded after handshake', {
+                srpc: {
+                    address: logSafeText(info.address),
+                    clientId: logSafeText(info.clientId),
+                    clientStreamId: logSafeText(info.clientStreamId),
+                    activeStreams: this.streamsById.size
+                }
+            });
             ws.close(1013, 'Too many active client streams');
             return;
         }
 
         const stream = this.createStream(ws, info);
+        this.logger.info('SRPC WebSocket connection accepted', {
+            srpc: streamLogData(stream)
+        });
         ws.on('error', error => this.handleStreamError(stream, error));
-        ws.on('close', code => this.handleStreamDisconnected(stream, code));
+        ws.on('close', (code, reason) => this.handleStreamDisconnected(stream, code, reason));
 
         this.handleStreamEstablished(stream);
     }
@@ -290,6 +326,7 @@ export class SrpcServer<
                 receiverBufferChanged: (substreamId, bufferedBytes) => {
                     this.updateByteStreamBufferedBytes(stream, substreamId, bufferedBytes);
                 },
+                logDebug: (message, data) => this.logger?.debug(message, { srpc: { ...streamLogData(stream), ...data } }),
                 attachDisconnectHandler: handler => ws.on('close', handler),
                 detachDisconnectHandler: handler => ws.off('close', handler),
                 getBufferedAmount: () => ws.bufferedAmount
@@ -307,9 +344,19 @@ export class SrpcServer<
         const conflictingStream = this.getCurrentStreamByClientId(stream.clientId);
         if (conflictingStream) {
             if (stream.protocolVersion >= 2 && !stream.supersede) {
+                this.logger.warn('SRPC client connection rejected because its client ID is already active', {
+                    srpc: {
+                        ...streamLogData(stream),
+                        existingStreamId: logSafeText(conflictingStream.id),
+                        protocolVersion: stream.protocolVersion
+                    }
+                });
                 this.closeStreamWithError(stream, 'conflict', 'Client ID already connected');
                 return;
             }
+            this.logger.warn('SRPC stream superseding an existing client connection', {
+                srpc: { ...streamLogData(stream), supersededStreamId: logSafeText(conflictingStream.id) }
+            });
             this.cleanupStream(conflictingStream, 'supersede');
         }
 
@@ -338,10 +385,13 @@ export class SrpcServer<
                     return;
                 }
                 await this.onStreamActivated(stream);
-                if (stream.lastPingAt >= 0 && stream.isActivated) this.openClientRequests(stream);
+                if (stream.lastPingAt >= 0 && stream.isActivated) {
+                    this.logger.info('SRPC stream activated', { srpc: streamLogData(stream) });
+                    this.openClientRequests(stream);
+                }
             })
             .catch(error => {
-                this.logger.error('SRPC connection handler failed', error);
+                this.logger.error('SRPC connection handler failed', error, { srpc: streamLogData(stream) });
                 this.cleanupStream(stream, 'disconnect');
             });
     }
@@ -392,7 +442,7 @@ export class SrpcServer<
             const decoded = this.options.clientMessage.decode(encoded);
             this.handleStreamDataReceived(stream, decoded, encoded.length);
         } catch (error) {
-            this.logger.warn('Failed to decode SRPC message', error);
+            this.logger.warn('Failed to decode SRPC message', error, { srpc: streamLogData(stream) });
             this.closeStreamWithError(stream, 'badArg', 'Invalid message format');
         }
     }
@@ -428,7 +478,7 @@ export class SrpcServer<
             const queueItem = stream.$queue.get(data.requestId);
             if (!queueItem) {
                 if (this.isLateReply(stream, data.requestId)) {
-                    this.logger.debug('Ignoring reply for an expired request', { requestId: data.requestId });
+                    this.logger.debug('Ignoring reply for an expired request', { requestId: logSafeText(data.requestId) });
                     return;
                 }
                 this.closeStreamWithError(stream, 'badArg', 'Unknown request ID');
@@ -453,6 +503,9 @@ export class SrpcServer<
             pending.push({ data, retainedBytes });
             this.pendingClientRequests.set(stream, pending);
             this.pendingClientRequestBytes.set(stream, (this.pendingClientRequestBytes.get(stream) ?? 0) + retainedBytes);
+            this.logger?.debug('Queueing SRPC client request before stream activation', {
+                srpc: { ...streamLogData(stream), requestId: logSafeText(data.requestId), queuedRequests: pending.length }
+            });
             return;
         }
 
@@ -518,12 +571,16 @@ export class SrpcServer<
             this.updateByteStreamBufferedBytes(stream, op.streamId, SrpcByteStream.getReceiverBufferedBytes(stream, op.streamId));
             if (!accepted) {
                 if (wasBackpressured) {
+                    this.logger?.warn('SRPC byte-stream receiver is not draining', { srpc: { ...streamLogData(stream), byteStreamId: op.streamId } });
                     SrpcByteStream.abortReceiver(stream, op.streamId, new Error(`SRPC byte stream ${op.streamId} receiver is not draining`));
                     this.clearByteStreamState(stream, op.streamId);
                     return;
                 }
                 const ids = backpressured ?? new Set<number>();
                 if (ids.size >= MaxBackpressuredByteStreamsPerStream) {
+                    this.logger?.warn('SRPC stream has too many backpressured byte streams', {
+                        srpc: { ...streamLogData(stream), byteStreamId: op.streamId, backpressuredStreams: ids.size }
+                    });
                     SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many backpressured SRPC byte streams'));
                     this.clearByteStreamState(stream, op.streamId);
                     return;
@@ -534,6 +591,9 @@ export class SrpcServer<
                 this.clearByteStreamBackpressureFlag(stream, op.streamId);
             }
             if (this.totalBackpressuredByteStreamBytes(stream) > MaxBackpressuredByteStreamBytesPerStream) {
+                this.logger?.warn('SRPC stream byte-stream buffer limit exceeded', {
+                    srpc: { ...streamLogData(stream), byteStreamId: op.streamId, bufferedBytes: this.totalBackpressuredByteStreamBytes(stream) }
+                });
                 SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many buffered SRPC byte stream bytes'));
                 this.clearByteStreamState(stream, op.streamId);
             }
@@ -583,9 +643,29 @@ export class SrpcServer<
         for (const [key, handlerMeta] of this.streamMessageHandlers) {
             const requestData = (message as Record<string, unknown>)[key];
             if (requestData == null) continue;
-            const result = await this.runMessageHandler(handlerMeta.handler, stream, requestData);
-            return { [handlerMeta.resultType]: result } as Partial<TServerOutput>;
+            const trace = isValidSrpcTrace(message.trace) ? message.trace : undefined;
+            const logMeta = { ...streamLogData(stream), requestId: logSafeText(_requestId), requestType: key, traceId: trace?.traceId };
+            return withRemoteSpan('srpc:handleClientRequest', trace, logMeta, () =>
+                withLoggerContext({ srpc: logMeta }, async () => {
+                    try {
+                        this.logger?.info('SRPC client request received');
+                        const result = await this.runMessageHandler(handlerMeta.handler, stream, requestData);
+                        this.logger?.info('SRPC client request processed');
+                        return { [handlerMeta.resultType]: result } as Partial<TServerOutput>;
+                    } catch (error) {
+                        if (error instanceof SrpcError && error.isUserError) {
+                            this.logger?.info('SRPC client request returned a user error', {
+                                srpc: { ...logMeta, error: logSafeText(error.message) }
+                            });
+                        } else {
+                            this.logger?.warn('SRPC client request failed', error);
+                        }
+                        throw error;
+                    }
+                })
+            );
         }
+        this.logger?.warn('Unhandled SRPC client message type', { srpc: { ...streamLogData(stream), requestId: logSafeText(_requestId) } });
         throw new Error('Unhandled message type');
     }
 
@@ -613,12 +693,12 @@ export class SrpcServer<
             try {
                 handler(stream, cause);
             } catch (error) {
-                this.logger.error('SRPC disconnect handler failed', error);
+                this.logger.error('SRPC disconnect handler failed', error, { srpc: { ...streamLogData(stream), cause } });
             }
         }
     }
 
-    private revokeStream(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause): boolean {
+    private revokeStream(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause, remoteClose?: { code?: number; reason?: string }): boolean {
         if (stream.lastPingAt < 0) return false;
         stream.lastPingAt = -1;
         for (const queueItem of stream.$queue?.values() ?? []) {
@@ -637,54 +717,75 @@ export class SrpcServer<
         if (this.pendingStreamsByClientId?.get(stream.clientId) === stream) this.pendingStreamsByClientId.delete(stream.clientId);
         if (this.streamsByClientId?.get(stream.clientId) === stream) this.streamsByClientId.delete(stream.clientId);
         const wasPublished = this.publishedStreams?.has(stream) ?? false;
+        const disconnectLogData = { ...streamLogData(stream), cause, ...remoteClose };
+        this.logger?.info('SRPC stream disconnected', { srpc: disconnectLogData });
         try {
             this.onStreamDisconnected(stream, cause);
         } catch (error) {
-            this.logger.error('SRPC disconnect callback failed', error);
+            this.logger.error('SRPC disconnect callback failed', error, { srpc: disconnectLogData });
         }
         if (wasPublished) {
             try {
                 notifySrpcObservers({ type: 'disconnection', stream, cause, at: Date.now() });
             } catch (error) {
-                this.logger.error('SRPC observer failed', error);
+                this.logger.error('SRPC observer failed', error, { srpc: disconnectLogData });
             }
             this.publishedStreams.delete(stream);
         }
         return true;
     }
 
-    protected cleanupStream(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause = 'disconnect'): void {
-        if (!this.revokeStream(stream, cause)) return;
+    protected cleanupStream(
+        stream: SrpcStream<TMeta>,
+        cause: SrpcDisconnectCause = 'disconnect',
+        remoteClose?: { code?: number; reason?: string }
+    ): void {
+        if (!this.revokeStream(stream, cause, remoteClose)) return;
         if (stream.$ws.readyState === WebSocket.OPEN || stream.$ws.readyState === WebSocket.CONNECTING) {
             stream.$ws.close(closeCodeForCause(cause), `Stream terminated with cause: ${cause}`);
         }
     }
 
     private closeStreamGracefully(stream: SrpcStream<TMeta>, reason?: string): void {
-        if (!this.revokeStream(stream, 'disconnect')) return;
+        const closeReason = reason
+            ? logSafeText(reason, 123) || 'Stream terminated with cause: disconnect'
+            : 'Stream terminated with cause: disconnect';
+        if (!this.revokeStream(stream, 'disconnect', { code: 1000, reason: closeReason })) return;
         if (stream.$ws.readyState === WebSocket.OPEN || stream.$ws.readyState === WebSocket.CONNECTING) {
-            stream.$ws.close(1000, reason ? reason.slice(0, 123) : 'Stream terminated with cause: disconnect');
+            stream.$ws.close(1000, closeReason);
         }
     }
 
-    private handleStreamDisconnected(stream: SrpcStream<TMeta>, code?: number): void {
-        this.cleanupStream(stream, causeForCloseCode(code));
+    private handleStreamDisconnected(stream: SrpcStream<TMeta>, code?: number, reason?: Buffer): void {
+        this.cleanupStream(stream, causeForCloseCode(code), {
+            code,
+            reason: reason ? logSafeText(reason.toString('utf8'), 123) : undefined
+        });
     }
 
     private handleStreamError(stream: SrpcStream<TMeta>, error: Error): void {
-        this.logger.warn('SRPC stream error', error);
+        this.logger.warn('SRPC stream error', error, { srpc: streamLogData(stream) });
         this.cleanupStream(stream);
     }
 
     private terminateInactiveStreams(): void {
         const deadline = Date.now() - 75_000;
         for (const stream of this.streamsById.values()) {
-            if (stream.lastPingAt >= 0 && stream.lastPingAt < deadline) this.cleanupStream(stream, 'timeout');
+            if (stream.lastPingAt >= 0 && stream.lastPingAt < deadline) {
+                this.logger.warn('Terminating inactive SRPC stream', { srpc: streamLogData(stream) });
+                this.cleanupStream(stream, 'timeout');
+            }
         }
     }
 
-    private async validateClientAuth(meta: Record<string, unknown>, request: IncomingMessage): Promise<boolean | Partial<TMeta>> {
-        if (this.clientAuthorizer) return this.clientAuthorizer(meta, request);
+    private async validateClientAuth(
+        meta: Record<string, unknown>,
+        request: IncomingMessage
+    ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
+        if (this.clientAuthorizer) {
+            const result = await this.clientAuthorizer(meta, request);
+            return result === false ? new AuthenticationFailure('custom authorizer rejected') : result;
+        }
 
         const authv = String(meta.authv ?? '');
         const appv = String(meta.appv ?? '');
@@ -692,21 +793,23 @@ export class SrpcServer<
         const id = String(meta.id ?? '');
         const cid = String(meta.cid ?? '');
         const signature = String(meta.signature ?? '');
-        if (!authv || !appv || !ts || !id || !cid || !signature) return false;
+        if (!authv || !appv || !ts || !id || !cid || !signature) return new AuthenticationFailure('missing required credentials');
 
         const tsInt = Number(ts);
-        if (!Number.isFinite(tsInt)) return false;
+        if (!Number.isFinite(tsInt)) return new AuthenticationFailure('invalid timestamp');
 
         const config = getOptionalAppConfig();
         const driftMs = config?.SRPC_AUTH_CLOCK_DRIFT_MS ?? 30_000;
-        if (!Number.isSafeInteger(driftMs) || driftMs <= 0 || driftMs > MAX_SAFE_TIMER_MS) return false;
-        if (Math.abs(Date.now() - tsInt) > driftMs) return false;
+        if (!Number.isSafeInteger(driftMs) || driftMs <= 0 || driftMs > MAX_SAFE_TIMER_MS)
+            return new AuthenticationFailure('invalid server clock-drift configuration');
+        if (Math.abs(Date.now() - tsInt) > driftMs) return new AuthenticationFailure('expired timestamp');
 
-        if (authv !== '2') return false;
-        if (!isAuthToken(meta.nonce) || !meta.aud || !Number.isSafeInteger(Number(meta._v)) || Number(meta._v) !== 2) return false;
+        if (authv !== '2') return new AuthenticationFailure('unsupported auth version');
+        if (!isAuthToken(meta.nonce) || !meta.aud || !Number.isSafeInteger(Number(meta._v)) || Number(meta._v) !== 2)
+            return new AuthenticationFailure('invalid protocol credentials');
 
         const clientKey = await this.fetchClientKey(cid);
-        if (clientKey === false) return false;
+        if (clientKey === false) return new AuthenticationFailure('unknown client key');
 
         const url = new URL(request.url ?? '', 'http://localhost');
         const metadata = normalizeMetadata(
@@ -741,19 +844,20 @@ export class SrpcServer<
             .digest('hex');
         const signatureBuffer = Buffer.from(signature);
         const computedBuffer = Buffer.from(computedSignature);
-        if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer)) return false;
-        if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return false;
+        if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
+            return new AuthenticationFailure('invalid signature');
+        if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return new AuthenticationFailure('invalid audience');
         const nonce = String(meta.nonce);
         const expiresAt = tsInt + driftMs;
-        if (this.isLocalAuthNonceReplay(cid, nonce)) return false;
+        if (this.isLocalAuthNonceReplay(cid, nonce)) return new AuthenticationFailure('replayed nonce');
         if (this.authNonceConsumer) {
-            if (!(await this.authNonceConsumer(cid, nonce, expiresAt))) return false;
+            if (!(await this.authNonceConsumer(cid, nonce, expiresAt))) return new AuthenticationFailure('replayed nonce');
             // The shared consumer is authoritative under saturation. Keep the
             // local duplicate fast path bounded by evicting its least-recent
             // principal/nonce entries instead of imposing a service-wide CID cap.
-            if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, true)) return false;
+            if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, true)) return new AuthenticationFailure('replayed nonce');
         } else if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, false)) {
-            return false;
+            return new AuthenticationFailure('replay cache capacity exceeded');
         }
         return true;
     }
@@ -783,7 +887,8 @@ export class SrpcServer<
         if (!this.canWriteToStream(stream, encoded.byteLength)) return false;
         try {
             stream.$ws.send(encoded);
-        } catch {
+        } catch (error) {
+            this.logger.warn('Failed to send SRPC response', error, { srpc: streamLogData(stream) });
             this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
             return false;
         }
@@ -803,6 +908,7 @@ export class SrpcServer<
             try {
                 stream.$ws.send(encoded, error => {
                     if (error) {
+                        this.logger.warn('Failed to send SRPC response', error, { srpc: streamLogData(stream) });
                         this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
                         reject(error);
                     } else if (!this.isStreamDispatchAvailable(stream)) reject(new Error('Failed to send SRPC message: stream revoked'));
@@ -819,6 +925,7 @@ export class SrpcServer<
                     }
                 });
             } catch (error) {
+                this.logger.warn('Failed to send SRPC response', error, { srpc: streamLogData(stream) });
                 this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
                 reject(error instanceof Error ? error : new Error(String(error)));
             }
@@ -831,8 +938,8 @@ export class SrpcServer<
         const bodies = typeof options === 'object' && options.bodies === true;
         this.logger.info('SRPC traffic', {
             direction,
-            streamId: stream.id,
-            clientId: stream.clientId,
+            streamId: logSafeText(stream.id),
+            clientId: logSafeText(stream.clientId),
             messageTypes: srpcMessageTypes(message),
             ...(bodies ? { body: message } : {})
         });
@@ -850,6 +957,7 @@ export class SrpcServer<
     }
 
     private closeStreamWithError(stream: SrpcStream<TMeta>, cause: SrpcDisconnectCause, message: string): void {
+        this.logger?.warn('Closing SRPC stream due to a protocol or transport error', { srpc: { ...streamLogData(stream), cause, message } });
         if (!this.revokeStream(stream, cause)) return;
         stream.$ws.close(closeCodeForCause(cause), message.slice(0, 123));
     }
@@ -952,72 +1060,88 @@ export class SrpcServer<
         assertTimeout(timeoutMs);
         const requestType = `${prefix}Request`;
         const resultType = `${prefix}Response`;
-        const message = { requestId, [requestType]: data } as unknown as TServerOutput;
         if (stream.$queue.has(requestId)) return Promise.reject(new Error(`Duplicate SRPC request ID ${requestId}`));
-        let encoded: Buffer;
-        try {
-            encoded = encodeSrpcMessage(this.options.serverMessage, message);
-        } catch (error) {
-            return Promise.reject(error);
-        }
-        if (stream.$queue.size >= this.maxPendingServerRequests) {
-            return Promise.reject(new SrpcBackpressureError('Too many pending server SRPC requests'));
-        }
-        if ((this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength > this.maxPendingServerRequestBytes) {
-            return Promise.reject(new SrpcBackpressureError('Too many pending server SRPC request bytes'));
-        }
-        this.pendingServerRequestBytes.set(stream, (this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength);
-        let retained = true;
-        const releaseRetainedBytes = () => {
-            if (!retained) return;
-            retained = false;
-            const remaining = Math.max(0, (this.pendingServerRequestBytes.get(stream) ?? encoded.byteLength) - encoded.byteLength);
-            if (remaining) this.pendingServerRequestBytes.set(stream, remaining);
-            else this.pendingServerRequestBytes.delete(stream);
-        };
+        const spanMeta = { ...streamLogData(stream), requestId, requestType };
+        return withSpan('srpc:invokeClient', spanMeta, () => {
+            const trace = toWireTrace(getTraceContext());
+            const logMeta = { ...spanMeta, traceId: trace?.traceId };
+            return withLoggerContext({ srpc: logMeta }, async () => {
+                try {
+                    this.logger?.info('Requesting SRPC client invocation');
+                    const message = { requestId, trace, [requestType]: data } as unknown as TServerOutput;
+                    const encoded = encodeSrpcMessage(this.options.serverMessage, message);
+                    if (stream.$queue.size >= this.maxPendingServerRequests) {
+                        throw new SrpcBackpressureError('Too many pending server SRPC requests');
+                    }
+                    if ((this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength > this.maxPendingServerRequestBytes) {
+                        throw new SrpcBackpressureError('Too many pending server SRPC request bytes');
+                    }
+                    this.pendingServerRequestBytes.set(stream, (this.pendingServerRequestBytes.get(stream) ?? 0) + encoded.byteLength);
+                    let retained = true;
+                    const releaseRetainedBytes = () => {
+                        if (!retained) return;
+                        retained = false;
+                        const remaining = Math.max(0, (this.pendingServerRequestBytes.get(stream) ?? encoded.byteLength) - encoded.byteLength);
+                        if (remaining) this.pendingServerRequestBytes.set(stream, remaining);
+                        else this.pendingServerRequestBytes.delete(stream);
+                    };
 
-        return new Promise<ResponseData<TClientOutput, P>>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                if (!stream.$queue.has(requestId)) return;
-                stream.$queue.delete(requestId);
-                this.addLateReplyTombstone(stream, requestId);
-                releaseRetainedBytes();
-                reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
-            }, timeoutMs);
+                    const response = await new Promise<unknown>((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            if (!stream.$queue.has(requestId)) return;
+                            stream.$queue.delete(requestId);
+                            this.addLateReplyTombstone(stream, requestId);
+                            releaseRetainedBytes();
+                            reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
+                        }, timeoutMs);
 
-            const queueItem: IQueuedRequest = {
-                exp: Date.now() + timeoutMs,
-                resolve: response => {
-                    clearTimeout(timeout);
-                    releaseRetainedBytes();
+                        const queueItem: IQueuedRequest = {
+                            exp: Date.now() + timeoutMs,
+                            resolve: response => {
+                                clearTimeout(timeout);
+                                releaseRetainedBytes();
+                                resolve(response);
+                            },
+                            reject: error => {
+                                clearTimeout(timeout);
+                                releaseRetainedBytes();
+                                reject(error);
+                            }
+                        };
+                        stream.$queue.set(requestId, queueItem);
+
+                        let sent: boolean;
+                        try {
+                            sent = this.writeEncodedToStream(stream, message, encoded);
+                        } catch (error) {
+                            if (stream.$queue.get(requestId) === queueItem) stream.$queue.delete(requestId);
+                            clearTimeout(timeout);
+                            releaseRetainedBytes();
+                            reject(error);
+                            return;
+                        }
+                        if (!sent) {
+                            stream.$queue.delete(requestId);
+                            clearTimeout(timeout);
+                            releaseRetainedBytes();
+                            reject(new Error('Failed to send request: not connected'));
+                        }
+                    });
                     const result = (response as Record<string, unknown>)[resultType];
-                    if (result == null) reject(new Error('Invalid response from client'));
-                    else resolve(result as ResponseData<TClientOutput, P>);
-                },
-                reject: error => {
-                    clearTimeout(timeout);
-                    releaseRetainedBytes();
-                    reject(error);
+                    if (result == null) throw new Error('Invalid response from client');
+                    this.logger?.info('SRPC client invocation completed');
+                    return result as ResponseData<TClientOutput, P>;
+                } catch (error) {
+                    if (error instanceof SrpcError) {
+                        this.logger?.[error.isUserError ? 'info' : 'warn']('SRPC client invocation returned a remote error', {
+                            srpc: { ...logMeta, error: logSafeText(error.message), userError: error.isUserError === true }
+                        });
+                    } else {
+                        this.logger?.warn('SRPC client invocation failed', error);
+                    }
+                    throw error;
                 }
-            };
-            stream.$queue.set(requestId, queueItem);
-
-            let sent: boolean;
-            try {
-                sent = this.writeEncodedToStream(stream, message, encoded);
-            } catch (error) {
-                if (stream.$queue.get(requestId) === queueItem) stream.$queue.delete(requestId);
-                clearTimeout(timeout);
-                releaseRetainedBytes();
-                reject(error);
-                return;
-            }
-            if (!sent) {
-                stream.$queue.delete(requestId);
-                clearTimeout(timeout);
-                releaseRetainedBytes();
-                reject(new Error('Failed to send request: not connected'));
-            }
+            });
         });
     }
 
@@ -1213,19 +1337,6 @@ export class SrpcServer<
     }
 }
 
-function createLogger(logger: ISrpcLogger, logLevel: 'info' | 'debug' | false | undefined): ISrpcLogger {
-    if (logLevel === false) return noopLogger;
-    if (logLevel === 'debug') {
-        return {
-            info: logger.debug.bind(logger),
-            warn: logger.warn.bind(logger),
-            error: logger.error.bind(logger),
-            debug: logger.debug.bind(logger)
-        };
-    }
-    return logger;
-}
-
 function toBuffer(data: WebSocket.RawData): Buffer {
     if (Buffer.isBuffer(data)) return data;
     if (Array.isArray(data)) return Buffer.concat(data);
@@ -1234,6 +1345,40 @@ function toBuffer(data: WebSocket.RawData): Buffer {
 
 function configuredPositiveInteger(value: number | undefined, defaultValue: number): number {
     return value != null && Number.isSafeInteger(value) && value > 0 ? value : defaultValue;
+}
+
+function streamLogData(stream: Pick<SrpcStream, 'id' | 'clientId' | 'clientStreamId' | 'address' | 'protocolVersion'>) {
+    return {
+        streamId: logSafeText(stream.id),
+        clientId: logSafeText(stream.clientId),
+        clientStreamId: logSafeText(stream.clientStreamId),
+        address: logSafeText(stream.address),
+        protocolVersion: stream.protocolVersion
+    };
+}
+
+function logSafeText(value: unknown, maxBytes = 256): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const printable = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
+    if (Buffer.byteLength(printable) <= maxBytes) return printable;
+    const suffix = '…';
+    const prefixBytes = Math.max(0, maxBytes - Buffer.byteLength(suffix));
+    let truncated = Buffer.from(printable).subarray(0, prefixBytes).toString('utf8');
+    while (Buffer.byteLength(truncated) > prefixBytes) truncated = truncated.slice(0, -1);
+    return `${truncated}${suffix}`;
+}
+
+function safeHandshakeMessage(value: string): string {
+    return logSafeText(value, 123) || 'Handshake rejected';
+}
+
+function toWireTrace(traceContext: ReturnType<typeof getTraceContext>): BaseMessage['trace'] {
+    if (!traceContext) return undefined;
+    return {
+        traceId: traceContext.traceId,
+        spanId: traceContext.spanId,
+        traceFlags: traceContext.traceFlags
+    };
 }
 
 function assertTimeout(value: number): void {

@@ -36,8 +36,7 @@ export class DevConsoleSrpcServer {
             clientMessage: DevConsoleClientMessage,
             serverMessage: DevConsoleServerMessage,
             wsPath: '/_devconsole/ws',
-            httpServer,
-            logLevel: false
+            httpServer
         });
         this.server.setClientAuthorizer((_meta, req) => (isLocalhostIncomingMessage(req) ? { devconsole: true } : false));
         this.registerHandlers();

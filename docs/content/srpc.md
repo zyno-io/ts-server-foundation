@@ -130,8 +130,6 @@ Server options:
 | `clientMessage` | Generated codec for client-to-server envelope messages.    |
 | `serverMessage` | Generated codec for server-to-client envelope messages.    |
 | `wsPath`        | WebSocket path.                                            |
-| `debug`         | Compatibility option; currently declared but not read.     |
-| `logLevel`      | `info`, `debug`, or `false`.                               |
 | `httpServer`    | Optional Node HTTP server for direct upgrade registration. |
 
 Handlers may also be zero-argument classes with a `handle(stream, data)` method. A new class instance is created for each request; SRPC does not resolve handler classes through application DI.
@@ -301,6 +299,12 @@ logTraffic: {
 
 Traffic bodies can contain application data, so enable body logging only where that data is appropriate for the configured log sink and retention policy.
 
+## Observability
+
+SRPC propagates the envelope `trace` context in both directions. Server and client invocation spans are named `srpc:invokeClient` and `srpc:invokeServer`; request handlers continue those traces as `srpc:handleClientRequest` and `srpc:handleServerRequest`.
+
+Logs emitted while invoking or handling a request include an `srpc` context with the client and stream IDs, request ID, request type, and trace ID when present. Connection, handshake, protocol, and byte-stream diagnostics use the same structured identifiers without logging application payloads. Configure verbosity on the supplied logger, or use [Traffic Logging](#traffic-logging) when message bodies are appropriate for the log sink.
+
 ## Errors And Timeouts
 
 Throw `new SrpcError(message, true)` from either a server handler or a
@@ -323,7 +327,3 @@ and byte-stream frames as well as inbound frames. A definitive WebSocket send
 throw or callback error also revokes before closing. Normal graceful
 disconnects retain their ordinary close-event semantics and carry the supplied
 bounded close reason.
-
-## Telemetry Boundary
-
-The shared envelope reserves a `trace` object with `traceId`, `spanId`, and `traceFlags`, but the current SRPC client and server do not automatically populate, continue, or export spans from that field. Applications that need cross-SRPC trace propagation must place trace context in their message contract and wrap handlers with `withRemoteSpan()` explicitly. HTTP/WebSocket connection establishment can still be observed by the installed HTTP instrumentation.

@@ -36,6 +36,8 @@ export interface IByteStream {
     attachReceiver?(streamId: number): void | Promise<void>;
     announceSender?(streamId: number): void;
     receiverBufferChanged?(streamId: number, bufferedBytes: number): void;
+    /** Emits transport-owned byte-stream diagnostics when enabled by the owner. */
+    logDebug?(message: string, data?: Record<string, unknown>): void;
     /** Parity owned by senders on the remote endpoint. */
     remoteSenderIdParity?: 0 | 1;
 }
@@ -115,6 +117,7 @@ export class SrpcByteStream extends Duplex {
             }
             this.isSender = true;
             info.senders.set(this._id, this);
+            logByteStream(this.transport, this._id, true, 'SRPC byte-stream sender created');
             try {
                 this.transport.announceSender?.(this._id);
             } catch (error) {
@@ -147,6 +150,7 @@ export class SrpcByteStream extends Duplex {
             this._id = id;
             this.isSender = false;
             info.receivers.set(this._id, this);
+            logByteStream(this.transport, this._id, false, 'SRPC byte-stream receiver created');
             this.flushPendingReceiver(info);
             this.on('end', () => this.cleanup());
             if (this.transport.attachReceiver) {
@@ -237,6 +241,7 @@ export class SrpcByteStream extends Duplex {
         const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data as Uint8Array);
         if (receiver) {
             if (receiver.remoteFinished) {
+                logByteStream(stream.byteStream, id, false, 'Received data after an SRPC byte-stream finish');
                 SrpcByteStream.abortReceiver(stream, id, new Error(`SRPC byte stream ${id} received data after finish`));
                 return false;
             }
@@ -248,6 +253,7 @@ export class SrpcByteStream extends Duplex {
         const pending = requirePendingReceiver(info, id);
         if (pending.destroyed) return false;
         if (pending.finished) {
+            logByteStream(stream.byteStream, id, false, 'Received pending SRPC byte-stream data after finish');
             retainPendingError(info, pending, new Error(`SRPC byte stream ${id} received data after finish`));
             return false;
         }
@@ -257,6 +263,7 @@ export class SrpcByteStream extends Duplex {
             info.pendingReceiverChunkBytes + chunk.length > PENDING_RECEIVER_MAX_CHUNK_TOTAL_BYTES ||
             info.pendingReceiverBytes + chunk.length > PENDING_RECEIVER_MAX_TOTAL_BYTES
         ) {
+            logByteStream(stream.byteStream, id, false, 'Pending SRPC byte-stream receiver exceeded its buffer limit');
             retainPendingError(info, pending, new Error('Pending receiver exceeded max buffered bytes'));
             pending.chunks = [];
             return false;
@@ -298,6 +305,7 @@ export class SrpcByteStream extends Duplex {
     }
 
     static destroySubstream(stream: IByteStreamable, id: number, err?: string): void {
+        logByteStream(stream.byteStream, id, false, 'Received SRPC byte-stream destroy signal');
         const info = SrpcByteStream.ensureInfo(stream);
         const error = err !== undefined ? new Error(truncateUtf8(err, PENDING_DESTROY_ERROR_MAX_BYTES)) : undefined;
         const receiver = info.receivers.get(id);
@@ -352,6 +360,7 @@ export class SrpcByteStream extends Duplex {
                 return;
             }
             this.localFinished = true;
+            logByteStream(this.transport, this._id, this.isSender, 'SRPC byte-stream finished');
             Promise.resolve(this.transport.finish(this._id)).then(
                 result => {
                     if (result === false) {
@@ -377,6 +386,9 @@ export class SrpcByteStream extends Duplex {
 
     _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
         const normalSenderFinish = this.isSender && this.localFinished && !error;
+        if (!normalSenderFinish) {
+            logByteStream(this.transport, this._id, this.isSender, 'SRPC byte-stream destroyed', error ? { error: error.message } : undefined);
+        }
         if (!this.remotelyDestroyed && !normalSenderFinish && (this.isSender || !this.remoteFinished)) {
             try {
                 Promise.resolve(this.transport.destroy(this._id, error ?? undefined)).then(
@@ -418,6 +430,7 @@ export class SrpcByteStream extends Duplex {
     }
 
     private readonly handleDisconnect = () => {
+        logByteStream(this.transport, this._id, this.isSender, 'SRPC transport disconnected during byte-stream activity');
         this.remotelyDestroyed = true;
         this.destroy();
     };
@@ -522,6 +535,15 @@ function truncateUtf8(value: string, maxBytes: number): string {
     let truncated = Buffer.from(value).subarray(0, maxBytes).toString('utf8');
     while (Buffer.byteLength(truncated) > maxBytes) truncated = truncated.slice(0, -1);
     return truncated;
+}
+
+function logByteStream(transport: IByteStream, substreamId: number, isSender: boolean, message: string, extra?: Record<string, unknown>): void {
+    transport.logDebug?.(message, {
+        streamId: transport.parentStreamId,
+        byteStreamId: substreamId,
+        isSender,
+        ...extra
+    });
 }
 
 function reserveTerminalSender(info: IByteStreamInfo, id: number): boolean {
