@@ -546,7 +546,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             nonce,
             id: this.streamId,
             cid,
-            protocol: '2',
+            protocol: '3',
             supersede,
             features,
             metadata
@@ -559,7 +559,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             id: this.streamId,
             cid,
             signature,
-            _v: '2'
+            _v: '3'
         });
         params.set('nonce', nonce);
         params.set('aud', audience);

@@ -62,7 +62,7 @@ interface StreamInfo {
     clientId: string;
     appVersion: string;
     configureTs: number;
-    protocolVersion: 1 | 2;
+    protocolVersion: 1 | 2 | 3;
     features: ReadonlySet<string>;
     supersede: boolean;
     address: string;
@@ -165,7 +165,7 @@ export class SrpcServer<
             this.logger.warn(event, { srpc: { ...handshakeLogData, ...extra } });
             cb(false, code, safeHandshakeMessage(message));
         };
-        if (!clientStreamId || !clientId || !appVersion || (protocolVersion !== 1 && protocolVersion !== 2)) {
+        if (!clientStreamId || !clientId || !appVersion || (protocolVersion !== 1 && protocolVersion !== 2 && protocolVersion !== 3)) {
             rejectHandshake('SRPC client missing required handshake parameters', 400, 'Missing required query parameters');
             return;
         }
@@ -185,7 +185,7 @@ export class SrpcServer<
         }
 
         this.pendingHandshakeCount++;
-        this.validateClientAuth(query, info.req)
+        this.validateClientAuth(query, info.req, protocolVersion)
             .then(
                 result => {
                     if (!result || result instanceof AuthenticationFailure) {
@@ -221,10 +221,14 @@ export class SrpcServer<
                         appVersion,
                         configureTs: Number(query.ts ?? 0),
                         protocolVersion,
+                        // Legacy auth-v1 does not sign features, so it cannot
+                        // safely negotiate capabilities added after that format.
                         features: new Set(
-                            normalizeFeatures((query._f ?? '').split(',').filter(feature => feature.length > 0))
-                                .split(',')
-                                .filter(Boolean)
+                            query.authv === '1'
+                                ? []
+                                : normalizeFeatures((query._f ?? '').split(',').filter(feature => feature.length > 0))
+                                      .split(',')
+                                      .filter(Boolean)
                         ),
                         supersede: query._supersede === '1',
                         address,
@@ -780,7 +784,8 @@ export class SrpcServer<
 
     private async validateClientAuth(
         meta: Record<string, unknown>,
-        request: IncomingMessage
+        request: IncomingMessage,
+        protocolVersion: 1 | 2 | 3
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
             const result = await this.clientAuthorizer(meta, request);
@@ -804,8 +809,22 @@ export class SrpcServer<
             return new AuthenticationFailure('invalid server clock-drift configuration');
         if (Math.abs(Date.now() - tsInt) > driftMs) return new AuthenticationFailure('expired timestamp');
 
-        if (authv !== '2') return new AuthenticationFailure('unsupported auth version');
-        if (!isAuthToken(meta.nonce) || !meta.aud || !Number.isSafeInteger(Number(meta._v)) || Number(meta._v) !== 2)
+        if (authv === '1') {
+            if (protocolVersion !== 1 && protocolVersion !== 2) return new AuthenticationFailure('invalid legacy protocol credentials');
+            const clientKey = await this.fetchClientKey(cid);
+            if (clientKey === false) return new AuthenticationFailure('unknown client key');
+            const computedSignature = createHmac('sha256', clientKey).update(`${authv}\n${appv}\n${ts}\n${id}\n${cid}\n`).digest('hex');
+            const signatureBuffer = Buffer.from(signature);
+            const computedBuffer = Buffer.from(computedSignature);
+            if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
+                return new AuthenticationFailure('invalid signature');
+            if (!(await this.consumeAuthReplayToken(cid, id, tsInt + driftMs))) return new AuthenticationFailure('replayed stream ID');
+            return true;
+        }
+
+        // `_v=2` with authv=2 was emitted briefly before the protocol bump.
+        // Continue accepting that combination while new clients use `_v=3`.
+        if (authv !== '2' || (protocolVersion !== 2 && protocolVersion !== 3) || !isAuthToken(meta.nonce) || !meta.aud)
             return new AuthenticationFailure('invalid protocol credentials');
 
         const clientKey = await this.fetchClientKey(cid);
@@ -835,7 +854,7 @@ export class SrpcServer<
                     nonce: String(meta.nonce),
                     id,
                     cid,
-                    protocol: String(meta._v),
+                    protocol: String(protocolVersion),
                     supersede,
                     features,
                     metadata
@@ -847,19 +866,21 @@ export class SrpcServer<
         if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
             return new AuthenticationFailure('invalid signature');
         if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return new AuthenticationFailure('invalid audience');
-        const nonce = String(meta.nonce);
         const expiresAt = tsInt + driftMs;
-        if (this.isLocalAuthNonceReplay(cid, nonce)) return new AuthenticationFailure('replayed nonce');
+        if (!(await this.consumeAuthReplayToken(cid, String(meta.nonce), expiresAt))) return new AuthenticationFailure('replayed nonce');
+        return true;
+    }
+
+    private async consumeAuthReplayToken(principal: string, token: string, expiresAt: number): Promise<boolean> {
+        if (this.isLocalAuthNonceReplay(principal, token)) return false;
         if (this.authNonceConsumer) {
-            if (!(await this.authNonceConsumer(cid, nonce, expiresAt))) return new AuthenticationFailure('replayed nonce');
+            if (!(await this.authNonceConsumer(principal, token, expiresAt))) return false;
             // The shared consumer is authoritative under saturation. Keep the
             // local duplicate fast path bounded by evicting its least-recent
             // principal/nonce entries instead of imposing a service-wide CID cap.
-            if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, true)) return new AuthenticationFailure('replayed nonce');
-        } else if (!this.consumeLocalAuthNonce(cid, nonce, expiresAt, false)) {
-            return new AuthenticationFailure('replay cache capacity exceeded');
+            return this.consumeLocalAuthNonce(principal, token, expiresAt, true);
         }
-        return true;
+        return this.consumeLocalAuthNonce(principal, token, expiresAt, false);
     }
 
     private async fetchClientKey(clientId: string): Promise<false | string> {
@@ -977,9 +998,10 @@ export class SrpcServer<
     }
 
     /**
-     * Installs an atomic service-wide auth-v2 nonce consumer. It must return
-     * true only for the first `(principal, nonce)` consumption through
-     * `expiresAt`; false rejects a replay. Core retains its fair local guard.
+     * Installs an atomic service-wide authentication replay-token consumer. It
+     * must return true only for the first `(principal, token)` consumption
+     * through `expiresAt`; false rejects a replay. Auth-v2 uses its nonce and
+     * legacy auth-v1 uses its signed stream ID. Core retains its fair local guard.
      */
     setAuthNonceConsumer(consumer: (principal: string, nonce: string, expiresAt: number) => boolean | Promise<boolean>): void {
         this.authNonceConsumer = consumer;
@@ -1395,9 +1417,10 @@ function validateServerResourceOptions(options: ISrpcServerOptions<BaseMessage, 
     if (
         options.defaultUnspecifiedProtocolVersion !== undefined &&
         options.defaultUnspecifiedProtocolVersion !== 1 &&
-        options.defaultUnspecifiedProtocolVersion !== 2
+        options.defaultUnspecifiedProtocolVersion !== 2 &&
+        options.defaultUnspecifiedProtocolVersion !== 3
     ) {
-        throw new Error('sRPC server defaultUnspecifiedProtocolVersion must be 1 or 2');
+        throw new Error('sRPC server defaultUnspecifiedProtocolVersion must be 1, 2, or 3');
     }
     for (const [name, value] of [
         ['maxPendingClientRequests', options.maxPendingClientRequests],

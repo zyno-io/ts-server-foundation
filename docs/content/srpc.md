@@ -191,15 +191,15 @@ Client options:
 
 The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
 
-Protocol-v2 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
+Protocol-v2 and protocol-v3 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
 
 After the initial ping handshake, the client sends a ping every 55 seconds. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate ping-based liveness check.
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256. Raw clients normally send `authv=2`, `_v=2`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters.
+Clients sign connection metadata with HMAC-SHA256. New clients send `authv=2`, `_v=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters. The auth-v2 signature covers the request path, audience, protocol version, features, and normalized metadata.
 
-Servers require an explicit `_v` by default. Set `defaultUnspecifiedProtocolVersion: 1` to classify an unmarked legacy handshake as protocol v1, or `defaultUnspecifiedProtocolVersion: 2` to accept an unmarked handshake with v2 semantics. An explicit `_v=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
+Servers require an explicit `_v` by default. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to accept its original `authv=1` signature (`authv`, `appv`, `ts`, `id`, `cid`) so existing v2 clients remain compatible. Its signed stream ID is consumed once for replay protection, and its unsigned feature field is ignored. The brief auth-v2/v2 combination is also accepted as a transition; new clients must use v3. Deploy servers before clients: a v3 client requires a server that recognizes v3. An explicit `_v=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
 
 By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
 
@@ -243,7 +243,7 @@ Connected streams expose metadata:
 
 The exported `SrpcStream<TMeta>` type describes these server-side streams. It also exposes the underlying WebSocket and request queue through `$ws` and `$queue`; treat those fields as low-level protocol surfaces and prefer `SrpcServer.invoke()`, handlers, and `SrpcByteStream` for application work.
 
-Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected protocol-v2 duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
+Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected protocol-v2 or protocol-v3 duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
 
 ## Byte Streams
 

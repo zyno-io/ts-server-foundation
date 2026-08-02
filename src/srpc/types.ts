@@ -129,7 +129,7 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
      * require an explicit transport version. Use `1` only where legacy
      * same-client replacement semantics are intentional.
      */
-    defaultUnspecifiedProtocolVersion?: 1 | 2;
+    defaultUnspecifiedProtocolVersion?: 1 | 2 | 3;
     logTraffic?: SrpcTrafficLogging;
     httpServer?: import('node:http').Server;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
@@ -173,7 +173,7 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly clientId: string;
     readonly appVersion: string;
     readonly configureTs: number;
-    readonly protocolVersion: 1 | 2;
+    readonly protocolVersion: 1 | 2 | 3;
     /** Optional client capabilities negotiated during the WebSocket upgrade. */
     readonly features?: ReadonlySet<string>;
     readonly supersede: boolean;
