@@ -289,6 +289,18 @@ const stop = registerSrpcObserver(entry => {
 
 Observers receive connection entries with `{ type, stream, at }`, disconnection entries with `{ type, stream, cause, at }`, and message entries with `{ type, stream, direction, data, at }`. Message direction is relative to the server. Ping, byte-stream, request, and reply envelopes are observable. Observer exceptions are isolated from SRPC behavior. Call the returned function to unregister the observer.
 
+## Traffic Logging
+
+Set `logTraffic: true` on an `SrpcServer` or `SrpcClient` to log every inbound and outbound envelope at info level with its direction and message type. To also log the decoded body, opt in explicitly:
+
+```ts
+logTraffic: {
+    bodies: true;
+}
+```
+
+Traffic bodies can contain application data, so enable body logging only where that data is appropriate for the configured log sink and retention policy.
+
 ## Errors And Timeouts
 
 Throw `new SrpcError(message, true)` from either a server handler or a

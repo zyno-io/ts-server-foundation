@@ -27,7 +27,8 @@ import {
     TSrpcMessageHandlerFnOrClass,
     encodeSrpcMessage,
     isSrpcMessageHandlerClass,
-    serializeSrpcError
+    serializeSrpcError,
+    srpcMessageTypes
 } from './types';
 import { createWebSocketUpgradeHandler, installWebSocketUpgradeHandler, removeWebSocketUpgradeHandler } from '../http';
 
@@ -399,6 +400,7 @@ export class SrpcServer<
     private handleStreamDataReceived(stream: SrpcStream<TMeta>, data: TClientOutput, retainedBytes = estimateMessageBytes(data)): void {
         if (!this.isStreamDispatchAvailable(stream)) return;
         notifySrpcObservers({ type: 'message', stream, direction: 'inbound', data, at: Date.now() });
+        this.logTraffic(stream, 'inbound', data);
         if (data.pingPong) {
             stream.lastPingAt = Date.now();
             // The initial ping establishes frame ordering before activation.
@@ -786,6 +788,7 @@ export class SrpcServer<
             return false;
         }
         notifySrpcObservers({ type: 'message', stream, direction: 'outbound', data, at: Date.now() });
+        this.logTraffic(stream, 'outbound', data);
         return true;
     }
 
@@ -811,6 +814,7 @@ export class SrpcServer<
                             data,
                             at: Date.now()
                         });
+                        this.logTraffic(stream, 'outbound', data);
                         resolve();
                     }
                 });
@@ -818,6 +822,19 @@ export class SrpcServer<
                 this.closeStreamWithError(stream, 'badArg', 'Failed to send response');
                 reject(error instanceof Error ? error : new Error(String(error)));
             }
+        });
+    }
+
+    private logTraffic(stream: SrpcStream<TMeta>, direction: 'inbound' | 'outbound', message: BaseMessage): void {
+        const options = this.options.logTraffic;
+        if (!options) return;
+        const bodies = typeof options === 'object' && options.bodies === true;
+        this.logger.info('SRPC traffic', {
+            direction,
+            streamId: stream.id,
+            clientId: stream.clientId,
+            messageTypes: srpcMessageTypes(message),
+            ...(bodies ? { body: message } : {})
         });
     }
 

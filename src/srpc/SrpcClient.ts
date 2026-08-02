@@ -20,8 +20,10 @@ import {
     SrpcIndeterminateDeliveryError,
     SrpcMessageFns,
     SrpcMeta,
+    SrpcTrafficLogging,
     encodeSrpcMessage,
-    serializeSrpcError
+    serializeSrpcError,
+    srpcMessageTypes
 } from './types';
 
 export class SrpcConflictError extends Error {
@@ -33,6 +35,7 @@ export class SrpcConflictError extends Error {
 
 export interface SrpcClientOptions {
     enableReconnect?: boolean;
+    logTraffic?: SrpcTrafficLogging;
     /** Audience signed into auth-v2 credentials. Defaults to the WebSocket path. */
     authAudience?: string;
     /** Advertise support for associating byte-stream senders with a handler request. */
@@ -340,6 +343,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             this.closeGenerationWithError(ws, generation, 'badArg', 'Invalid message format');
             return;
         }
+        this.logTraffic('inbound', message);
 
         if (message.pingPong) {
             this.lastPongMs = Date.now();
@@ -535,10 +539,10 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             this.logger.error('Failed to encode SRPC message', error);
             return false;
         }
-        return this.writeEncodedMessage(encoded, generation);
+        return this.writeEncodedMessage(message, encoded, generation);
     }
 
-    private writeEncodedMessage(encoded: Buffer, generation = this.generation): boolean {
+    private writeEncodedMessage(message: TClientInput, encoded: Buffer, generation = this.generation): boolean {
         const ws = this.ws;
         if (!ws || !this.isCurrent(ws, generation) || ws.readyState !== WebSocket.OPEN) return false;
         if (encoded.byteLength > this.maxMessageBytes || (ws.bufferedAmount ?? 0) + encoded.byteLength > this.maxBufferedBytes) {
@@ -547,6 +551,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
         try {
             ws.send(encoded);
+            this.logTraffic('outbound', message);
             return true;
         } catch (error) {
             this.logger.warn('Failed to send SRPC message', error);
@@ -571,7 +576,10 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                         this.closeGenerationWithError(ws, generation, 'badArg', 'Failed to send SRPC message');
                         reject(error);
                     } else if (!this.isCurrent(ws, generation)) reject(new Error('Failed to send SRPC message: generation revoked'));
-                    else resolve();
+                    else {
+                        this.logTraffic('outbound', message);
+                        resolve();
+                    }
                 });
             } catch (error) {
                 this.closeGenerationWithError(ws, generation, 'badArg', 'Failed to send SRPC message');
@@ -581,6 +589,18 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     }
 
     private currentByteStream: IByteStream = this.createByteStream(0);
+
+    private logTraffic(direction: 'inbound' | 'outbound', message: BaseMessage): void {
+        const options = this.clientOptions?.logTraffic;
+        if (!options) return;
+        const bodies = typeof options === 'object' && options.bodies === true;
+        this.logger.info('SRPC traffic', {
+            direction,
+            clientId: this.clientId,
+            messageTypes: srpcMessageTypes(message),
+            ...(bodies ? { body: message } : {})
+        });
+    }
 
     get byteStream(): IByteStream {
         return this.resolveByteStream();
@@ -680,9 +700,10 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         const requestType = `${prefix}Request`;
         const resultType = `${prefix}Response`;
         const requestId = uuid7();
+        const message = { requestId, [requestType]: data } as unknown as TClientInput;
         let encoded: Buffer;
         try {
-            encoded = encodeSrpcMessage(this.clientMessage, { requestId, [requestType]: data } as unknown as TClientInput);
+            encoded = encodeSrpcMessage(this.clientMessage, message);
         } catch (error) {
             return Promise.reject(error);
         }
@@ -717,7 +738,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             });
             this.requestBytes.set(requestId, encodedBytes);
 
-            const sent = this.writeEncodedMessage(encoded, this.generation);
+            const sent = this.writeEncodedMessage(message, encoded, this.generation);
             if (!sent) {
                 this.requestQueue.delete(requestId);
                 this.requestBytes.delete(requestId);

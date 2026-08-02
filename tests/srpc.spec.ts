@@ -133,6 +133,41 @@ describe('srpc', () => {
         assert.throws(() => createClient({ connectTimeoutMs: 0x80000000 }), /connectTimeoutMs/);
     });
 
+    it('logs sRPC traffic types by default and bodies when requested', () => {
+        const entries: unknown[][] = [];
+        const logger = {
+            info(...messages: unknown[]) {
+                entries.push(messages);
+            },
+            warn() {},
+            error() {},
+            debug() {}
+        };
+        const message = { requestId: 'request-id', uEchoRequest: { message: 'hello' } };
+        const stream = { id: 'stream-id', clientId: 'client-id' };
+        const server = Object.create(SrpcServer.prototype) as any;
+        server.logger = logger;
+        server.options = { logTraffic: true };
+        server.logTraffic(stream, 'inbound', message);
+        server.options = { logTraffic: { bodies: true } };
+        server.logTraffic(stream, 'outbound', message);
+
+        const client = Object.create(SrpcClient.prototype) as any;
+        client.logger = logger;
+        client.clientId = 'client-id';
+        client.clientOptions = { logTraffic: true };
+        client.logTraffic('inbound', message);
+        client.clientOptions = { logTraffic: { bodies: true } };
+        client.logTraffic('outbound', message);
+
+        assert.deepEqual(entries, [
+            ['SRPC traffic', { direction: 'inbound', streamId: 'stream-id', clientId: 'client-id', messageTypes: ['uEchoRequest'] }],
+            ['SRPC traffic', { direction: 'outbound', streamId: 'stream-id', clientId: 'client-id', messageTypes: ['uEchoRequest'], body: message }],
+            ['SRPC traffic', { direction: 'inbound', clientId: 'client-id', messageTypes: ['uEchoRequest'] }],
+            ['SRPC traffic', { direction: 'outbound', clientId: 'client-id', messageTypes: ['uEchoRequest'], body: message }]
+        ]);
+    });
+
     it('ignores bounded late replies and rejects unknown UUID replies', async () => {
         const server = Object.create(SrpcServer.prototype) as any;
         const sent: Record<string, unknown>[] = [];

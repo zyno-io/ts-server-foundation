@@ -76,6 +76,30 @@ export interface ISrpcLogger {
     debug(...messages: unknown[]): void;
 }
 
+/**
+ * Controls per-message sRPC traffic logs. `true` logs envelope/message types;
+ * set `bodies` to include the decoded message body.
+ */
+export interface SrpcTrafficLoggingOptions {
+    bodies?: boolean;
+}
+
+export type SrpcTrafficLogging = boolean | SrpcTrafficLoggingOptions;
+
+const SrpcEnvelopeFields = new Set(['requestId', 'reply', 'error', 'userError', 'trace', 'pingPong', 'byteStreamOperation']);
+
+/** Returns the application-level message fields carried by an sRPC envelope. */
+export function srpcMessageTypes(message: BaseMessage): string[] {
+    if (message.pingPong) return ['pingPong'];
+    if (message.byteStreamOperation) return ['byteStreamOperation'];
+    if (message.error !== undefined) return ['error'];
+
+    const types = Object.entries(message)
+        .filter(([key, value]) => !SrpcEnvelopeFields.has(key) && value !== undefined)
+        .map(([key]) => key);
+    return types.length ? types : [message.reply ? 'reply' : 'unknown'];
+}
+
 export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOutput extends BaseMessage> {
     logger: ISrpcLogger;
     clientMessage: SrpcMessageFns<TClientOutput>;
@@ -87,6 +111,7 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
      * same-client replacement semantics are intentional.
      */
     defaultUnspecifiedProtocolVersion?: 1 | 2;
+    logTraffic?: SrpcTrafficLogging;
     debug?: boolean;
     logLevel?: 'info' | 'debug' | false;
     httpServer?: import('node:http').Server;
