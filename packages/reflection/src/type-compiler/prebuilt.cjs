@@ -77,7 +77,7 @@ function tryInstallPrebuiltTypeCompiler(context, source) {
     try {
         if (!prebuiltDownloadsEnabled() || !context?.projectRoot || hasCustomGoBuildEnvironment()) return false;
 
-        const packageRoot = findFoundationPackageRoot(context.dirname);
+        const packageRoot = findReflectionPackageRoot(context.dirname);
         const packageVersion = readJson(path.join(packageRoot, 'package.json')).version;
         if (!isPublishedReleaseVersion(packageVersion)) return false;
 
@@ -252,16 +252,16 @@ function prebuiltAssetNames(target) {
     };
 }
 
-function findFoundationPackageRoot(start) {
+function findReflectionPackageRoot(start) {
     let directory = path.resolve(start);
     for (;;) {
         const packageJson = path.join(directory, 'package.json');
         if (fs.existsSync(packageJson)) {
             const pkg = readJson(packageJson);
-            if (pkg.name === '@zyno-io/ts-server-foundation') return directory;
+            if (pkg.name === '@zyno-io/ts-reflection') return directory;
         }
         const parent = path.dirname(directory);
-        if (parent === directory) throw new Error('could not locate the ts-server-foundation package root');
+        if (parent === directory) throw new Error('could not locate the ts-reflection package root');
         directory = parent;
     }
 }

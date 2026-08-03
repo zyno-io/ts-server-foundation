@@ -868,6 +868,37 @@ describe('CLI', () => {
         assert.equal(hasCompilerPlugin(join(dir, 'packages', 'standalone', 'deep', 'tsconfig.json')), false);
     });
 
+    it('preserves an explicitly configured standalone reflection compiler', () => {
+        const dir = tempDir();
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify({ name: 'fixture', devDependencies: { '@zyno-io/ts-server-foundation': '*' } }, null, 4)
+        );
+        writeFileSync(
+            join(dir, 'tsconfig.json'),
+            JSON.stringify(
+                {
+                    compilerOptions: {
+                        target: 'ES2022',
+                        plugins: [{ transform: '@zyno-io/ts-reflection/type-compiler' }]
+                    }
+                },
+                null,
+                4
+            )
+        );
+
+        const result = runCli('tsf-install.js', ['--no-install'], dir);
+
+        assert.equal(result.status, 0, result.stderr);
+        const tsconfig = JSON.parse(readFileSync(join(dir, 'tsconfig.json'), 'utf8')) as {
+            reflection?: boolean;
+            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+        };
+        assert.equal(tsconfig.reflection, true);
+        assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-reflection/type-compiler');
+    });
+
     it('compiles and tests a scaffolded template app against the local package', () => {
         const dir = tempDir();
         const target = join(dir, 'api');

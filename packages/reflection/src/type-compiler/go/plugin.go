@@ -15,6 +15,7 @@ import (
 )
 
 const foundationPackageSpec = "@zyno-io/ts-server-foundation"
+const reflectionPackageSpec = "@zyno-io/ts-reflection"
 
 type registry struct {
 	files                map[string]*fileInfo

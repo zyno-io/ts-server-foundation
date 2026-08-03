@@ -1247,7 +1247,7 @@ func isExternalImportRef(ref importRef) bool {
 }
 
 func isFoundationImportRef(ref importRef) bool {
-	return isExternalImportRef(ref) && ref.spec == foundationPackageSpec
+	return isExternalImportRef(ref) && (ref.spec == foundationPackageSpec || ref.spec == reflectionPackageSpec)
 }
 
 func runtimeArg(info *fileInfo, reg *registry, raw string) string {

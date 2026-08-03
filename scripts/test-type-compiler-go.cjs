@@ -6,7 +6,7 @@ const { createRequire } = require('node:module');
 const { spawnSync } = require('node:child_process');
 
 const root = resolve(__dirname, '..');
-const pluginDir = join(root, 'src/type-compiler/go');
+const pluginDir = join(root, 'packages/reflection/src/type-compiler/go');
 const projectRequire = createRequire(join(root, 'package.json'));
 const ttscDir = dirname(projectRequire.resolve('ttsc/package.json'));
 const shimDir = join(ttscDir, 'shim');

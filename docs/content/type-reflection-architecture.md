@@ -116,7 +116,7 @@ Executable applications may set `emitTypeAliases: false` when no downstream pack
 
 TSF emits metadata through a versioned compact runtime format. Structural metadata is serialized as opaque JSON so TypeScript's built-in emit transforms do not traverse the generated graph. Indexed runtime slots represent values with JavaScript semantics, module recipes represent imported classes and aliases, and one lazy per-file registry decodes and caches repeated types. CommonJS and ESM output share this wire format.
 
-TSF's own package spec may be recognized as a single compiler constant because the compiler must distinguish foundation metadata helpers from arbitrary user imports. Other package specs must not be special-cased.
+`@zyno-io/ts-reflection` is the canonical compiler-recognized runtime package because the compiler must distinguish metadata helpers from arbitrary user imports. `@zyno-io/ts-server-foundation` remains recognized only as a compatibility re-export during the migration. Other package specs must not be special-cased.
 
 ## Component Naming
 

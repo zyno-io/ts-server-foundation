@@ -40,9 +40,12 @@ describe('packed Yarn PnP consumer', () => {
             version: string;
             devDependencies: Record<string, string>;
         };
+        const reflectionPackage = JSON.parse(readFileSync(join(root, 'packages', 'reflection', 'package.json'), 'utf8')) as { version: string };
         const foundationTarball = join(directory, `zyno-io-ts-server-foundation-${rootPackage.version}.tgz`);
+        const reflectionTarball = join(directory, `zyno-io-ts-reflection-${reflectionPackage.version}.tgz`);
 
-        run('npm', ['pack', '--pack-destination', directory], root);
+        run('yarn', ['pack', '--out', foundationTarball], root);
+        run('yarn', ['workspace', '@zyno-io/ts-reflection', 'pack', '--out', reflectionTarball], root);
         mkdirSync(externalDir, { recursive: true });
         run('yarn', ['init', '-2'], externalDir);
         writeFileSync(
@@ -64,10 +67,12 @@ describe('packed Yarn PnP consumer', () => {
                 private: true,
                 dependencies: {
                     '@zyno-io/ts-server-foundation': `file:${foundationTarball}`,
+                    '@zyno-io/ts-reflection': `file:${reflectionTarball}`,
                     'pnp-receive-fixture': `file:${externalTarball}`
                 },
                 resolutions: {
-                    '@zyno-io/ts-server-foundation': `file:${foundationTarball}`
+                    '@zyno-io/ts-server-foundation': `file:${foundationTarball}`,
+                    '@zyno-io/ts-reflection': `file:${reflectionTarball}`
                 },
                 devDependencies: {
                     '@types/node': rootPackage.devDependencies['@types/node'],
@@ -89,7 +94,7 @@ describe('packed Yarn PnP consumer', () => {
                     strict: true,
                     skipLibCheck: true,
                     types: ['node'],
-                    plugins: [{ transform: '@zyno-io/ts-server-foundation/type-compiler' }]
+                    plugins: [{ transform: '@zyno-io/ts-reflection/type-compiler' }]
                 },
                 include: ['src/**/*.ts'],
                 reflection: true

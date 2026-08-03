@@ -15,14 +15,17 @@
         "tsf-test": "dist/src/cli/tsf-test.js",
         "tsf-update": "dist/src/cli/tsf-update.js"
     },
+    "workspaces": [
+        "packages/*"
+    ],
     "files": [
-        "dist/src/",
-        "dist/devconsole/",
-        "docs/content/",
+        "dist/src/**/*",
+        "dist/devconsole/**/*",
+        "docs/content/**/*",
         "docs/.vitepress/config.mts",
         "docs/openapi.md",
-        "resources/",
-        "template-app/",
+        "resources/**/*",
+        "template-app/**/*",
         "types.d.ts",
         "package.json",
         "!docs/.vitepress/dist/"
@@ -49,10 +52,10 @@
         }
     },
     "scripts": {
-        "clean": "rm -rf dist",
-        "build": "yarn clean && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
-        "build:dirty": "ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
-        "build:type-compiler": "rm -rf dist/src/type-compiler && mkdir -p dist/src/type-compiler && cp -R src/type-compiler/*.cjs src/type-compiler/go dist/src/type-compiler/",
+        "clean": "rm -rf dist && yarn workspace @zyno-io/ts-reflection clean",
+        "build": "yarn clean && yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
+        "build:dirty": "yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
+        "build:type-compiler": "rm -rf dist/src/type-compiler && mkdir -p dist/src/type-compiler && cp src/type-compiler/index.cjs dist/src/type-compiler/",
         "build:devconsole": "vite build --config devconsole/vite.config.ts",
         "docs:dev": "vitepress dev docs --host 0.0.0.0",
         "docs:build": "vitepress build docs",
@@ -63,7 +66,7 @@
         "test": "yarn build && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
         "test:type-compiler-go": "node scripts/test-type-compiler-go.cjs",
         "test:dirty": "yarn build:dirty && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
-        "test-app": "yarn clean && ttsc -p tsconfig.test-app.json && APP_ENV=test node dist/test-app/bootstrap.js"
+        "test-app": "yarn clean && yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.test-app.json && APP_ENV=test node dist/test-app/bootstrap.js"
     },
     "dependencies": {
         "@bufbuild/protobuf": "^2.13.0",
@@ -87,6 +90,7 @@
         "@ttsc/graph": "^0.23.0",
         "@types/ws": "^8.18.1",
         "@zyno-io/config": "^1.14.0",
+        "@zyno-io/ts-reflection": "workspace:*",
         "bcrypt": "^6.0.0",
         "bullmq": "^5.81.2",
         "busboy": "^1.6.0",

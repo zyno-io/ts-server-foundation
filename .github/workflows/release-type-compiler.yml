@@ -71,7 +71,9 @@ jobs:
         run: yarn install --immutable
 
       - name: Prepare type compiler
-        run: yarn ttsc prepare -p tsconfig.json
+        run: |
+          yarn workspace @zyno-io/ts-reflection build
+          yarn ttsc prepare -p tsconfig.json
 
       - name: Package prebuilt binary
         shell: bash

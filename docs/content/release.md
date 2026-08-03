@@ -22,7 +22,7 @@ paths are selectively unplugged.
 corepack yarn build
 ```
 
-The build performs a clean TypeScript compile, builds the DevConsole assets, and makes compiled CLI files executable.
+The build first produces the browser-neutral `@zyno-io/ts-reflection` workspace, then performs a clean TypeScript compile, builds the DevConsole assets, and makes compiled CLI files executable.
 
 For local iteration:
 
@@ -75,14 +75,16 @@ The package publishes:
 - `types.d.ts`
 - `package.json`
 
-The supported import paths are the root export and the `/otel` OpenTelemetry bootstrap export. Although `package.json` is included in the tarball, it is not exposed through the package `exports` map. See [Public API](./public-api.md).
+`@zyno-io/ts-reflection` is published from `packages/reflection` with its own ESM and CommonJS runtime entrypoints, plus the CommonJS `/type-compiler` plugin. CI gives reflection and foundation the same release version, rewrites foundation's workspace dependency to that concrete version, then publishes reflection before foundation.
+
+Foundation supports the root export, `/otel`, and compatibility subpaths for metadata runtime and the type compiler. The reflection package supports its root export plus `/type-metadata-runtime` and `/type-compiler`. Although `package.json` is included in either tarball, it is not exposed through the package `exports` map. See [Public API](./public-api.md).
 
 ## Local Pack Inspection
 
 Use a dry run to inspect the tarball list.
 
 ```bash
-npm pack --dry-run
+yarn pack --dry-run
 ```
 
 Confirm generated build outputs are present and local-only artifacts such as `docs/.vitepress/dist/` are absent unless intentionally published.
@@ -91,7 +93,7 @@ Confirm generated build outputs are present and local-only artifacts such as `do
 
 CI derives release versions from the commit timestamp in UTC using `YY.MDD.HHmm`-style calendar versioning (for example, `26.711.1430` for July 11, 2026 at 14:30 UTC). Non-`main` builds append `-canary.<short-sha>`. Consumers that require reproducible behavior should pin an exact version rather than assuming semantic-version compatibility between calendar releases.
 
-After GitLab publishes and mirrors a `main` commit, the GitHub `Release Type Compiler Prebuilds` workflow builds CGO-disabled type-compiler binaries for Linux, macOS, and Windows on x64 and arm64. It creates or updates the `v<package-version>` GitHub release with one binary and manifest per successful target. A failed target does not prevent other target assets from being released, and consumers always retain the packaged-source fallback.
+After GitLab publishes and mirrors a `main` commit, the GitHub `Release Type Compiler Prebuilds` workflow builds CGO-disabled prebuilds for the reflection package's type compiler on Linux, macOS, and Windows for x64 and arm64. It creates or updates the `v<package-version>` GitHub release with one binary and manifest per successful target. A failed target does not prevent other target assets from being released, and consumers always retain the packaged-source fallback.
 
 Treat these as breaking changes:
 

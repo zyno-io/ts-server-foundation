@@ -2426,6 +2426,20 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@zyno-io/ts-reflection@workspace:*, @zyno-io/ts-reflection@workspace:packages/reflection":
+  version: 0.0.0-use.local
+  resolution: "@zyno-io/ts-reflection@workspace:packages/reflection"
+  dependencies:
+    typescript: "npm:^7.0.2"
+    vite: "npm:^8.1.5"
+  peerDependencies:
+    ttsc: ^0.23.0
+  peerDependenciesMeta:
+    ttsc:
+      optional: true
+  languageName: unknown
+  linkType: soft
+
 "@zyno-io/ts-server-foundation@workspace:.":
   version: 0.0.0-use.local
   resolution: "@zyno-io/ts-server-foundation@workspace:."
@@ -2459,6 +2473,7 @@ __metadata:
     "@types/ws": "npm:^8.18.1"
     "@vitejs/plugin-vue": "npm:^6.0.8"
     "@zyno-io/config": "npm:^1.14.0"
+    "@zyno-io/ts-reflection": "workspace:*"
     bcrypt: "npm:^6.0.0"
     bullmq: "npm:^5.81.2"
     busboy: "npm:^1.6.0"

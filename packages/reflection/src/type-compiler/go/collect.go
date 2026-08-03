@@ -838,7 +838,7 @@ func metadataCallDetails(reg *registry, call *shimast.CallExpression) (string, i
 		return "", 0, false
 	}
 	source := shimast.GetSourceFileOfNode(declaration)
-	if source == nil || !isFoundationMetadataDeclarationFile(source.FileName()) {
+	if source == nil || !isReflectionMetadataDeclarationFile(source.FileName()) {
 		return "", 0, false
 	}
 	name := ""
@@ -864,17 +864,21 @@ func metadataCallDetails(reg *registry, call *shimast.CallExpression) (string, i
 	}
 }
 
-func isFoundationMetadataDeclarationFile(fileName string) bool {
+func isReflectionMetadataDeclarationFile(fileName string) bool {
 	slash := filepath.ToSlash(fileName)
-	if !strings.Contains(slash, "/ts-server-foundation/") {
+	isReflectionPackage := strings.Contains(slash, "/ts-reflection/") || strings.Contains(slash, "/packages/reflection/")
+	isLegacyFoundationPackage := strings.Contains(slash, "/ts-server-foundation/")
+	if !isReflectionPackage && !isLegacyFoundationPackage {
 		return false
 	}
 	for _, suffix := range []string{
 		"/src/reflection/conversion.ts",
 		"/src/reflection/conversion.d.ts",
+		"/dist/reflection/conversion.d.ts",
 		"/dist/src/reflection/conversion.d.ts",
 		"/src/reflection/reflection-class.ts",
 		"/src/reflection/reflection-class.d.ts",
+		"/dist/reflection/reflection-class.d.ts",
 		"/dist/src/reflection/reflection-class.d.ts",
 	} {
 		if strings.HasSuffix(slash, suffix) {
@@ -933,10 +937,16 @@ func matchCallNodePositions(file *shimast.SourceFile, calls []callInfo) {
 }
 
 func isFoundationCompatibilityImport(ref importRef) bool {
-	if ref.spec == foundationPackageSpec {
+	if ref.spec == foundationPackageSpec || ref.spec == reflectionPackageSpec {
 		return true
 	}
 	source := filepath.ToSlash(ref.source)
+	if strings.Contains(source, "/packages/reflection/src/") {
+		return strings.HasSuffix(source, "/src/index") ||
+			strings.HasSuffix(source, "/src/types/index") ||
+			strings.HasSuffix(source, "/src/reflection/index") ||
+			strings.HasSuffix(source, "/src/reflection/conversion")
+	}
 	if !strings.Contains(source, "/ts-server-foundation/src/") {
 		return false
 	}

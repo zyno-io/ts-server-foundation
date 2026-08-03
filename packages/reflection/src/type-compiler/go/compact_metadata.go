@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	compactMetadataRuntimeSpec       = "@zyno-io/ts-server-foundation/type-metadata-runtime"
+	compactMetadataRuntimeSpec       = "@zyno-io/ts-reflection/type-metadata-runtime"
 	compactMetadataDecoderName       = "decodeCompactMetadataV1"
 	compactMetadataRegistryName      = "createCompactMetadataRegistryV1"
 	compactMetadataAliasResolverName = "resolveCompactMetadataAliasV1"

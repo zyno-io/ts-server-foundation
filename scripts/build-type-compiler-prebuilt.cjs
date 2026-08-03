@@ -13,7 +13,7 @@ const {
     isPublishedReleaseVersion,
     prebuiltAssetNames,
     resolveToolchainVersions
-} = require('../src/type-compiler/prebuilt.cjs');
+} = require('../packages/reflection/src/type-compiler/prebuilt.cjs');
 
 function main(args) {
     const options = parseArgs(args);
@@ -34,7 +34,7 @@ function main(args) {
         packageVersion,
         platform: process.platform,
         arch: process.arch,
-        pluginSourceSha256: hashPluginSource(path.join(process.cwd(), 'src', 'type-compiler', 'go')),
+        pluginSourceSha256: hashPluginSource(path.join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'go')),
         ttscVersion: toolchain.ttscVersion,
         typescriptVersion: toolchain.typescriptVersion,
         cgoEnabled: false,

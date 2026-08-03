@@ -1,6 +1,5 @@
-export type { AbstractClassType, ClassType, TypeAnnotation } from '../reflection';
-export { assert, cast, is } from '../reflection';
-export * from './primitives';
-export * from './type-annotations';
+export type { AbstractClassType, ClassType, TypeAnnotation } from '@zyno-io/ts-reflection';
+export { assert, cast, is } from '@zyno-io/ts-reflection';
+export * from '@zyno-io/ts-reflection';
 export * from './phone';
-export * from './runtime';
+export { uuid } from './runtime';

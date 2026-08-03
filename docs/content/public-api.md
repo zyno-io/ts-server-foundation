@@ -3,6 +3,7 @@
 The package intentionally exposes a small package-level import surface:
 
 - `@zyno-io/ts-server-foundation` for application APIs
+- `@zyno-io/ts-reflection` for browser-neutral reflection, validation, deserialization, and metadata APIs; its `/type-compiler` subpath is the standalone `ttsc` plugin
 - `@zyno-io/ts-server-foundation/otel` for OpenTelemetry bootstrap
 
 Feature-folder subpaths such as `/http`, `/database/sql`, `/testing`, `/services/logger`, and `/telemetry/sentry` are not exported. Import application APIs from the package root:
@@ -11,7 +12,13 @@ Feature-folder subpaths such as `/http`, `/database/sql`, `/testing`, `/services
 import { App, BaseDatabase, HttpBody, HttpRequest, TestingHelpers, createApp, http, sql } from '@zyno-io/ts-server-foundation';
 ```
 
-The root export is the supported application surface. Internal file layout can change without becoming a package-level breaking contract.
+The foundation root is the supported server application surface. Import the reflection runtime directly when a browser bundle needs it:
+
+```ts
+import { ReflectionKind, typeOf, validate } from '@zyno-io/ts-reflection';
+```
+
+Internal file layout can change without becoming a package-level breaking contract.
 
 ## Root Export Reference
 

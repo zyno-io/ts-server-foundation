@@ -22,7 +22,7 @@ Calling `typeOf<T>()`, `deserialize<T>()`, or `validatedDeserialize<T>()` from J
 
 An untransformed `validate<T>(plainObject)` call has no target metadata and therefore returns no errors. Do not treat that fail-open result as validation; compile the call, or pass a compiled class/reflected `Type` explicitly.
 
-The compiler recognizes the short compatibility exports `cast<T>()`, `assert<T>()`, and `is<T>()` only when they are imported from `@zyno-io/ts-server-foundation`. Import identity keeps application functions with the same common names from being transformed. Calls that do not pass through the compiler or do not specify a generic type must provide an explicit reflected `Type`; otherwise they throw a missing-metadata error.
+The compiler recognizes the short compatibility exports `cast<T>()`, `assert<T>()`, and `is<T>()` only when they are imported from `@zyno-io/ts-reflection` or its `@zyno-io/ts-server-foundation` compatibility re-export. Import identity keeps application functions with the same common names from being transformed. Calls that do not pass through the compiler or do not specify a generic type must provide an explicit reflected `Type`; otherwise they throw a missing-metadata error.
 
 ## Inspecting A Type
 
@@ -174,6 +174,8 @@ For a shared package:
 Alias metadata containing only JSON-representable type information is emitted as self-contained JavaScript and does not add a TSF runtime dependency to the shared package. Aliases that refer to runtime values, such as classes or validators, retain the generated runtime import; those packages must declare the matching TSF runtime dependency.
 
 If a package is built without emitted alias metadata, the consumer may retain only an unresolved external type boundary. Validation, deserialization, and OpenAPI cannot safely reconstruct missing alias semantics from the alias name alone.
+
+Browser bundles should import this runtime surface from `@zyno-io/ts-reflection`; the foundation root remains a server-only compatibility export.
 
 ## Runtime Boundaries
 

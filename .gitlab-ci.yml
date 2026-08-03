@@ -83,11 +83,13 @@ test-and-build:
         BUILD_VERSION="${BUILD_VERSION}-canary.${SHORT_SHA}"
       fi
 
-      npm version ${BUILD_VERSION} --git-tag-version=false
+      node scripts/prepare-release-packages.cjs "${BUILD_VERSION}"
   artifacts:
     paths:
       - dist/
       - package.json
+      - packages/reflection/dist/
+      - packages/reflection/package.json
 
 deploy:
   stage: deploy
@@ -103,11 +105,14 @@ deploy:
       npm config set -- //${PRIVATE_NPM_HOST}/:_authToken="${PRIVATE_NPM_PUBLISHER_TOKEN}"
 
       if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        (cd packages/reflection && npm publish --registry https://${PRIVATE_NPM_HOST}/)
         npm publish --registry https://${PRIVATE_NPM_HOST}/
 
         npm config set //registry.npmjs.org/:_authToken="${NPM_PUBLISH_TOKEN}"
+        (cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)
         npm publish --registry https://registry.npmjs.org/ --access public
       else
+        (cd packages/reflection && npm publish --registry https://${PRIVATE_NPM_HOST}/ --tag canary)
         npm publish --registry https://${PRIVATE_NPM_HOST}/ --tag canary
       fi
 

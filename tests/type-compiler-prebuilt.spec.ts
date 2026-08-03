@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
 // oxlint-disable-next-line typescript/no-require-imports
-const prebuilt = require('../src/type-compiler/prebuilt.cjs') as {
+const prebuilt = require(join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'prebuilt.cjs')) as {
     hashPluginSource(root: string): string;
     isPublishedReleaseVersion(version: unknown): boolean;
     prebuiltAssetNames(target: string): { binary: string; manifest: string };
@@ -62,7 +62,7 @@ async function serve(files: Record<string, Buffer | string>): Promise<string> {
 }
 
 async function runDownloader(input: unknown): Promise<{ status: number | null; stderr: string }> {
-    const child = spawn(process.execPath, [join(process.cwd(), 'src', 'type-compiler', 'download-prebuilt.cjs')], {
+    const child = spawn(process.execPath, [join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'download-prebuilt.cjs')], {
         stdio: ['pipe', 'ignore', 'pipe'],
         timeout: 30_000
     });
@@ -90,14 +90,14 @@ async function runNode(script: string, env: NodeJS.ProcessEnv): Promise<{ status
     return { status, stderr, stdout };
 }
 
-function publishedFoundation(directory: string): { dirname: string; source: string; version: string } {
-    const root = join(directory, 'foundation');
-    const dirname = join(root, 'dist', 'src', 'type-compiler');
+function publishedReflection(directory: string): { dirname: string; source: string; version: string } {
+    const root = join(directory, 'reflection');
+    const dirname = join(root, 'dist', 'type-compiler');
     const source = join(dirname, 'go');
     const version = '26.714.1200';
     mkdirSync(dirname, { recursive: true });
-    cpSync(join(process.cwd(), 'src', 'type-compiler', 'go'), source, { recursive: true });
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@zyno-io/ts-server-foundation', version }));
+    cpSync(join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'go'), source, { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@zyno-io/ts-reflection', version }));
     return { dirname, source, version };
 }
 
@@ -195,26 +195,26 @@ describe('type compiler prebuilds', () => {
 
     it('seeds the exact consumer ttsc cache through the published plugin resolver', async () => {
         const directory = temporaryDirectory();
-        const foundation = publishedFoundation(directory);
+        const reflection = publishedReflection(directory);
         const cache = join(directory, 'ttsc-cache');
         const value = fixture(directory);
-        value.expected.packageVersion = foundation.version;
-        value.expected.pluginSourceSha256 = prebuilt.hashPluginSource(foundation.source);
-        value.manifest.packageVersion = foundation.version;
+        value.expected.packageVersion = reflection.version;
+        value.expected.pluginSourceSha256 = prebuilt.hashPluginSource(reflection.source);
+        value.manifest.packageVersion = reflection.version;
         value.manifest.pluginSourceSha256 = value.expected.pluginSourceSha256;
         const target = `${process.platform}-${process.arch}`;
         const assets = prebuilt.prebuiltAssetNames(target);
         const baseUrl = await serve({
-            [`/v${foundation.version}/${assets.binary}`]: value.binary,
-            [`/v${foundation.version}/${assets.manifest}`]: JSON.stringify(value.manifest)
+            [`/v${reflection.version}/${assets.binary}`]: value.binary,
+            [`/v${reflection.version}/${assets.manifest}`]: JSON.stringify(value.manifest)
         });
-        const modulePath = join(process.cwd(), 'src', 'type-compiler', 'prebuilt.cjs');
+        const modulePath = join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'prebuilt.cjs');
         const result = await runNode(
             `
                 const prebuilt = require(${JSON.stringify(modulePath)});
                 const installed = prebuilt.tryInstallPrebuiltTypeCompiler(
-                    { dirname: ${JSON.stringify(foundation.dirname)}, projectRoot: ${JSON.stringify(process.cwd())} },
-                    ${JSON.stringify(foundation.source)}
+                    { dirname: ${JSON.stringify(reflection.dirname)}, projectRoot: ${JSON.stringify(process.cwd())} },
+                    ${JSON.stringify(reflection.source)}
                 );
                 process.stdout.write(JSON.stringify(installed));
             `,
@@ -236,13 +236,13 @@ describe('type compiler prebuilds', () => {
 
     it('returns the source descriptor when a release asset cannot be downloaded', async () => {
         const directory = temporaryDirectory();
-        const foundation = publishedFoundation(directory);
+        const reflection = publishedReflection(directory);
         const baseUrl = await serve({});
-        const modulePath = join(process.cwd(), 'src', 'type-compiler', 'index.cjs');
+        const modulePath = join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'index.cjs');
         const result = await runNode(
             `
                 const plugin = require(${JSON.stringify(modulePath)});
-                const descriptor = plugin({ dirname: ${JSON.stringify(foundation.dirname)}, projectRoot: ${JSON.stringify(process.cwd())} });
+                const descriptor = plugin({ dirname: ${JSON.stringify(reflection.dirname)}, projectRoot: ${JSON.stringify(process.cwd())} });
                 process.stdout.write(JSON.stringify(descriptor));
             `,
             {
@@ -256,7 +256,7 @@ describe('type compiler prebuilds', () => {
         assert.equal(result.status, 0, result.stderr);
         assert.deepStrictEqual(JSON.parse(result.stdout), {
             name: 'tsf-type-metadata',
-            source: foundation.source
+            source: reflection.source
         });
     });
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
 // oxlint-disable-next-line typescript/no-require-imports
-const pnp = require('../src/type-compiler/pnp.cjs') as {
+const pnp = require(join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'pnp.cjs')) as {
     isArchivePath(value: string): boolean;
     materializeImportedPackageRoots(
         context: { projectRoot: string; tsconfig: string },

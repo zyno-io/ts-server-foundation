@@ -1,0 +1,47 @@
+{
+    "name": "@zyno-io/ts-reflection",
+    "version": "0.0.0-dev",
+    "description": "Browser-neutral TypeScript reflection and runtime metadata",
+    "license": "MIT",
+    "files": [
+        "dist/",
+        "package.json",
+        "README.md"
+    ],
+    "type": "module",
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs"
+        },
+        "./type-metadata-runtime": {
+            "types": "./dist/type-metadata-runtime.d.ts",
+            "import": "./dist/type-metadata-runtime.js",
+            "require": "./dist/type-metadata-runtime.cjs"
+        },
+        "./type-compiler": "./dist/type-compiler/index.cjs"
+    },
+    "scripts": {
+        "clean": "rm -rf dist",
+        "build": "yarn clean && yarn build:types && yarn build:type-compiler && vite build --config vite.config.ts",
+        "build:types": "tsc -p tsconfig.types.json",
+        "build:type-compiler": "rm -rf dist/type-compiler && mkdir -p dist/type-compiler && cp -R src/type-compiler/*.cjs src/type-compiler/go dist/type-compiler/"
+    },
+    "devDependencies": {
+        "typescript": "^7.0.2",
+        "vite": "^8.1.5"
+    },
+    "peerDependencies": {
+        "ttsc": "^0.23.0"
+    },
+    "peerDependenciesMeta": {
+        "ttsc": {
+            "optional": true
+        }
+    },
+    "preferUnplugged": true
+}

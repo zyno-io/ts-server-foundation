@@ -14,9 +14,11 @@ const ttscLauncher = join(dirname(requireFromTest.resolve('ttsc/package.json')),
 function createFixture(): string {
     const directory = join(tmpdir(), `tsf-ast-transform-${process.pid}-${Date.now()}`);
     const packageDirectory = join(directory, 'node_modules', '@zyno-io', 'ts-server-foundation');
+    const reflectionPackageDirectory = join(directory, 'node_modules', '@zyno-io', 'ts-reflection');
     const reflectionDirectory = join(packageDirectory, 'dist', 'src', 'reflection');
     const orderAliasDirectory = join(directory, 'node_modules', '@fixture', 'order-alias');
     mkdirSync(reflectionDirectory, { recursive: true });
+    mkdirSync(reflectionPackageDirectory, { recursive: true });
     mkdirSync(orderAliasDirectory, { recursive: true });
 
     symlinkSync(typescriptDirectory, join(directory, 'node_modules', 'typescript'), 'dir');
@@ -148,6 +150,34 @@ function createFixture(): string {
         `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.decodeCompactMetadataV1 = decode; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
     );
     writeFileSync(
+        join(reflectionPackageDirectory, 'package.json'),
+        JSON.stringify({
+            name: '@zyno-io/ts-reflection',
+            type: 'module',
+            exports: {
+                './type-metadata-runtime': {
+                    types: './type-metadata-runtime.d.ts',
+                    import: './type-metadata-runtime.js',
+                    require: './type-metadata-runtime.cjs'
+                }
+            }
+        })
+    );
+    writeFileSync(
+        join(reflectionPackageDirectory, 'type-metadata-runtime.d.ts'),
+        `export declare function decodeCompactMetadataV1<T>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
+         export declare function createCompactMetadataRegistryV1(serialized: string, references: readonly unknown[]): (index: number) => unknown;
+         export declare function resolveCompactMetadataAliasV1(loadModule: () => unknown, exportName: string, typeName: string): unknown;\n`
+    );
+    writeFileSync(
+        join(reflectionPackageDirectory, 'type-metadata-runtime.js'),
+        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, decode as decodeCompactMetadataV1, resolveAlias as resolveCompactMetadataAliasV1 };\n`
+    );
+    writeFileSync(
+        join(reflectionPackageDirectory, 'type-metadata-runtime.cjs'),
+        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.decodeCompactMetadataV1 = decode; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
+    );
+    writeFileSync(
         join(orderAliasDirectory, 'package.json'),
         JSON.stringify({
             name: '@fixture/order-alias',
@@ -269,7 +299,7 @@ function createFixture(): string {
                     sourceMap: true,
                     strict: true,
                     experimentalDecorators: true,
-                    plugins: [{ transform: join(process.cwd(), 'src', 'type-compiler', 'index.cjs') }]
+                    plugins: [{ transform: join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'index.cjs') }]
                 },
                 include: ['./*.mts', './*.cts'],
                 reflection: true
@@ -292,7 +322,7 @@ function createAliasFixture(source: string, emitMetadataRuntimeImport?: boolean)
     writeFileSync(join(directory, 'browser-safe-aliases.mts'), `import type { SourceUnion } from './alias-source.mjs';\n${source}`);
     writeFileSync(join(directory, 'browser-safe-aliases.cts'), `import type { SourceUnion } from './alias-source.cjs';\n${source}`);
     const plugin: Record<string, unknown> = {
-        transform: join(process.cwd(), 'src', 'type-compiler', 'index.cjs')
+        transform: join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'index.cjs')
     };
     if (emitMetadataRuntimeImport !== undefined) plugin.emitMetadataRuntimeImport = emitMetadataRuntimeImport;
     writeFileSync(
@@ -461,10 +491,7 @@ describe('AST metadata compiler integration', () => {
             writeFileSync(join(directory, 'runtime-value.cts'), `export type RuntimeValueAlias = { createdAt: Date };`);
             const rejected = compileFixture(directory);
             assert.notEqual(rejected.status, 0, `${rejected.stdout}\n${rejected.stderr}`);
-            assert.match(
-                rejected.stderr,
-                /reflected alias metadata for RuntimeValueAlias requires @zyno-io\/ts-server-foundation\/type-metadata-runtime/
-            );
+            assert.match(rejected.stderr, /reflected alias metadata for RuntimeValueAlias requires @zyno-io\/ts-reflection\/type-metadata-runtime/);
             assert.match(rejected.stderr, /emitMetadataRuntimeImport is false/);
         } finally {
             rmSync(directory, { recursive: true, force: true });

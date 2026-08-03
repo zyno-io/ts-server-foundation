@@ -12,6 +12,7 @@ const PACKAGE_NAME = '@zyno-io/ts-server-foundation';
 const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
+const REFLECTION_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-reflection/type-compiler';
 
 interface PackageJson {
     version?: string;
@@ -318,7 +319,7 @@ function ensureTsconfigCompilerPlugin(tsconfigPath: string, tsconfig: TsconfigJs
     if (!existingPlugin) {
         plugins.push({ transform: PACKAGE_TYPE_COMPILER_PLUGIN });
         changed = true;
-    } else if (existingPlugin.transform !== PACKAGE_TYPE_COMPILER_PLUGIN) {
+    } else if (!isReflectionTypeCompilerPlugin(existingPlugin) && existingPlugin.transform !== PACKAGE_TYPE_COMPILER_PLUGIN) {
         existingPlugin.transform = PACKAGE_TYPE_COMPILER_PLUGIN;
         changed = true;
     }
@@ -420,7 +421,20 @@ function isTypeCompilerPlugin(plugin: unknown): boolean {
     const transform = (plugin as { transform?: unknown }).transform;
     if (typeof transform !== 'string') return false;
     const normalized = transform.replace(/\\/g, '/');
-    return normalized.endsWith('/dist/src/type-compiler/index.cjs') || normalized === PACKAGE_TYPE_COMPILER_PLUGIN;
+    return (
+        normalized.endsWith('/dist/src/type-compiler/index.cjs') ||
+        normalized.endsWith('/dist/type-compiler/index.cjs') ||
+        normalized === PACKAGE_TYPE_COMPILER_PLUGIN ||
+        normalized === REFLECTION_TYPE_COMPILER_PLUGIN
+    );
+}
+
+function isReflectionTypeCompilerPlugin(plugin: unknown): boolean {
+    if (!plugin || typeof plugin !== 'object') return false;
+    const transform = (plugin as { transform?: unknown }).transform;
+    if (typeof transform !== 'string') return false;
+    const normalized = transform.replace(/\\/g, '/');
+    return normalized === REFLECTION_TYPE_COMPILER_PLUGIN || normalized.includes('/@zyno-io/ts-reflection/dist/type-compiler/index.cjs');
 }
 
 function hasFoundationPackageDependency(pkg: PackageJson): boolean {
