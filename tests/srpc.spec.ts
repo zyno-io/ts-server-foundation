@@ -181,7 +181,7 @@ describe('srpc', () => {
         const server = Object.create(SrpcServer.prototype) as any;
         const sent: Record<string, unknown>[] = [];
         const closed: [number, string][] = [];
-        server.options = { serverMessage: JsonMessage, lateReplyTombstoneTtlMs: 10 };
+        server.options = { serverMessage: JsonMessage, lateReplyTombstoneTtlMs: 1_000 };
         server.logger = createLogger('SrpcLateReplyTest');
         server.pendingServerRequestBytes = new WeakMap();
         server.lateReplyTombstonesByStream = new WeakMap();
@@ -209,7 +209,7 @@ describe('srpc', () => {
         server.handleStreamDataReceived(stream, { requestId, reply: true, dNotifyResponse: { received: 1 } });
         assert.deepEqual(closed, []);
 
-        // Expire the tombstone explicitly. A real-time 10ms sleep is flaky
+        // Expire the tombstone explicitly. A real-time short sleep is flaky
         // under the full suite because event-loop load can delay the first
         // "immediate" reply until after the tombstone has already elapsed.
         server.lateReplyTombstonesByStream.get(stream)?.set(requestId, Date.now() - 1);

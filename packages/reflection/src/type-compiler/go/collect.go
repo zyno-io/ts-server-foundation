@@ -122,6 +122,12 @@ func isProjectBuildOutputFile(fileName string, cwd string) bool {
 
 func moduleKey(fileName string) string {
 	slash := filepath.ToSlash(fileName)
+	lower := strings.ToLower(slash)
+	for _, suffix := range []string{".d.mts", ".d.cts", ".d.ts"} {
+		if strings.HasSuffix(lower, suffix) {
+			return filepath.Clean(slash[:len(slash)-len(suffix)])
+		}
+	}
 	ext := strings.ToLower(filepath.Ext(slash))
 	if ext == ".mts" || ext == ".cts" {
 		return filepath.Clean(slash)

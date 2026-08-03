@@ -10,6 +10,9 @@ import (
 
 func resolveImport(fromFile string, spec string, reg *registry) *fileInfo {
 	if !strings.HasPrefix(spec, ".") {
+		if spec == reflectionPackageSpec {
+			return resolveReflectionPackageImport(reg)
+		}
 		return nil
 	}
 	base := filepath.Clean(filepath.Join(filepath.Dir(fromFile), spec))
@@ -18,11 +21,11 @@ func resolveImport(fromFile string, spec string, reg *registry) *fileInfo {
 	candidates := []string{}
 	switch ext {
 	case ".mjs":
-		candidates = append(candidates, moduleKey(withoutExt+".mts"))
+		candidates = append(candidates, moduleKey(withoutExt+".mts"), moduleKey(withoutExt+".d.mts"))
 	case ".cjs":
-		candidates = append(candidates, moduleKey(withoutExt+".cts"))
+		candidates = append(candidates, moduleKey(withoutExt+".cts"), moduleKey(withoutExt+".d.cts"))
 	case ".js":
-		candidates = append(candidates, moduleKey(withoutExt+".ts"), moduleKey(withoutExt+".tsx"))
+		candidates = append(candidates, moduleKey(withoutExt+".ts"), moduleKey(withoutExt+".tsx"), moduleKey(withoutExt+".d.ts"))
 	default:
 		candidates = append(candidates,
 			moduleKey(base),
@@ -30,13 +33,30 @@ func resolveImport(fromFile string, spec string, reg *registry) *fileInfo {
 			moduleKey(base+".tsx"),
 			moduleKey(base+".mts"),
 			moduleKey(base+".cts"),
+			moduleKey(base+".d.ts"),
+			moduleKey(base+".d.mts"),
+			moduleKey(base+".d.cts"),
 			moduleKey(filepath.Join(base, "index.ts")),
 			moduleKey(filepath.Join(base, "index.mts")),
 			moduleKey(filepath.Join(base, "index.cts")),
+			moduleKey(filepath.Join(base, "index.d.ts")),
+			moduleKey(filepath.Join(base, "index.d.mts")),
+			moduleKey(filepath.Join(base, "index.d.cts")),
 		)
 	}
 	for _, candidate := range candidates {
 		if info := reg.byPath[candidate]; info != nil {
+			return info
+		}
+	}
+	return nil
+}
+
+func resolveReflectionPackageImport(reg *registry) *fileInfo {
+	for _, info := range reg.files {
+		fileName := filepath.ToSlash(info.file.FileName())
+		if strings.HasSuffix(fileName, "/@zyno-io/ts-reflection/dist/index.d.ts") ||
+			strings.HasSuffix(fileName, "/packages/reflection/dist/index.d.ts") {
 			return info
 		}
 	}
