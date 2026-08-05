@@ -197,9 +197,9 @@ After the initial ping handshake, the client sends a ping every 55 seconds. A co
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256. New clients send `authv=2`, `_v=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `_supersede`, and custom metadata under `m--<key>` WebSocket query parameters. The auth-v2 signature covers the request path, audience, protocol version, features, and normalized metadata.
+Clients sign connection metadata with HMAC-SHA256. New clients send `pv=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `cap` capabilities and `supersede`, and custom metadata as ordinary WebSocket query parameters. Every query parameter other than those transport fields becomes `stream.meta`. The canonical signature covers the request path, audience, protocol version, capabilities, and normalized metadata.
 
-Servers require an explicit `_v` by default. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to accept its original `authv=1` signature (`authv`, `appv`, `ts`, `id`, `cid`) so existing v2 clients remain compatible. Its signed stream ID is consumed once for replay protection, and its unsigned feature field is ignored. The brief auth-v2/v2 combination is also accepted as a transition; new clients must use v3. Deploy servers before clients: a v3 client requires a server that recognizes v3. An explicit `_v=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
+Servers require an explicit `pv` by default, but accept `_v` when `pv` is absent for compatibility. The protocol version selects the authentication format: v1/v2 use the legacy HMAC format and v3 uses the canonical HMAC format. Legacy `_supersede` and `m--<key>` metadata are accepted; `_supersede` is used only when `supersede` is absent, and `m--<key>` is normalized to `<key>` in `stream.meta` with unprefixed metadata taking precedence. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to use its original signature (`1`, `appv`, `ts`, `id`, `cid`), whose stream ID is consumed once for replay protection and whose capability field is ignored. New clients must use v3. Deploy servers before clients: a v3 client requires a server that recognizes v3. An explicit `pv=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
 
 By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
 
@@ -214,12 +214,12 @@ Replace the built-in HMAC/key-fetcher authentication with a custom authorizer us
 ```ts
 server.setClientAuthorizer(async (query, request) => {
     if (!(await verifyCustomHandshake(query, request))) return false;
-    if (query['m--role'] !== 'worker') return false;
+    if (query.role !== 'worker') return false;
     return { authorizedRole: 'worker' };
 });
 ```
 
-The callback receives the raw query map, including signed fields and `m--`-prefixed custom metadata. Once configured, it is responsible for all authentication; the default HMAC validation and `setClientKeyFetcher()` path are not also run. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata with the `m--` prefix removed.
+The callback receives the raw query map as `Record<string, string>`, including signed fields and custom metadata. Once configured, it is responsible for all authentication; the default HMAC validation and `setClientKeyFetcher()` path are not also run. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata.
 
 Clock drift is controlled by `SRPC_AUTH_CLOCK_DRIFT_MS`, defaulting to 30 seconds.
 
@@ -234,6 +234,7 @@ Connected streams expose metadata:
 | `clientId`        | Client identity.                                     |
 | `appVersion`      | Client app version query value.                      |
 | `protocolVersion` | Handshake protocol version.                          |
+| `capabilities`    | Client capabilities negotiated during the handshake. |
 | `supersede`       | Whether the connection requested supersede behavior. |
 | `meta`            | Query metadata plus authorizer metadata.             |
 | `connectedAt`     | Connection timestamp.                                |

@@ -3468,7 +3468,7 @@ describe('MeshSrpcLinkController', () => {
                 clientId: `client-${failure}`,
                 connected: true,
                 lastPingAt: Date.now(),
-                features: new Set(['sender-announcements']),
+                capabilities: new Set(['sender-announcements']),
                 byteStream: ownerParent.byteStream,
                 $queue: new Map()
             } as any;
@@ -3550,7 +3550,7 @@ describe('MeshSrpcLinkController', () => {
             clientId: 'announcement-overflow-client',
             connected: true,
             lastPingAt: Date.now(),
-            features: new Set(['sender-announcements']),
+            capabilities: new Set(['sender-announcements']),
             byteStream: ownerParent.byteStream,
             $queue: new Map()
         } as any;
@@ -3583,7 +3583,7 @@ describe('MeshSrpcLinkController', () => {
             clientId: 'failed-tombstone-client',
             connected: true,
             lastPingAt: Date.now(),
-            features: new Set(['sender-announcements']),
+            capabilities: new Set(['sender-announcements']),
             byteStream: ownerParent.byteStream,
             $queue: new Map()
         } as any;

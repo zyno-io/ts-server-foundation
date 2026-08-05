@@ -1605,7 +1605,7 @@ export class MeshSrpcServer<
                     return {
                         body: this.encodeMeshInvokeResponse(prefix, response),
                         issuedSenderIds,
-                        requiresExactSenderGrant: stream.features?.has('sender-announcements') === true
+                        requiresExactSenderGrant: stream.capabilities?.has('sender-announcements') === true
                     } satisfies MeshLocalInvokeResult;
                 } catch (error) {
                     this.rememberFailedMeshInvocation(invocationKey);

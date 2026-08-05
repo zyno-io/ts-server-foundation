@@ -7,6 +7,7 @@ import { assertSafeTimerMs, MAX_SAFE_TIMER_MS, uuid7 } from '../helpers';
 import { withLoggerContext } from '../services';
 import { getTraceContext, withRemoteSpan, withSpan } from '../telemetry';
 import { byteStreamDestroyReason, IByteStream, SrpcByteStream } from './SrpcByteStream';
+import { srpcQueryMetadata } from './handshake';
 import {
     BaseMessage,
     HandlerRequestData,
@@ -39,7 +40,7 @@ export class SrpcConflictError extends Error {
 export interface SrpcClientOptions {
     enableReconnect?: boolean;
     logTraffic?: SrpcTrafficLogging;
-    /** Audience signed into auth-v2 credentials. Defaults to the WebSocket path. */
+    /** Audience signed into canonical credentials. Defaults to the WebSocket path. */
     authAudience?: string;
     /** Advertise support for associating byte-stream senders with a handler request. */
     senderAnnouncements?: boolean;
@@ -525,7 +526,6 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     }
 
     private generateWsUrl(): string {
-        const authv = 2;
         const appv = '0.0.0';
         const ts = Date.now();
         const cid = this.clientId;
@@ -534,8 +534,8 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         const baseUri = this.uri.startsWith('ws://') || this.uri.startsWith('wss://') ? this.uri : `ws://${this.uri}`;
         const url = new URL(baseUri);
         const nonce = uuid7();
-        const features = normalizeFeatures(this.senderAnnouncements ? ['sender-announcements'] : []);
-        const metadata = normalizeMetadata(this.clientMeta);
+        const capabilities = normalizeCapabilities(this.senderAnnouncements ? ['sender-announcements'] : []);
+        const metadata = srpcQueryMetadata(normalizeMetadata(this.clientMeta));
         const supersede = this.supersede ? '1' : '0';
         const audience = this.clientOptions?.authAudience ?? url.pathname;
         const signable = canonicalAuthV2({
@@ -548,29 +548,28 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             cid,
             protocol: '3',
             supersede,
-            features,
+            capabilities,
             metadata
         });
         const signature = createHmac('sha256', secret).update(signable).digest('hex');
         const params = new URLSearchParams({
-            authv: String(authv),
             appv,
             ts: String(ts),
             id: this.streamId,
             cid,
             signature,
-            _v: '3'
+            pv: '3',
+            nonce,
+            aud: audience,
+            ...(capabilities ? { cap: capabilities } : {}),
+            ...(this.supersede ? { supersede: '1' } : {}),
+            ...metadata
         });
-        params.set('nonce', nonce);
-        params.set('aud', audience);
-        if (features) params.set('_f', features);
 
         if (this.supersede) {
-            params.set('_supersede', '1');
             this.supersede = false;
         }
 
-        for (const [key, value] of Object.entries(metadata)) params.set(`m--${key}`, value);
         url.search = params.toString();
         return url.toString();
     }
@@ -1017,8 +1016,8 @@ function assertTimeout(value: number): void {
     assertSafeTimerMs(value, 'Request timeout');
 }
 
-function normalizeFeatures(features: string[]): string {
-    return [...new Set(features)].sort().join(',');
+function normalizeCapabilities(capabilities: string[]): string {
+    return [...new Set(capabilities)].sort().join(',');
 }
 
 function normalizeMetadata(meta: SrpcMeta | undefined): Record<string, string> {
@@ -1039,7 +1038,7 @@ function canonicalAuthV2(fields: {
     cid: string;
     protocol: string;
     supersede: string;
-    features: string;
+    capabilities: string;
     metadata: Record<string, string>;
 }): string {
     return JSON.stringify({ version: 2, ...fields });

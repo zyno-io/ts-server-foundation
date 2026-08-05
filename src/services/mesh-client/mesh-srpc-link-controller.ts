@@ -1446,7 +1446,7 @@ export class MeshSrpcLinkController<TMeta extends SrpcMeta, TRegistryMeta>
             peerProcessId: reservation.peerProcessId,
             peerEndpointId: reservation.peerEndpointId,
             peerPublicKey: reservation.peerPublicKey,
-            requiresExactSenderGrant: this.options.getLocalConnection(clientId)?.features?.has('sender-announcements'),
+            requiresExactSenderGrant: this.options.getLocalConnection(clientId)?.capabilities?.has('sender-announcements'),
             expiresAt: this.handleCapabilityExpiresAt()
         });
         return emptyResult({ ids: reservation.ids, capability: reservation.capability });

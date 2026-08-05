@@ -8,6 +8,7 @@ import { HttpError } from '../http';
 import { withLoggerContext } from '../services';
 import { getTraceContext, withRemoteSpan, withSpan } from '../telemetry';
 import { byteStreamDestroyReason, SrpcByteStream } from './SrpcByteStream';
+import { srpcQueryMetadata } from './handshake';
 import { notifySrpcObservers } from './observer';
 import {
     BaseMessage,
@@ -63,7 +64,7 @@ interface StreamInfo {
     appVersion: string;
     configureTs: number;
     protocolVersion: 1 | 2 | 3;
-    features: ReadonlySet<string>;
+    capabilities: ReadonlySet<string>;
     supersede: boolean;
     address: string;
     meta: Record<string, unknown>;
@@ -107,7 +108,7 @@ export class SrpcServer<
     private readonly inactivityCheckInterval: ReturnType<typeof setInterval>;
     private pendingHandshakeCount = 0;
     private clientAuthorizer?: (
-        metadata: Record<string, unknown>,
+        metadata: Record<string, string>,
         req: IncomingMessage
     ) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>;
     private clientKeyFetcher?: (clientId: string) => Promise<false | string> | false | string;
@@ -154,7 +155,9 @@ export class SrpcServer<
         const { id: clientStreamId, cid: clientId, appv: appVersion } = query;
         const address = this.getRemoteAddress(info.req);
 
-        const protocolVersion = query._v === undefined ? this.options.defaultUnspecifiedProtocolVersion : Number(query._v);
+        const protocolVersionParameter = query.pv ?? query._v;
+        const protocolVersion =
+            protocolVersionParameter === undefined ? this.options.defaultUnspecifiedProtocolVersion : Number(protocolVersionParameter);
         const handshakeLogData = {
             address: logSafeText(address),
             clientId: logSafeText(clientId),
@@ -195,11 +198,7 @@ export class SrpcServer<
                         return;
                     }
 
-                    const queryMeta = Object.fromEntries(
-                        Object.entries(query)
-                            .filter(([key]) => key.startsWith('m--'))
-                            .map(([key, value]) => [key.slice(3), value])
-                    );
+                    const queryMeta = srpcQueryMetadata(query);
                     const authMeta = result === true ? {} : result;
                     const mergedMeta = { ...queryMeta, ...authMeta };
                     let metadataBytes: number;
@@ -221,16 +220,10 @@ export class SrpcServer<
                         appVersion,
                         configureTs: Number(query.ts ?? 0),
                         protocolVersion,
-                        // Legacy auth-v1 does not sign features, so it cannot
+                        // Legacy protocol versions do not sign capabilities, so they cannot
                         // safely negotiate capabilities added after that format.
-                        features: new Set(
-                            query.authv === '1'
-                                ? []
-                                : normalizeFeatures((query._f ?? '').split(',').filter(feature => feature.length > 0))
-                                      .split(',')
-                                      .filter(Boolean)
-                        ),
-                        supersede: query._supersede === '1',
+                        capabilities: new Set(protocolVersion < 3 ? [] : handshakeCapabilities(query).split(',').filter(Boolean)),
+                        supersede: isSupersedeRequested(query),
                         address,
                         meta: mergedMeta
                     };
@@ -296,7 +289,7 @@ export class SrpcServer<
             appVersion: info.appVersion,
             configureTs: info.configureTs,
             protocolVersion: info.protocolVersion,
-            features: info.features,
+            capabilities: info.capabilities,
             supersede: info.supersede,
             meta: info.meta as TMeta,
             connectedAt: Date.now(),
@@ -783,7 +776,7 @@ export class SrpcServer<
     }
 
     private async validateClientAuth(
-        meta: Record<string, unknown>,
+        meta: Record<string, string>,
         request: IncomingMessage,
         protocolVersion: 1 | 2 | 3
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
@@ -792,13 +785,12 @@ export class SrpcServer<
             return result === false ? new AuthenticationFailure('custom authorizer rejected') : result;
         }
 
-        const authv = String(meta.authv ?? '');
         const appv = String(meta.appv ?? '');
         const ts = String(meta.ts ?? '');
         const id = String(meta.id ?? '');
         const cid = String(meta.cid ?? '');
         const signature = String(meta.signature ?? '');
-        if (!authv || !appv || !ts || !id || !cid || !signature) return new AuthenticationFailure('missing required credentials');
+        if (!appv || !ts || !id || !cid || !signature) return new AuthenticationFailure('missing required credentials');
 
         const tsInt = Number(ts);
         if (!Number.isFinite(tsInt)) return new AuthenticationFailure('invalid timestamp');
@@ -809,11 +801,10 @@ export class SrpcServer<
             return new AuthenticationFailure('invalid server clock-drift configuration');
         if (Math.abs(Date.now() - tsInt) > driftMs) return new AuthenticationFailure('expired timestamp');
 
-        if (authv === '1') {
-            if (protocolVersion !== 1 && protocolVersion !== 2) return new AuthenticationFailure('invalid legacy protocol credentials');
+        if (protocolVersion < 3) {
             const clientKey = await this.fetchClientKey(cid);
             if (clientKey === false) return new AuthenticationFailure('unknown client key');
-            const computedSignature = createHmac('sha256', clientKey).update(`${authv}\n${appv}\n${ts}\n${id}\n${cid}\n`).digest('hex');
+            const computedSignature = createHmac('sha256', clientKey).update(`1\n${appv}\n${ts}\n${id}\n${cid}\n`).digest('hex');
             const signatureBuffer = Buffer.from(signature);
             const computedBuffer = Buffer.from(computedSignature);
             if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
@@ -822,28 +813,15 @@ export class SrpcServer<
             return true;
         }
 
-        // `_v=2` with authv=2 was emitted briefly before the protocol bump.
-        // Continue accepting that combination while new clients use `_v=3`.
-        if (authv !== '2' || (protocolVersion !== 2 && protocolVersion !== 3) || !isAuthToken(meta.nonce) || !meta.aud)
-            return new AuthenticationFailure('invalid protocol credentials');
+        if (!isAuthToken(meta.nonce) || !meta.aud) return new AuthenticationFailure('invalid protocol credentials');
 
         const clientKey = await this.fetchClientKey(cid);
         if (clientKey === false) return new AuthenticationFailure('unknown client key');
 
         const url = new URL(request.url ?? '', 'http://localhost');
-        const metadata = normalizeMetadata(
-            Object.fromEntries(
-                Object.entries(meta)
-                    .filter(([key]) => key.startsWith('m--'))
-                    .map(([key, value]) => [key.slice(3), String(value)])
-            )
-        );
-        const features = normalizeFeatures(
-            String(meta._f ?? '')
-                .split(',')
-                .filter(Boolean)
-        );
-        const supersede = meta._supersede === '1' ? '1' : '0';
+        const metadata = normalizeMetadata(srpcQueryMetadata(meta));
+        const capabilities = handshakeCapabilities(meta);
+        const supersede = isSupersedeRequested(meta) ? '1' : '0';
         const computedSignature = createHmac('sha256', clientKey)
             .update(
                 canonicalAuthV2({
@@ -856,7 +834,7 @@ export class SrpcServer<
                     cid,
                     protocol: String(protocolVersion),
                     supersede,
-                    features,
+                    capabilities,
                     metadata
                 })
             )
@@ -988,7 +966,7 @@ export class SrpcServer<
     }
 
     setClientAuthorizer(
-        authorizer: (metadata: Record<string, unknown>, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>
+        authorizer: (metadata: Record<string, string>, req: IncomingMessage) => Promise<boolean | Partial<TMeta>> | boolean | Partial<TMeta>
     ): void {
         this.clientAuthorizer = authorizer;
     }
@@ -1450,12 +1428,20 @@ function validateTimerOption(name: string, value: number | undefined): void {
     }
 }
 
-function normalizeFeatures(features: string[]): string {
-    return [...new Set(features)].sort().join(',');
+function normalizeCapabilities(capabilities: string[]): string {
+    return [...new Set(capabilities)].sort().join(',');
+}
+
+function handshakeCapabilities(meta: Record<string, string>): string {
+    return normalizeCapabilities((meta.cap ?? '').split(',').filter(Boolean));
 }
 
 function normalizeMetadata(meta: Record<string, string>): Record<string, string> {
     return Object.fromEntries(Object.entries(meta).sort(([a], [b]) => compareCodeUnits(a, b)));
+}
+
+function isSupersedeRequested(meta: Record<string, string>): boolean {
+    return meta.supersede === '1' || (meta.supersede === undefined && meta._supersede === '1');
 }
 
 function canonicalAuthV2(fields: {
@@ -1468,7 +1454,7 @@ function canonicalAuthV2(fields: {
     cid: string;
     protocol: string;
     supersede: string;
-    features: string;
+    capabilities: string;
     metadata: Record<string, string>;
 }): string {
     return JSON.stringify({ version: 2, ...fields });
