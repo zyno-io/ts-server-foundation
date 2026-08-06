@@ -8,6 +8,7 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
+  - test
   - build
   - deploy
   - mirror
@@ -130,3 +131,12 @@ mirror:
     chmod 600 ~/.ssh/id_ed25519
     git remote add github git@github.com:zyno-io/ts-server-foundation.git
     git push -u github HEAD:main --force
+
+osv scan:
+  stage: test
+  image:
+    name: ghcr.io/google/osv-scanner:latest
+    entrypoint: ['']
+  before_script: []
+  script:
+    - /osv-scanner scan source --recursive .
