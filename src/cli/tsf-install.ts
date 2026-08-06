@@ -283,7 +283,7 @@ function globWorkspacePackageJsonPaths(workspaceRoot: string, workspacePattern: 
 function setDependencyVersionIfPresent(pkg: PackageJson, name: string, version: string): boolean {
     let changed = false;
     for (const dependencies of [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies, pkg.peerDependencies]) {
-        if (dependencies?.[name] === undefined || dependencies[name] === version) continue;
+        if (dependencies?.[name] === undefined || dependencies[name] === version || dependencies[name] === '*') continue;
         dependencies[name] = version;
         changed = true;
     }

@@ -426,6 +426,39 @@ describe('CLI', () => {
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
     });
 
+    it('preserves wildcard TSF dependency versions, including peer dependencies', () => {
+        const dir = tempDir();
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify(
+                {
+                    name: 'fixture',
+                    dependencies: { '@zyno-io/ts-server-foundation': '*' },
+                    devDependencies: { '@zyno-io/ts-server-foundation': '*' },
+                    optionalDependencies: { '@zyno-io/ts-server-foundation': '*' },
+                    peerDependencies: { '@zyno-io/ts-server-foundation': '*' }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+
+        const result = runCli('tsf-install.js', ['--no-install'], dir);
+
+        assert.equal(result.status, 0, result.stderr);
+        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+            dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
+            optionalDependencies?: Record<string, string>;
+            peerDependencies?: Record<string, string>;
+        };
+        assert.equal(pkg.dependencies?.['@zyno-io/ts-server-foundation'], '*');
+        assert.equal(pkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
+        assert.equal(pkg.optionalDependencies?.['@zyno-io/ts-server-foundation'], '*');
+        assert.equal(pkg.peerDependencies?.['@zyno-io/ts-server-foundation'], '*');
+    });
+
     it('prepares an installed compiler after configuring the project', () => {
         const dir = tempDir();
         const marker = join(dir, 'prepared.json');
@@ -586,13 +619,13 @@ describe('CLI', () => {
             devDependencies?: Record<string, string>;
         };
         assert.equal(pkg.scripts?.postinstall, 'tsf-install');
-        assert.equal(pkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(pkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
         assert.equal(pkg.devDependencies?.ttsc, expectedTtscVersion);
         assert.equal(pkg.devDependencies?.typescript, expectedTypescriptVersion);
         const siblingPkg = JSON.parse(readFileSync(join(siblingWorkspace, 'package.json'), 'utf8')) as {
             devDependencies?: Record<string, string>;
         };
-        assert.equal(siblingPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(siblingPkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
         assert.equal(siblingPkg.devDependencies?.ttsc, expectedTtscVersion);
         assert.equal(siblingPkg.devDependencies?.typescript, expectedTypescriptVersion);
         const siblingTsconfig = JSON.parse(readFileSync(join(siblingWorkspace, 'tsconfig.json'), 'utf8')) as {
@@ -648,7 +681,7 @@ describe('CLI', () => {
         const packageAtInstall = JSON.parse(readFileSync(packageJsonAtInstallPath, 'utf8')) as {
             devDependencies: Record<string, string>;
         };
-        assert.equal(packageAtInstall.devDependencies['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(packageAtInstall.devDependencies['@zyno-io/ts-server-foundation'], '*');
         assert.equal(packageAtInstall.devDependencies.ttsc, expectedTtscVersion);
         assert.equal(packageAtInstall.devDependencies.typescript, expectedTypescriptVersion);
 
@@ -741,7 +774,7 @@ describe('CLI', () => {
         assert.equal(ttscPkg.devDependencies?.typescript, '7.0.2');
         assert.equal(typescriptPkg.dependencies?.typescript, '~6.0.3');
         assert.equal(typescriptPkg.dependencies?.ttsc, undefined);
-        assert.equal(frameworkPkg.devDependencies?.['@zyno-io/ts-server-foundation'], expectedFoundationVersion);
+        assert.equal(frameworkPkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
         assert.equal(frameworkPkg.devDependencies?.ttsc, expectedTtscVersion);
         assert.equal(frameworkPkg.devDependencies?.typescript, expectedTypescriptVersion);
         assert.equal(unrelatedPkg.devDependencies?.ttsc, undefined);
