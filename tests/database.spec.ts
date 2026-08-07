@@ -2513,15 +2513,13 @@ describe('database query builder and persistence', () => {
             [
                 'CREATE TABLE IF NOT EXISTS `_test_locks` (`key` VARCHAR(255) NOT NULL PRIMARY KEY, `createdAt` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, `lastTouched` DATETIME)',
                 'DELETE FROM `_test_locks` WHERE `lastTouched` < NOW() - INTERVAL 1 HOUR',
-                'INSERT IGNORE INTO `_test_locks` (`key`) VALUES (?)',
-                'UPDATE `_test_locks` SET `lastTouched` = NOW() WHERE `key` = ?'
+                'INSERT INTO `_test_locks` (`key`, `lastTouched`) VALUES (?, NOW()) ON DUPLICATE KEY UPDATE `lastTouched` = NOW()'
             ]
         );
         assert.deepStrictEqual(driver.executes[2].bindings, ['resource:7']);
-        assert.deepStrictEqual(driver.executes[3].bindings, ['resource:7']);
         assert.deepStrictEqual(driver.connections[0].commands, ['execute', 'release']);
         assert.deepStrictEqual(driver.connections[1].commands, ['execute', 'release']);
-        assert.deepStrictEqual(driver.connections[2].commands, ['begin', 'execute', 'execute', 'commit', 'release']);
+        assert.deepStrictEqual(driver.connections[2].commands, ['begin', 'execute', 'commit', 'release']);
     });
 
     it('uses an existing MySQL locks table when lazy creation is not enabled', async () => {
@@ -2534,11 +2532,10 @@ describe('database query builder and persistence', () => {
 
         assert.deepStrictEqual(
             driver.executes.map(query => query.sql),
-            ['INSERT IGNORE INTO `_locks` (`key`) VALUES (?)', 'UPDATE `_locks` SET `lastTouched` = NOW() WHERE `key` = ?']
+            ['INSERT INTO `_locks` (`key`, `lastTouched`) VALUES (?, NOW()) ON DUPLICATE KEY UPDATE `lastTouched` = NOW()']
         );
         assert.deepStrictEqual(driver.executes[0].bindings, ['resource:7']);
-        assert.deepStrictEqual(driver.executes[1].bindings, ['resource:7']);
-        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'execute', 'commit', 'release']);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'commit', 'release']);
     });
 
     it('initializes MySQL locks before concurrent transactions consume a bounded pool', async () => {

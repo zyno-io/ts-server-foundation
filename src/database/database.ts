@@ -284,9 +284,11 @@ export class BaseDatabase {
         await ensureMySQLLocksTable(this);
 
         const table = this.options.lockTableName;
-        await this.rawExecute(sql`INSERT IGNORE INTO ${sql.identifier(table)} (${sql.identifier('key')}) VALUES (${lockKey})`, session);
+        // A separate INSERT IGNORE and UPDATE can deadlock: concurrent duplicate-key checks
+        // hold shared locks, then each transaction tries to upgrade to the update's write lock.
+        // The upsert acquires that write lock in one statement and retains it until commit.
         await this.rawExecute(
-            sql`UPDATE ${sql.identifier(table)} SET ${sql.identifier('lastTouched')} = ${sql.rawTrusted('NOW()')} WHERE ${sql.identifier('key')} = ${lockKey}`,
+            sql`INSERT INTO ${sql.identifier(table)} (${sql.identifier('key')}, ${sql.identifier('lastTouched')}) VALUES (${lockKey}, ${sql.rawTrusted('NOW()')}) ON DUPLICATE KEY UPDATE ${sql.identifier('lastTouched')} = ${sql.rawTrusted('NOW()')}`,
             session
         );
     }
