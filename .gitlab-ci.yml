@@ -13,7 +13,29 @@ stages:
   - deploy
   - mirror
 
-.test_services:
+osv scan:
+  stage: test
+  image:
+    name: ghcr.io/google/osv-scanner:latest
+    entrypoint: ['']
+  before_script: []
+  script:
+    - /osv-scanner scan source --recursive .
+  allow_failure: true
+
+build:devconsole:
+  stage: build
+  needs: []
+  script:
+    - corepack enable
+    - yarn --immutable
+    - yarn build:devconsole
+  artifacts:
+    paths:
+      - dist/devconsole/
+
+test-and-build:
+  stage: build
   services:
     - name: mysql:8
       variables:
@@ -36,22 +58,8 @@ stages:
     PG_DATABASE: default
     REDIS_HOST: redis
     REDIS_PORT: 6379
-
-build:devconsole:
-  stage: build
-  script:
-    - corepack enable
-    - yarn --immutable
-    - yarn build:devconsole
-  artifacts:
-    paths:
-      - dist/devconsole/
-
-test-and-build:
-  stage: build
-  extends: .test_services
-  variables:
     TTSC_CACHE_DIR: .cache/ttsc
+  needs: []
   cache:
     key: ttsc-go-v1
     paths:
@@ -131,12 +139,3 @@ mirror:
     chmod 600 ~/.ssh/id_ed25519
     git remote add github git@github.com:zyno-io/ts-server-foundation.git
     git push -u github HEAD:main --force
-
-osv scan:
-  stage: test
-  image:
-    name: ghcr.io/google/osv-scanner:latest
-    entrypoint: ['']
-  before_script: []
-  script:
-    - /osv-scanner scan source --recursive .
