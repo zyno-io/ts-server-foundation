@@ -505,11 +505,15 @@ describe('worker services', () => {
     it('disconnects BullMQ clients after gracefully closing registry queues', async () => {
         const calls: string[] = [];
         const queue = {
-            client: Promise.resolve({
-                disconnect() {
-                    calls.push('disconnect');
-                }
-            }),
+            getBackend() {
+                return {
+                    client: Promise.resolve({
+                        disconnect() {
+                            calls.push('disconnect');
+                        }
+                    })
+                };
+            },
             async close() {
                 calls.push('close');
             }
@@ -534,11 +538,15 @@ describe('worker services', () => {
     it('disconnects BullMQ clients when graceful queue cleanup fails', async () => {
         const calls: string[] = [];
         const queue = {
-            client: Promise.resolve({
-                disconnect() {
-                    calls.push('disconnect');
-                }
-            }),
+            getBackend() {
+                return {
+                    client: Promise.resolve({
+                        disconnect() {
+                            calls.push('disconnect');
+                        }
+                    })
+                };
+            },
             async close() {
                 calls.push('close');
                 throw new Error('close failed');
@@ -562,12 +570,13 @@ describe('worker services', () => {
         const registry = new WorkerQueueRegistry({ APP_ENV: 'development', BULL_QUEUE: 'default' } as never);
         const removedByQueue = new Map<string, string[]>();
         const removedJobsByQueue = new Map<string, string[]>();
-        const queues = new Map<string, object>([
-            [
-                'default',
-                {
-                    client: Promise.resolve({
-                        scan: async () => [
+        let scanPattern = '';
+        const defaultQueue = {
+            getBackend: () => ({
+                client: Promise.resolve({
+                    scan: async (...args: unknown[]) => {
+                        scanPattern = String((args[1] as { MATCH?: string }).MATCH);
+                        return [
                             '0',
                             [
                                 'test[prefix]:default:repeat',
@@ -575,30 +584,15 @@ describe('worker services', () => {
                                 'test[prefix]:abandoned:repeat',
                                 'another-prefix:ignored:repeat'
                             ]
-                        ]
-                    }),
-                    getJobSchedulers: async () => [
-                        {
-                            key: 'a7bfd56788a5ed98a0e8de14761f0c27',
-                            name: 'DefaultLegacyCronJob',
-                            pattern: '0 5 * * *'
-                        }
-                    ],
-                    removeRepeatableByKey: async (key: string) => {
-                        removedByQueue.set('default', [key]);
-                        return true;
-                    },
-                    getJobs: async () => [
-                        fakeBullRepeatJob(
-                            'DefaultLegacyCronJob',
-                            'a7bfd56788a5ed98a0e8de14761f0c27',
-                            'default-legacy-job',
-                            removedJobsByQueue,
-                            'default'
-                        )
-                    ]
-                }
-            ],
+                        ] as [string, string[]];
+                    }
+                })
+            }),
+            getJobSchedulers: async () => [],
+            getJobs: async () => []
+        };
+        const queues = new Map<string, object>([
+            ['default', defaultQueue],
             [
                 'critical',
                 fakeBullQueue(
@@ -624,16 +618,6 @@ describe('worker services', () => {
             ],
             ['abandoned', fakeBullQueue('abandoned', [fakeTsfScheduler('MovedJob', '0 4 * * *')], removedByQueue)]
         ]);
-        let scanPattern = '';
-        const defaultQueue = queues.get('default') as {
-            client: Promise<{ scan: (...args: unknown[]) => Promise<[string, string[]]> }>;
-        };
-        const client = await defaultQueue.client;
-        const scan = client.scan;
-        client.scan = async (...args: unknown[]) => {
-            scanPattern = String((args[1] as { MATCH?: string }).MATCH);
-            return scan(...args);
-        };
         registry.getBullMqOptions = (() => ({ prefix: 'test[prefix]' })) as never;
         registry.getBullQueue = ((queueName: string) => queues.get(queueName)) as never;
 
@@ -647,25 +631,17 @@ describe('worker services', () => {
             removedByQueue,
             new Map([
                 ['abandoned', ['MovedJob:0 4 * * *']],
-                ['critical', ['ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']],
-                ['default', ['a7bfd56788a5ed98a0e8de14761f0c27']]
+                ['critical', ['ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']]
             ])
         );
-        assert.deepEqual(
-            removedJobsByQueue,
-            new Map([
-                ['critical', ['deleted-job']],
-                ['default', ['default-legacy-job']]
-            ])
-        );
+        assert.deepEqual(removedJobsByQueue, new Map([['critical', ['deleted-job']]]));
         assert.deepEqual(
             removed.map(scheduler => ({ queue: scheduler.queue, key: scheduler.key })),
             [
                 { queue: 'abandoned', key: 'MovedJob:0 4 * * *' },
                 { queue: 'critical', key: 'ExampleJob:*/5 * * * *' },
                 { queue: 'critical', key: 'DeletedJob:0 2 * * *' },
-                { queue: 'critical', key: 'ExampleJob:wrong-key' },
-                { queue: 'default', key: 'a7bfd56788a5ed98a0e8de14761f0c27' }
+                { queue: 'critical', key: 'ExampleJob:wrong-key' }
             ]
         );
     });
@@ -677,10 +653,6 @@ describe('worker services', () => {
         const queue = {
             removeJobScheduler: async (key: string) => {
                 calls.push(`scheduler:${key}`);
-                return true;
-            },
-            removeRepeatableByKey: async (key: string) => {
-                calls.push(`repeatable:${key}`);
                 return true;
             },
             getJobs: async () => [
@@ -700,7 +672,7 @@ describe('worker services', () => {
 
         await registry.removeBullMqRepeatChain('default', 'RemovedJob:0 2 * * *');
 
-        assert.deepEqual(calls, ['scheduler:RemovedJob:0 2 * * *', 'repeatable:RemovedJob:0 2 * * *', 'job:removed']);
+        assert.deepEqual(calls, ['scheduler:RemovedJob:0 2 * * *', 'job:removed']);
     });
 
     it('removes an orphaned framework repeat job after its scheduler metadata was already removed', async () => {
@@ -708,8 +680,10 @@ describe('worker services', () => {
         const registry = new WorkerQueueRegistry({ APP_ENV: 'development' } as never);
         const removedJobsByQueue = new Map<string, string[]>();
         const queue = {
-            client: Promise.resolve({
-                scan: async () => ['0', ['test:default:repeat']]
+            getBackend: () => ({
+                client: Promise.resolve({
+                    scan: async () => ['0', ['test:default:repeat']] as [string, string[]]
+                })
             }),
             getJobSchedulers: async () => [],
             getJobs: async () => [
@@ -836,7 +810,7 @@ describe('worker services', () => {
             await upsertTsfScheduler(criticalQueue, 'ExampleJob', '*/5 * * * *');
             await upsertTsfScheduler(criticalQueue, 'DeletedJob', '0 2 * * *');
             await upsertTsfScheduler(abandonedQueue, 'MovedJob', '0 4 * * *');
-            await defaultQueue.add('DefaultLegacyCronJob', {} as never, { repeat: { pattern: '0 5 * * *' } });
+            await upsertTsfScheduler(defaultQueue, 'DeletedDefaultJob', '0 5 * * *');
             await criticalQueue.upsertJobScheduler(
                 'ExternalJob:0 3 * * *',
                 { pattern: '0 3 * * *' },
@@ -850,7 +824,7 @@ describe('worker services', () => {
                 ['ExampleJob:* * * * *', 'ExternalJob:0 3 * * *'].sort()
             );
             assert.deepEqual(await abandonedQueue.getJobSchedulers(), []);
-            assert.deepEqual(await defaultQueue.getRepeatableJobs(), []);
+            assert.deepEqual(await defaultQueue.getJobSchedulers(), []);
         } finally {
             await Promise.all(registry.getBullQueues().map(({ queue }) => queue.obliterate({ force: true }).catch(() => {})));
             await registry.shutdown();

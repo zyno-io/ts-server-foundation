@@ -150,27 +150,21 @@ export class WorkerQueueRegistry {
         }
 
         const removed: RemovedBullMqJobScheduler[] = [];
-        const defaultQueueName = this.getDefaultQueueName();
         for (const queueName of await this.discoverBullMqJobSchedulerQueueNames()) {
             const queue = this.getBullQueue(queueName);
             const desiredQueueSchedules = desiredByQueue.get(queueName);
             const staleRepeatKeys = new Set<string>();
             for (const scheduler of await queue.getJobSchedulers()) {
                 const isTsfScheduler = isTsfBullMqJobScheduler(scheduler);
-                const isLegacyRepeatable = queueName === defaultQueueName && isLegacyBullMqCronRepeatable(scheduler);
-                if (!isTsfScheduler && !isLegacyRepeatable) continue;
+                if (!isTsfScheduler) continue;
                 const desired = desiredQueueSchedules?.get(scheduler.name);
                 const matchesDesiredSchedule =
                     desired !== undefined && desired.pattern === scheduler.pattern && scheduler.key === `${desired.name}:${desired.pattern}`;
-                // Legacy repeatables use a different key and rescheduling mechanism. Remove even
-                // matching definitions so the runner can replace them with one Job Scheduler.
-                if (isTsfScheduler && matchesDesiredSchedule) continue;
+                if (matchesDesiredSchedule) continue;
 
                 staleRepeatKeys.add(scheduler.key);
 
-                const wasRemoved = isLegacyRepeatable
-                    ? await queue.removeRepeatableByKey(scheduler.key)
-                    : await queue.removeJobScheduler(scheduler.key);
+                const wasRemoved = await queue.removeJobScheduler(scheduler.key);
                 if (wasRemoved) {
                     removed.push({
                         queue: queueName,
@@ -182,7 +176,7 @@ export class WorkerQueueRegistry {
             }
 
             // BullMQ materializes the next occurrence before it invokes the worker handler. Removing
-            // only a scheduler therefore leaves an already-created legacy occurrence able to keep an
+            // only a scheduler therefore leaves an already-created occurrence able to keep an
             // orphaned chain alive. Reconcile pending occurrences after definitions are gone as well.
             await this.removePendingBullMqRepeatJobs(queue, desiredQueueSchedules, staleRepeatKeys);
         }
@@ -197,9 +191,7 @@ export class WorkerQueueRegistry {
         if (!this.usesBullMq()) return;
 
         const queue = this.getBullQueue(queueName);
-        // The key format identifies either a Job Scheduler or a legacy repeatable job. Attempt
-        // both removals so an unsupported/absent format cannot prevent the compatible cleanup.
-        await Promise.allSettled([queue.removeJobScheduler(repeatKey), queue.removeRepeatableByKey(repeatKey)]);
+        await queue.removeJobScheduler(repeatKey);
         await this.removePendingBullMqRepeatJobs(queue, undefined, new Set([repeatKey]));
     }
 
@@ -278,7 +270,7 @@ export class WorkerQueueRegistry {
     private async discoverBullMqJobSchedulerQueueNames(): Promise<string[]> {
         const prefix = this.getBullMqOptions().prefix ?? 'bull';
         const discoveryQueue = this.getBullQueue(this.getDefaultQueueName());
-        const client = await discoveryQueue.client;
+        const client = await discoveryQueue.getBackend().client;
         const queueNames = new Set(this.bullQueues.keys());
         const keyPrefix = `${prefix}:`;
         const keySuffix = ':repeat';
@@ -302,7 +294,7 @@ export class WorkerQueueRegistry {
         desiredSchedules: ReadonlyMap<string, BullMqCronJobSchedule> | undefined,
         staleRepeatKeys: ReadonlySet<string>
     ): Promise<void> {
-        const jobs = await queue.getJobs(['wait', 'paused', 'delayed', 'prioritized', 'waiting-children']);
+        const jobs = await queue.getJobs(['wait', 'delayed', 'prioritized', 'waiting-children']);
         for (const job of jobs) {
             const repeatKey = job.repeatJobKey;
             if (!repeatKey) continue;
@@ -318,7 +310,7 @@ export class WorkerQueueRegistry {
 }
 
 async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> {
-    const clientPromise = queue.client.catch(() => undefined);
+    const clientPromise = queue.getBackend().client.catch(() => undefined);
     try {
         await queue.close();
     } catch {
@@ -359,21 +351,6 @@ function isTsfBullMqJobScheduler(scheduler: unknown): scheduler is {
     const templateData = scheduler.template.data;
     if (!isRecord(templateData) || !isRecord(templateData.options)) return false;
     return templateData.options.repeatKey === scheduler.key && scheduler.key.startsWith(`${scheduler.name}:`);
-}
-
-function isLegacyBullMqCronRepeatable(scheduler: unknown): scheduler is {
-    key: string;
-    name: string;
-    pattern: string;
-} {
-    return (
-        isRecord(scheduler) &&
-        typeof scheduler.key === 'string' &&
-        typeof scheduler.name === 'string' &&
-        typeof scheduler.pattern === 'string' &&
-        scheduler.iterationCount === undefined &&
-        /^[a-f\d]{32}$/i.test(scheduler.key)
-    );
 }
 
 function isTsfBullMqRepeatJob(job: BullJob<BullMqWorkerJobData>): boolean {
