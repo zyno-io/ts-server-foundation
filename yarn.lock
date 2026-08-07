@@ -1676,66 +1676,66 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-arm64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/darwin-arm64@npm:0.23.0"
+"@ttsc/darwin-arm64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/darwin-arm64@npm:0.25.0"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-x64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/darwin-x64@npm:0.23.0"
+"@ttsc/darwin-x64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/darwin-x64@npm:0.25.0"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph@npm:^0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/graph@npm:0.23.0"
+"@ttsc/graph@npm:^0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/graph@npm:0.25.0"
   dependencies:
     "@modelcontextprotocol/sdk": "npm:^1.26.0"
     "@typia/mcp": "npm:13.2.0"
     typia: "npm:13.2.0"
   peerDependencies:
-    ttsc: ^0.23.0
+    ttsc: ^0.25.0
   bin:
     ttsc-graph: lib/bin.js
-  checksum: 10c0/9664f1ad548f42e97b870b02e0abcc3095c6e6d7adf0fd0b97ab4e7a0b1322bccc62ea5207e949f218ec964cf318926dc4acc0d4964ac2219a00be167d3862fb
+  checksum: 10c0/8321c32909edce14795f0ea85f0d0609b33da9db7bff6c06f7bccecf3e69ed0539e647a74a78103975ff3e604ff265dadf822d5453e65ca9465ded80209867da
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/linux-arm64@npm:0.23.0"
+"@ttsc/linux-arm64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/linux-arm64@npm:0.25.0"
   conditions: os=linux & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/linux-arm@npm:0.23.0"
+"@ttsc/linux-arm@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/linux-arm@npm:0.25.0"
   conditions: os=linux & cpu=arm
   languageName: node
   linkType: hard
 
-"@ttsc/linux-x64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/linux-x64@npm:0.23.0"
+"@ttsc/linux-x64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/linux-x64@npm:0.25.0"
   conditions: os=linux & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-arm64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/win32-arm64@npm:0.23.0"
+"@ttsc/win32-arm64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/win32-arm64@npm:0.25.0"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-x64@npm:0.23.0":
-  version: 0.23.0
-  resolution: "@ttsc/win32-x64@npm:0.23.0"
+"@ttsc/win32-x64@npm:0.25.0":
+  version: 0.25.0
+  resolution: "@ttsc/win32-x64@npm:0.25.0"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
@@ -1838,11 +1838,11 @@ __metadata:
   linkType: hard
 
 "@types/node@npm:*, @types/node@npm:^26.1.2":
-  version: 26.1.2
-  resolution: "@types/node@npm:26.1.2"
+  version: 26.2.0
+  resolution: "@types/node@npm:26.2.0"
   dependencies:
     undici-types: "npm:~8.3.0"
-  checksum: 10c0/a45503222c7db8f374afd5c9381db63dd95b6b1f703abea0890dd3d4a09eeb41da489e08a1a45baf18fe89fb77fbf310ff2789f680c490b04dafc41a60800a86
+  checksum: 10c0/f8566d88162241eb55a46f7e4ea097188eab0aaafefea7a58e63adab8c4144eb98c08b7911452c846104c339a0f82282f5e1ed4b26b578d60709614fe2843f4d
   languageName: node
   linkType: hard
 
@@ -1865,13 +1865,13 @@ __metadata:
   linkType: hard
 
 "@types/pg@npm:*, @types/pg@npm:^8.20.4":
-  version: 8.20.4
-  resolution: "@types/pg@npm:8.20.4"
+  version: 8.21.0
+  resolution: "@types/pg@npm:8.21.0"
   dependencies:
     "@types/node": "npm:*"
     pg-protocol: "npm:*"
     pg-types: "npm:^2.2.0"
-  checksum: 10c0/5b47632681517ea0bbd228cc370b85fc789e48098e4eb29635e74e4a0932503e479e0b29e034e62e54ed4c9368df8f3dfe8dff20592354786056eec6b831ac7f
+  checksum: 10c0/829b1185896a722a9c802e0d3cbbe66fba9d963f759d727acd68206803e37d5c4249241abcc2a595b0e3ebc667293de722a668a016a1d4ab1bbc3f5dbe3b7c93
   languageName: node
   linkType: hard
 
@@ -2409,7 +2409,7 @@ __metadata:
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-node": "npm:^2.10.0"
     "@sentry/node": "npm:^10.69.0"
-    "@ttsc/graph": "npm:^0.23.0"
+    "@ttsc/graph": "npm:^0.25.0"
     "@types/bcrypt": "npm:^6.0.0"
     "@types/busboy": "npm:^1.5.4"
     "@types/debug": "npm:^4.1.13"
@@ -2441,10 +2441,10 @@ __metadata:
     protoc: "npm:^35.1.0"
     ts-proto: "npm:^2.12.0"
     tslib: "npm:^2.8.1"
-    ttsc: "npm:^0.23.0"
+    ttsc: "npm:^0.25.0"
     typescript: "npm:^7.0.2"
     uuidv7: "npm:^1.2.1"
-    vite: "npm:^8.1.5"
+    vite: "npm:^8.2.1"
     vite-plugin-oxlint: "npm:^2.1.2"
     vite-plugin-vue-tailwind-auto-reference: "npm:^2.0.2"
     vitepress: "npm:^1.6.4"
@@ -2727,8 +2727,8 @@ __metadata:
   linkType: hard
 
 "bullmq@npm:^6.0.8":
-  version: 6.0.8
-  resolution: "bullmq@npm:6.0.8"
+  version: 6.0.9
+  resolution: "bullmq@npm:6.0.9"
   dependencies:
     cron-parser: "npm:5.7.0"
     msgpackr: "npm:2.0.5"
@@ -2749,7 +2749,7 @@ __metadata:
       optional: true
     redis:
       optional: true
-  checksum: 10c0/3ffd3fc9bb7b592dd5f209c3021658c22c7d881d28936f4e6ca525deb112197bb53ca7cd9718716c67a86bc7d009fb62da990ad79a543ddb0fffda3bf46658d1
+  checksum: 10c0/ffaaaac1d9c216ed1be74df029915ca4058136d963651a0462bf8906688c141fe31482473608aa6d5a9b9f5df0186e80924888d588a7e065ca935901522392ef
   languageName: node
   linkType: hard
 
@@ -3734,9 +3734,9 @@ __metadata:
   linkType: hard
 
 "hono@npm:^4.11.4":
-  version: 4.13.0
-  resolution: "hono@npm:4.13.0"
-  checksum: 10c0/d7cfb4d1063be19bea1982ea2a6b3cfa1840e8403a03203e86d17278e76fed11e7483974738345257543e183a935ea73ffc6d4a1e6ad7f0008451f55cdf8be7b
+  version: 4.13.1
+  resolution: "hono@npm:4.13.1"
+  checksum: 10c0/83524961f806293464e6c3b31a7fd2ab8cd8e9cb66e65dea1fbbefb70744844c13b7409ed9b49b43e8543e5c0f1b851f2586fa759eea9da0b69503b58cd0d985
   languageName: node
   linkType: hard
 
@@ -4533,11 +4533,11 @@ __metadata:
   linkType: hard
 
 "nanoid@npm:^3.3.17":
-  version: 3.3.17
-  resolution: "nanoid@npm:3.3.17"
+  version: 3.3.18
+  resolution: "nanoid@npm:3.3.18"
   bin:
     nanoid: bin/nanoid.cjs
-  checksum: 10c0/06f7949c7cce5c92c6aea66022f29a1eae7f56e05acbfddf1e049e819b4bf234c44a765cc44da7163482b111677948514012e27acdfa56f95309295768bdae32
+  checksum: 10c0/b994b4e396730f8be2520923284e2040d61eaee55cc6d4935ef6d38d34bafdc46133eda4d3faea5073bda545aa6079d82b886caeac5c731cf9ac18bcc1301425
   languageName: node
   linkType: hard
 
@@ -4609,9 +4609,9 @@ __metadata:
   linkType: hard
 
 "nodemailer@npm:^9.0.4":
-  version: 9.0.4
-  resolution: "nodemailer@npm:9.0.4"
-  checksum: 10c0/e213b4b7b4ef97d0f40f88a6f22402ac91de77db568658341c1f4c62ac81b9e5e679ffed2c1090b0ba2b497c531fdbb31b86322e06fc15348212d0e238e7ead2
+  version: 9.0.5
+  resolution: "nodemailer@npm:9.0.5"
+  checksum: 10c0/60f7a21497c98c0d275cd12c488af581ef6aee65db575026319ac249dcac210bdab20edf77fe3158176ed3910f70d8c46d89abcd74f57a7170302727e6d05ee3
   languageName: node
   linkType: hard
 
@@ -5919,17 +5919,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ttsc@npm:^0.23.0":
-  version: 0.23.0
-  resolution: "ttsc@npm:0.23.0"
+"ttsc@npm:^0.25.0":
+  version: 0.25.0
+  resolution: "ttsc@npm:0.25.0"
   dependencies:
-    "@ttsc/darwin-arm64": "npm:0.23.0"
-    "@ttsc/darwin-x64": "npm:0.23.0"
-    "@ttsc/linux-arm": "npm:0.23.0"
-    "@ttsc/linux-arm64": "npm:0.23.0"
-    "@ttsc/linux-x64": "npm:0.23.0"
-    "@ttsc/win32-arm64": "npm:0.23.0"
-    "@ttsc/win32-x64": "npm:0.23.0"
+    "@ttsc/darwin-arm64": "npm:0.25.0"
+    "@ttsc/darwin-x64": "npm:0.25.0"
+    "@ttsc/linux-arm": "npm:0.25.0"
+    "@ttsc/linux-arm64": "npm:0.25.0"
+    "@ttsc/linux-x64": "npm:0.25.0"
+    "@ttsc/win32-arm64": "npm:0.25.0"
+    "@ttsc/win32-x64": "npm:0.25.0"
   dependenciesMeta:
     "@ttsc/darwin-arm64":
       optional: true
@@ -5949,7 +5949,7 @@ __metadata:
     ttsc: lib/launcher/ttsc.js
     ttscserver: lib/launcher/ttscserver.js
     ttsx: lib/launcher/ttsx.js
-  checksum: 10c0/ec2353c66f02891392496de2b39fe1244ff7c9ef4da0db5f8243cd44f83207b9b6bc24d07ad6df8058efdf8d6fcd08cf5d649dc6c539310f4747c1ca86a072d5
+  checksum: 10c0/ecdff7b6e98febbed406fdc2671925777a27cdb37de5799ba7307fcbb81db5bcd22e98daf87a035e16e8a7cab7c98ac6ff246872637ab6752bdae5db3fce9dd0
   languageName: node
   linkType: hard
 
@@ -6376,7 +6376,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"vite@npm:^8.1.5":
+"vite@npm:^8.1.5, vite@npm:^8.2.1":
   version: 8.2.1
   resolution: "vite@npm:8.2.1"
   dependencies:
@@ -6585,8 +6585,8 @@ __metadata:
   linkType: hard
 
 "ws@npm:^8.21.2":
-  version: 8.21.2
-  resolution: "ws@npm:8.21.2"
+  version: 8.21.3
+  resolution: "ws@npm:8.21.3"
   peerDependencies:
     bufferutil: ^4.0.1
     utf-8-validate: ">=5.0.2"
@@ -6595,7 +6595,7 @@ __metadata:
       optional: true
     utf-8-validate:
       optional: true
-  checksum: 10c0/82d687bbfbccce04e91266ff9911b27c67ca622fd8fbacc6a64d467a43fbd7ecaa3ef6d820b315c060682f901463f57cac01a02b00c4379f49c747ec7da83169
+  checksum: 10c0/7b28dc2863ea0e2cece68d142a3eee90361021b73f750431e6d8076bb7dede5fdfdb75b3d29534b62f411261147b76b1bc80fb5cc63ab0aabd467280e85b22e0
   languageName: node
   linkType: hard
 
