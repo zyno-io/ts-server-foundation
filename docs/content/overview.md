@@ -66,7 +66,7 @@ Redis is feature-dependent, not a requirement for the base HTTP application. Con
 
 | Area       | Included behavior                                                                                                                  | Detailed guide                |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| Health     | `/healthz`, application version, built-in database checks, custom checks, and individual results                                   | [Health Checks](./health.md)  |
+| Health     | `/healthz`, `/readyz`, `/livez`, application version, built-in database checks, custom checks, and individual results              | [Health Checks](./health.md)  |
 | Logging    | Scoped Pino loggers, async context, structured errors, custom sinks, HTTP request modes, and Sentry forwarding                     | [Logging](./logging.md)       |
 | Telemetry  | OpenTelemetry HTTP/Undici/DNS/Redis/MySQL/PostgreSQL instrumentation, OTLP export, Prometheus metrics, spans, and Sentry           | [Telemetry](./telemetry.md)   |
 | DevConsole | Local-only routes, OpenAPI, requests, SRPC, database queries/entities, health, mutex, worker, environment, and REPL views          | [DevConsole](./devconsole.md) |

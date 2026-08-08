@@ -1149,10 +1149,14 @@ describe('openapi', () => {
 
         const internalDoc = serializeOpenApiSchema(createApp({}));
         assert.equal(internalDoc.paths['/healthz'], undefined);
+        assert.equal(internalDoc.paths['/readyz'], undefined);
+        assert.equal(internalDoc.paths['/livez'], undefined);
         assert.equal(internalDoc.paths['/openapi.json'], undefined);
         assert.equal(internalDoc.paths['/openapi.yaml'], undefined);
         const includedInternalDoc = serializeOpenApiSchema(createApp({}), { includeInternal: true });
         assert.ok(includedInternalDoc.paths['/healthz']);
+        assert.ok(includedInternalDoc.paths['/readyz']);
+        assert.ok(includedInternalDoc.paths['/livez']);
         assert.ok(includedInternalDoc.paths['/openapi.json']);
         assert.ok(includedInternalDoc.paths['/openapi.yaml']);
 

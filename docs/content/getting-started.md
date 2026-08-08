@@ -180,7 +180,7 @@ Run custom commands through the same compiled entrypoint:
 node . receipts:requeue
 ```
 
-Long-running commands can extend `CliServiceCommand`. These commands start an HTTP listener with only the enabled `/healthz` and `/metrics` controllers; application, OpenAPI, and DevConsole controllers are not exposed by the service process.
+Long-running commands can extend `CliServiceCommand`. These commands start an HTTP listener with only the enabled `/healthz`, `/readyz`, `/livez`, and `/metrics` controllers; application, OpenAPI, and DevConsole controllers are not exposed by the service process.
 
 ## `createApp()` Options
 
@@ -222,7 +222,7 @@ Common fields:
 | `staticFiles`        | Static-file options, or `true` for the default `static/` directory with SPA fallback.               |
 | `httpResolvers`      | App-wide custom HTTP parameter resolvers keyed by reflected class name.                             |
 | `fallbackController` | Request-scoped controller for unmatched `GET` and `HEAD` requests, such as a frontend SSR renderer. |
-| `enableHealthcheck`  | Set to `false` to skip the default `/healthz` endpoint.                                             |
+| `enableHealthcheck`  | Set to `false` to skip the default health endpoints (`/healthz`, `/readyz`, and `/livez`).          |
 | `enableWorker`       | Registers worker services and job runners.                                                          |
 | `enableDkRpc`        | Legacy compatibility flag; the current runtime does not act on it.                                  |
 

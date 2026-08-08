@@ -154,7 +154,7 @@ export class HttpRequestLogger {
 
     shouldSkip(request: HttpRequest): boolean {
         if (request.path === '/metrics') return true;
-        if (request.path === '/healthz' && this.config.HEALTHZ_ENABLE_REQUEST_LOGGING !== true) return true;
+        if (['/healthz', '/readyz', '/livez'].includes(request.path) && this.config.HEALTHZ_ENABLE_REQUEST_LOGGING !== true) return true;
         return this.options.excludePaths?.some(path => matchesPath(request.path, path)) ?? false;
     }
 

@@ -527,7 +527,15 @@ function toOpenApiPath(path: string): string {
 }
 
 function isInternalRoute(path: string): boolean {
-    return path === '/openapi.json' || path === '/openapi.yaml' || path === '/healthz' || path === '/metrics' || path.startsWith('/_devconsole');
+    return (
+        path === '/openapi.json' ||
+        path === '/openapi.yaml' ||
+        path === '/healthz' ||
+        path === '/readyz' ||
+        path === '/livez' ||
+        path === '/metrics' ||
+        path.startsWith('/_devconsole')
+    );
 }
 
 function getControllerTagName(controllerClass: Function): string {

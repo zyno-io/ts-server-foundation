@@ -119,6 +119,8 @@ Generated documents exclude internal routes by default:
 - `/openapi.yaml`
 - `/_devconsole`
 - `/healthz`
+- `/readyz`
+- `/livez`
 - `/metrics`
 
 Call `serializeOpenApiSchema(app, { includeInternal: true })` if a tool needs the full internal route list.

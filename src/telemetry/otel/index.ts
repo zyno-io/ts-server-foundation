@@ -190,11 +190,12 @@ function createDefaultInstrumentations(options: TelemetryInitOptions): Instrumen
     return [
         new HttpInstrumentation({
             startIncomingSpanHook: options.httpIncomingRequestAttributeHook,
-            ignoreIncomingRequestHook: (request: IncomingMessage) => request.url === '/healthz' || request.url === '/metrics',
+            ignoreIncomingRequestHook: (request: IncomingMessage) =>
+                request.url === '/healthz' || request.url === '/readyz' || request.url === '/livez' || request.url === '/metrics',
             ignoreOutgoingRequestHook: (request: RequestOptions) => !!String(request.host ?? request.hostname ?? '').match(/sentry\./)
         }),
         new UndiciInstrumentation({
-            ignoreRequestHook: (request: UndiciRequest) => /(\/healthz|\/metrics|sentry\.)/.test(`${request.origin}${request.path}`)
+            ignoreRequestHook: (request: UndiciRequest) => /(\/healthz|\/readyz|\/livez|\/metrics|sentry\.)/.test(`${request.origin}${request.path}`)
         }),
         new DnsInstrumentation(),
         new IORedisInstrumentation(),

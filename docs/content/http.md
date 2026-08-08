@@ -100,7 +100,7 @@ Node HTTP requests are logged at the server boundary and configured with `HTTP_R
 | `errors` | Logs only request processing errors and aborted requests. |
 | `none`   | Disables normal request logs.                             |
 
-Test mode defaults to `errors` so service/application logs remain visible without routine HTTP `Request` and `Response` records. Request logs include method, URL, status code, duration, remote address on start, and the allowlisted request context fields. `LoggerHttpContextProps` contains `reqId` and `traceId` by default; add application-specific context field names explicitly when they are safe to log. `/healthz` request logging is disabled by default; set `HEALTHZ_ENABLE_REQUEST_LOGGING=true` to include it. `/metrics` is always skipped.
+Test mode defaults to `errors` so service/application logs remain visible without routine HTTP `Request` and `Response` records. Request logs include method, URL, status code, duration, remote address on start, and the allowlisted request context fields. `LoggerHttpContextProps` contains `reqId` and `traceId` by default; add application-specific context field names explicitly when they are safe to log. `/healthz`, `/readyz`, and `/livez` request logging is disabled by default; set `HEALTHZ_ENABLE_REQUEST_LOGGING=true` to include them. `/metrics` is always skipped.
 
 ```ts
 import { LoggerHttpContextProps, setHttpContextResolver } from '@zyno-io/ts-server-foundation';

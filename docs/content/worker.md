@@ -15,11 +15,11 @@ Normal server processes can enqueue jobs. The job runner starts only for the mai
 
 For the main app process, runner ownership is controlled by `ENABLE_JOB_RUNNER`:
 
-| Environment           | Default runner behavior                                                                                  |
-| --------------------- | -------------------------------------------------------------------------------------------------------- |
-| `production`          | runner off unless `ENABLE_JOB_RUNNER=true`                                                               |
-| non-production        | runner on unless `ENABLE_JOB_RUNNER=false`                                                               |
-| `node . worker:start` | runner forced on; the HTTP listener also starts, including `/healthz` unless health checks were disabled |
+| Environment           | Default runner behavior                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `production`          | runner off unless `ENABLE_JOB_RUNNER=true`                                                                                        |
+| non-production        | runner on unless `ENABLE_JOB_RUNNER=false`                                                                                        |
+| `node . worker:start` | runner forced on; the HTTP listener also starts, including `/healthz`, `/readyz`, and `/livez` unless health checks were disabled |
 
 Production deployments should run API/server pods with `node . server:start` and `ENABLE_JOB_RUNNER` unset or false, and separate worker pods with `node . worker:start`.
 

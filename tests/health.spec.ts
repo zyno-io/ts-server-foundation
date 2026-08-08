@@ -70,18 +70,80 @@ describe('health checks', () => {
         ]);
     });
 
-    it('registers /healthz by default and can disable it', async () => {
+    it('runs readiness and liveness checks independently', async () => {
+        const service = new HealthcheckService();
+        let readyChecks = 0;
+        let livenessChecks = 0;
+
+        service.registerReadyCheck('database', () => {
+            readyChecks++;
+        });
+        service.registerLivenessCheck('event-loop', () => {
+            livenessChecks++;
+        });
+
+        await service.checkReady();
+        assert.equal(readyChecks, 1);
+        assert.equal(livenessChecks, 0);
+
+        await service.checkLiveness();
+        assert.equal(readyChecks, 1);
+        assert.equal(livenessChecks, 1);
+    });
+
+    it('runs probe checks from their matching endpoints', async () => {
+        const app = createApp({});
+        const service = app.get(HealthcheckService);
+        let readyChecks = 0;
+        let livenessChecks = 0;
+
+        service.registerReadyCheck('database', () => {
+            readyChecks++;
+        });
+        service.registerLivenessCheck('event-loop', () => {
+            livenessChecks++;
+        });
+
+        try {
+            const ready = await app.request(HttpRequest.GET('/readyz'));
+            assert.equal(ready.statusCode, 200);
+            assert.equal(readyChecks, 1);
+            assert.equal(livenessChecks, 0);
+
+            const live = await app.request(HttpRequest.GET('/livez'));
+            assert.equal(live.statusCode, 200);
+            assert.equal(readyChecks, 1);
+            assert.equal(livenessChecks, 1);
+        } finally {
+            await app.stop();
+        }
+    });
+
+    it('registers health, readiness, and liveness endpoints by default and can disable them', async () => {
         process.env.APP_ENV = 'test';
         const app = createApp({});
         const disabled = createApp({ enableHealthcheck: false });
 
         try {
-            const response = await app.request(HttpRequest.GET('/healthz'));
-            const missing = await disabled.request(HttpRequest.GET('/healthz'));
+            const health = await app.request(HttpRequest.GET('/healthz'));
+            const ready = await app.request(HttpRequest.GET('/readyz'));
+            const live = await app.request(HttpRequest.GET('/livez'));
+            const missing = await Promise.all([
+                disabled.request(HttpRequest.GET('/healthz')),
+                disabled.request(HttpRequest.GET('/readyz')),
+                disabled.request(HttpRequest.GET('/livez'))
+            ]);
 
-            assert.equal(response.statusCode, 200);
-            assert.equal(typeof response.json.version, 'string');
-            assert.equal(missing.statusCode, 404);
+            assert.equal(health.statusCode, 200);
+            assert.equal(typeof health.json.version, 'string');
+            assert.equal(ready.statusCode, 200);
+            assert.deepStrictEqual(ready.json, { ok: true });
+            assert.equal(live.statusCode, 200);
+            assert.deepStrictEqual(live.json, { ok: true });
+            assert.deepStrictEqual(
+                missing.map(response => response.statusCode),
+                [404, 404, 404]
+            );
         } finally {
             await Promise.all([app.stop(), disabled.stop()]);
         }

@@ -21,7 +21,7 @@ The TSF compiler emits reflected type metadata used by validation, OpenAPI, rout
 | [Uploads](./uploads.md)                                           | Multipart parsing, `FileUpload`, temporary-file cleanup, cached body reads, and raw request streams.      |
 | [OpenAPI](./openapi.md)                                           | Route/schema serialization, explicit query/body rules, `ApiResponse<T, Status>`, and generation commands. |
 | [Authentication](./authentication.md)                             | JWTs, request helpers, auth middleware, basic auth, password hashing, and reset tokens.                   |
-| [Health Checks](./health.md)                                      | `/healthz`, `HealthcheckService`, custom checks, and request logging.                                     |
+| [Health Checks](./health.md)                                      | `/healthz`, `/readyz`, `/livez`, `HealthcheckService`, custom checks, and request logging.                |
 | [Logging](./logging.md)                                           | Pino logging, pretty output, context data, request logs, and error reporting.                             |
 | [Types](./types.md)                                               | Runtime and schema type annotations, including DB/OpenAPI effects for custom types.                       |
 | [Type Reflection](./reflection.md)                                | Public runtime reflection, annotation readers, custom validators/deserializers, and shared aliases.       |

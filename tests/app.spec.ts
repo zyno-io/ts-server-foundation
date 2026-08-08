@@ -829,7 +829,7 @@ void app.run();
 
         assert.deepStrictEqual(constructed, ['cli']);
         assert.equal(workerStarts, 0);
-        assert.deepStrictEqual(routePaths, ['/healthz', '/metrics']);
+        assert.deepStrictEqual(routePaths, ['/healthz', '/readyz', '/livez', '/metrics']);
         assert.equal(healthStatus, 200);
         assert.equal(metricsStatus, 503);
         assert.equal(applicationStatus, 404);
@@ -1127,7 +1127,11 @@ void app.run();
         assert.equal(entries[1].data?.routeCount, app.router.listRoutes().length);
         const healthController = entries.find(entry => entry.data?.controller === 'HealthcheckController');
         assert.ok(healthController);
-        assert.deepEqual(healthController.data?.routes, [{ method: 'GET', path: '/healthz' }]);
+        assert.deepEqual(healthController.data?.routes, [
+            { method: 'GET', path: '/healthz' },
+            { method: 'GET', path: '/readyz' },
+            { method: 'GET', path: '/livez' }
+        ]);
         assert.equal(entries.find(entry => entry.message === 'HTTP listening')?.data?.url, `http://127.0.0.1:${address.port}`);
     });
 

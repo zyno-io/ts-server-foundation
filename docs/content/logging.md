@@ -222,4 +222,4 @@ Request logging is handled by the owned HTTP server boundary and configured via 
 | `errors` | Log only request processing errors and aborts                |
 | `none`   | No request logging                                           |
 
-Test mode defaults to `errors`, so application logs stay visible while routine HTTP `Request` and `Response` records are suppressed. Health check logging is disabled by default. Enable with `HEALTHZ_ENABLE_REQUEST_LOGGING=true`.
+Test mode defaults to `errors`, so application logs stay visible while routine HTTP `Request` and `Response` records are suppressed. Health, readiness, and liveness probe logging is disabled by default. Enable it with `HEALTHZ_ENABLE_REQUEST_LOGGING=true`.

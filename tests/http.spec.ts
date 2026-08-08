@@ -2791,6 +2791,13 @@ describe('http router', () => {
 
             assert.equal(health.statusCode, 200);
             assert.equal(entries.length, 0);
+
+            const ready = await requestNodeHttp(address.port, 'GET', '/readyz');
+            const live = await requestNodeHttp(address.port, 'GET', '/livez');
+
+            assert.equal(ready.statusCode, 200);
+            assert.equal(live.statusCode, 200);
+            assert.equal(entries.length, 0);
         } finally {
             await app.stop();
             resetLogSink();
@@ -3121,9 +3128,11 @@ describe('http router', () => {
 
         try {
             await requestNodeHttp(address.port, 'GET', '/healthz');
+            await requestNodeHttp(address.port, 'GET', '/readyz');
+            await requestNodeHttp(address.port, 'GET', '/livez');
             assert.deepStrictEqual(
                 entries.map(entry => entry.message),
-                ['Request', 'Response']
+                ['Request', 'Response', 'Request', 'Response', 'Request', 'Response']
             );
         } finally {
             await app.stop();
