@@ -2422,7 +2422,7 @@ __metadata:
     "@zyno-io/config": "npm:^1.14.0"
     "@zyno-io/ts-reflection": "workspace:*"
     bcrypt: "npm:^6.0.0"
-    bullmq: "npm:^6.0.8"
+    bullmq: "npm:^6.0.9"
     busboy: "npm:^1.6.0"
     debug: "npm:^4.4.3"
     dotenv-cli: "npm:^11.0.0"
@@ -2432,7 +2432,7 @@ __metadata:
     ioredis: "npm:^6.0.0"
     lefthook: "npm:^2.1.10"
     mysql2: "npm:^3.23.2"
-    nodemailer: "npm:^9.0.4"
+    nodemailer: "npm:^9.0.5"
     oxlint: "npm:^1.77.0"
     pg: "npm:^8.22.0"
     pino: "npm:^10.3.1"
@@ -2450,7 +2450,7 @@ __metadata:
     vitepress: "npm:^1.6.4"
     vue: "npm:^3.5.41"
     vue-router: "npm:^5.2.0"
-    ws: "npm:^8.21.2"
+    ws: "npm:^8.21.3"
     yaml: "npm:^2.9.0"
   dependenciesMeta:
     "@ttsc/darwin-arm64":
@@ -2726,7 +2726,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"bullmq@npm:^6.0.8":
+"bullmq@npm:^6.0.9":
   version: 6.0.9
   resolution: "bullmq@npm:6.0.9"
   dependencies:
@@ -4608,7 +4608,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"nodemailer@npm:^9.0.4":
+"nodemailer@npm:^9.0.5":
   version: 9.0.5
   resolution: "nodemailer@npm:9.0.5"
   checksum: 10c0/60f7a21497c98c0d275cd12c488af581ef6aee65db575026319ac249dcac210bdab20edf77fe3158176ed3910f70d8c46d89abcd74f57a7170302727e6d05ee3
@@ -6584,7 +6584,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ws@npm:^8.21.2":
+"ws@npm:^8.21.3":
   version: 8.21.3
   resolution: "ws@npm:8.21.3"
   peerDependencies:
