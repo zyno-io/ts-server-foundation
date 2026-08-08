@@ -80,7 +80,8 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             const meshNode = await startMeshNode(meshKey);
             child = meshNode;
             localClient = createClient(`ws://127.0.0.1:${parentPort}${clientPath}`, 'parent-client', 'parent');
-            childClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'child-client', 'child');
+            const meshChildClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'child-client', 'child');
+            childClient = meshChildClient;
             const orphaned: Array<{ nodeId: number; clientId: string; connectionId: string; role: string }> = [];
             server.onNodeClientsOrphaned((nodeId, clients) => {
                 orphaned.push(
@@ -89,7 +90,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             });
 
             await localClient.connect();
-            await childClient.connect();
+            await meshChildClient.connect();
             await waitFor(async () => (await server.getRegisteredClient('parent-client')) !== undefined);
             await waitFor(async () => (await server.getRegisteredClient('child-client')) !== undefined);
 
@@ -122,7 +123,8 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             await server.disconnectClient(remote, 'planned remote disconnect');
             await waitFor(async () => (await server.getRegisteredClient('child-client')) === undefined);
             await waitFor(() => !remoteConnection.connected);
-            assert.equal(childClient.isConnected, false);
+            await waitFor(() => !meshChildClient.isConnected);
+            assert.equal(meshChildClient.isConnected, false);
 
             const orphanClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'orphan-client', 'orphan');
             try {
