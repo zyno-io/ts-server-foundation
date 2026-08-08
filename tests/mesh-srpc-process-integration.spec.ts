@@ -22,6 +22,8 @@ const redisSkip = process.env.REDIS_HOST ? false : 'set REDIS_HOST to run multi-
 const clientPath = '/mesh-process-client';
 const meshPath = '/_tsf/mesh-process';
 const meshSecret = 'mesh-process-integration-secret';
+const MeshProcessTestTimeoutMs = 30_000;
+const MeshChildStartupTimeoutMs = 15_000;
 
 interface MeshClientMessage extends BaseMessage {
     dEchoResponse?: { value: string; node: string };
@@ -46,7 +48,7 @@ const JsonMessage: SrpcMessageFns<MeshClientMessage | MeshServerMessage> = {
 };
 
 describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => {
-    it('uses the application listener across processes and fences a crashed remote owner', async () => {
+    it('uses the application listener across processes and fences a crashed remote owner', { timeout: MeshProcessTestTimeoutMs }, async () => {
         const originalPodIp = process.env.POD_IP;
         process.env.POD_IP = '127.0.0.1';
         const meshKey = `mesh-process-${randomUUID()}`;
@@ -67,20 +69,25 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             autoLifecycle: false
         });
         server.setClientAuthorizer(() => true);
-        const httpServer = await app.http.listen(0, '127.0.0.1');
-        const parentPort = (httpServer.address() as AddressInfo).port;
-        await server.meshStart();
-        const child = await startMeshNode(meshKey);
-        const localClient = createClient(`ws://127.0.0.1:${parentPort}${clientPath}`, 'parent-client', 'parent');
-        const childClient = createClient(`ws://127.0.0.1:${child.port}${clientPath}`, 'child-client', 'child');
-        let orphaned: Array<{ nodeId: number; clientId: string; connectionId: string; role: string }> = [];
-        server.onNodeClientsOrphaned((nodeId, clients) => {
-            orphaned.push(
-                ...clients.map(client => ({ nodeId, clientId: client.clientId, connectionId: client.connectionId, role: client.metadata.role }))
-            );
-        });
+        let child: MeshNode | undefined;
+        let localClient: SrpcClient<MeshClientMessage, MeshServerMessage> | undefined;
+        let childClient: SrpcClient<MeshClientMessage, MeshServerMessage> | undefined;
 
         try {
+            const httpServer = await app.http.listen(0, '127.0.0.1');
+            const parentPort = (httpServer.address() as AddressInfo).port;
+            await server.meshStart();
+            const meshNode = await startMeshNode(meshKey);
+            child = meshNode;
+            localClient = createClient(`ws://127.0.0.1:${parentPort}${clientPath}`, 'parent-client', 'parent');
+            childClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'child-client', 'child');
+            const orphaned: Array<{ nodeId: number; clientId: string; connectionId: string; role: string }> = [];
+            server.onNodeClientsOrphaned((nodeId, clients) => {
+                orphaned.push(
+                    ...clients.map(client => ({ nodeId, clientId: client.clientId, connectionId: client.connectionId, role: client.metadata.role }))
+                );
+            });
+
             await localClient.connect();
             await childClient.connect();
             await waitFor(async () => (await server.getRegisteredClient('parent-client')) !== undefined);
@@ -105,10 +112,10 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             );
 
             const remoteConnection = remote as Exclude<MeshSrpcConnection<ClientMetadata, { role: string }>, SrpcStream<ClientMetadata>>;
-            assert.equal(remoteConnection.ownerNodeId, child.nodeId);
-            assert.equal(remoteConnection.ownerProcessId, child.meshProcessId);
+            assert.equal(remoteConnection.ownerNodeId, meshNode.nodeId);
+            assert.equal(remoteConnection.ownerProcessId, meshNode.meshProcessId);
             assert.notEqual(remoteConnection.ownerProcessId, getMeshLinkProcessId());
-            assert.notEqual(child.osPid, process.pid);
+            assert.notEqual(meshNode.osPid, process.pid);
             assert.deepEqual(await server.invoke(local, 'dEcho', { value: 'local' }), { value: 'local', node: 'parent' });
             assert.deepEqual(await server.invoke(remote, 'dEcho', { value: 'remote' }), { value: 'remote', node: 'child' });
 
@@ -117,7 +124,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             await waitFor(() => !remoteConnection.connected);
             assert.equal(childClient.isConnected, false);
 
-            const orphanClient = createClient(`ws://127.0.0.1:${child.port}${clientPath}`, 'orphan-client', 'orphan');
+            const orphanClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'orphan-client', 'orphan');
             try {
                 await orphanClient.connect();
                 await waitFor(async () => (await server.getRegisteredClient('orphan-client')) !== undefined);
@@ -126,12 +133,12 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                 const orphanConnection = await server.resolveClient('orphan-client');
                 assert.ok(orphanConnection && !isLocalSrpcStream(orphanConnection));
 
-                child.child.kill('SIGKILL');
-                await child.exited;
+                meshNode.child.kill('SIGKILL');
+                await meshNode.exited;
                 await waitFor(() => !orphanConnection.connected, 3_000);
                 await assert.rejects(server.invoke(orphanConnection, 'dEcho', { value: 'after-crash' }));
-                await waitFor(() => orphaned.some(client => client.nodeId === child.nodeId && client.clientId === 'orphan-client'), 16_000);
-                const orphan = orphaned.find(client => client.nodeId === child.nodeId && client.clientId === 'orphan-client');
+                await waitFor(() => orphaned.some(client => client.nodeId === meshNode.nodeId && client.clientId === 'orphan-client'), 16_000);
+                const orphan = orphaned.find(client => client.nodeId === meshNode.nodeId && client.clientId === 'orphan-client');
                 assert.ok(orphan);
                 assert.equal(orphan.role, 'orphan');
                 assert.equal(orphan.connectionId, orphanRecord.connectionId);
@@ -148,9 +155,15 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                 orphanClient.disconnect();
             }
         } finally {
-            localClient.disconnect();
-            childClient.disconnect();
-            await child.stop();
+            localClient?.disconnect();
+            childClient?.disconnect();
+            if (child) {
+                try {
+                    await child.stop();
+                } catch {
+                    // The process may already have been intentionally killed.
+                }
+            }
             await server.meshStop().catch(() => {});
             server.close();
             await app.http.close();
@@ -208,57 +221,80 @@ async function startMeshNode(meshKey: string): Promise<MeshNode> {
     const exited = new Promise<void>(resolve => {
         resolveExit = resolve;
     });
+    let exitedChild = false;
     let ready = false;
-    const node = await new Promise<MeshNode>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`Timed out starting mesh child:\n${diagnostics.join('')}`)), 5_000);
-        timeout.unref?.();
-        child.once('exit', (code, signal) => {
-            resolveExit();
-            if (!ready) reject(new Error(`Mesh child exited before ready (${code ?? signal}):\n${diagnostics.join('')}`));
-        });
-        child.on('message', message => {
-            if (!isRecord(message)) return;
-            if (message.type === 'error') {
+    child.once('exit', () => {
+        exitedChild = true;
+        resolveExit();
+    });
+
+    try {
+        return await new Promise<MeshNode>((resolve, reject) => {
+            let settled = false;
+            const timeout = setTimeout(() => fail(new Error(`Timed out starting mesh child:\n${diagnostics.join('')}`)), MeshChildStartupTimeoutMs);
+            const fail = (error: Error) => {
+                if (settled) return;
+                settled = true;
                 clearTimeout(timeout);
-                reject(new Error(String(message.error)));
-                return;
-            }
-            if (message.type !== 'ready') return;
-            ready = true;
-            clearTimeout(timeout);
-            const port = Number(message.port);
-            const nodeId = Number(message.nodeId);
-            const meshProcessId = typeof message.meshProcessId === 'string' ? message.meshProcessId : '';
-            const osPid = Number(message.osPid);
-            if (!Number.isSafeInteger(port) || !Number.isSafeInteger(nodeId) || !meshProcessId || !Number.isSafeInteger(osPid)) {
-                reject(new Error(`Mesh child returned invalid ready message: ${JSON.stringify(message)}`));
-                return;
-            }
-            resolve({
-                child,
-                port,
-                nodeId,
-                meshProcessId,
-                osPid,
-                exited,
-                stop: async () => {
-                    if (child.exitCode !== null || child.killed) return;
-                    child.send({ type: 'stop' });
-                    await Promise.race([
-                        exited,
-                        new Promise<void>((_resolve, rejectStop) => {
-                            const stopTimeout = setTimeout(() => rejectStop(new Error('Timed out stopping mesh child')), 3_000);
-                            stopTimeout.unref?.();
-                        })
-                    ]).catch(error => {
-                        child.kill('SIGKILL');
-                        throw error;
-                    });
+                reject(error);
+            };
+            const succeed = (node: MeshNode) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                resolve(node);
+            };
+            child.once('exit', (code, signal) => {
+                if (!ready) fail(new Error(`Mesh child exited before ready (${code ?? signal}):\n${diagnostics.join('')}`));
+            });
+            child.on('message', message => {
+                if (!isRecord(message)) return;
+                if (message.type === 'error') {
+                    fail(new Error(String(message.error)));
+                    return;
                 }
+                if (message.type !== 'ready') return;
+                ready = true;
+                const port = Number(message.port);
+                const nodeId = Number(message.nodeId);
+                const meshProcessId = typeof message.meshProcessId === 'string' ? message.meshProcessId : '';
+                const osPid = Number(message.osPid);
+                if (!Number.isSafeInteger(port) || !Number.isSafeInteger(nodeId) || !meshProcessId || !Number.isSafeInteger(osPid)) {
+                    fail(new Error(`Mesh child returned invalid ready message: ${JSON.stringify(message)}`));
+                    return;
+                }
+                succeed({
+                    child,
+                    port,
+                    nodeId,
+                    meshProcessId,
+                    osPid,
+                    exited,
+                    stop: async () => {
+                        if (child.exitCode !== null || child.killed) return;
+                        child.send({ type: 'stop' });
+                        const stopped = Promise.race([
+                            exited,
+                            new Promise<void>((_resolve, rejectStop) => {
+                                const stopTimeout = setTimeout(() => rejectStop(new Error('Timed out stopping mesh child')), 3_000);
+                                stopTimeout.unref?.();
+                            })
+                        ]);
+                        try {
+                            await stopped;
+                        } catch (error) {
+                            child.kill('SIGKILL');
+                            throw error;
+                        }
+                    }
+                });
             });
         });
-    });
-    return node;
+    } catch (error) {
+        if (!exitedChild) child.kill('SIGKILL');
+        await exited;
+        throw error;
+    }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
