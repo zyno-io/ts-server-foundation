@@ -70,6 +70,8 @@ const SKIPPED_TSCONFIG_DIRS = new Set(['.git', '.hg', '.svn', '.yarn', 'node_mod
 
 export function install(options: InstallOptions = {}): number {
     const projectDir = options.projectDir ?? findInstallProjectRoot();
+    if (isInstalledDependency(projectDir)) return 0;
+
     const packageJsonPath = join(projectDir, 'package.json');
     const pkg = readPackageJson(packageJsonPath);
     const workspaceRoot = findWorkspaceRoot(projectDir) ?? projectDir;
@@ -149,6 +151,10 @@ function findInstallProjectRoot(): string {
         return dirname(resolve(packageJsonPath));
     }
     return findProjectRoot();
+}
+
+function isInstalledDependency(projectDir: string): boolean {
+    return resolve(projectDir).split(/[\\/]/).includes('node_modules');
 }
 
 function readPackageJson(path: string): PackageJson {

@@ -426,6 +426,37 @@ describe('CLI', () => {
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
     });
 
+    it('does not modify an installed dependency during its postinstall', () => {
+        const dir = tempDir();
+        const dependencyDir = join(dir, 'node_modules', '@fixture', 'shared');
+        mkdirSync(dependencyDir, { recursive: true });
+        const packageJsonPath = join(dependencyDir, 'package.json');
+        const packageJson = JSON.stringify(
+            {
+                name: '@fixture/shared',
+                devDependencies: {
+                    '@zyno-io/ts-server-foundation': '*',
+                    ttsc: '^0.1',
+                    typescript: '~5.9'
+                },
+                scripts: { postinstall: 'tsf-install' }
+            },
+            null,
+            4
+        );
+        writeFileSync(packageJsonPath, packageJson);
+        writeFileSync(join(dependencyDir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+
+        const result = runCli('tsf-install.js', [], dir, {
+            npm_lifecycle_event: 'postinstall',
+            npm_package_json: packageJsonPath
+        });
+
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(readFileSync(packageJsonPath, 'utf8'), packageJson);
+        assert.equal(existsSync(join(dependencyDir, '.yarn')), false);
+    });
+
     it('preserves wildcard TSF dependency versions, including peer dependencies', () => {
         const dir = tempDir();
         writeFileSync(
