@@ -63,10 +63,14 @@ describe('Redis MeshService integration', { skip: redisSkip }, () => {
             const staleId = third.instanceId;
             await third.stop();
             const { client, prefix } = createRedis('MESH');
-            await client.publish(
-                `${prefix}:mesh:${key}:broadcast`,
-                JSON.stringify({ protocolVersion: 2, broadcast: true, senderInstanceId: staleId, type: 'changed', data: { key: 'stale' } })
-            );
+            try {
+                await client.publish(
+                    `${prefix}:mesh:${key}:broadcast`,
+                    JSON.stringify({ protocolVersion: 2, broadcast: true, senderInstanceId: staleId, type: 'changed', data: { key: 'stale' } })
+                );
+            } finally {
+                client.disconnect();
+            }
             await first.broadcast('changed', { key: 'live-marker' }, { skipSelf: true });
             await waitFor(() => secondDeliveries.some(delivery => delivery.data.key === 'live-marker'));
             assert.equal(
