@@ -256,6 +256,10 @@ Extends `SrpcServer` with mesh client tracking. Single class — no need to crea
 
 Cross-node client operations require `meshLink.secret` or `MESH_LINK_SECRET`. Without either, `meshStart()` still starts membership, the registry, and broadcasts, but client operations are local-only. Remote operations fail closed; Redis is never used as an RPC fallback.
 
+Application servers can use `getMeshSrpcServerOptions(config, { meshKeySuffix, clientWebSocketPaths })` to construct these common options. It validates the Redis and peer-link settings once, derives the mesh key from `MESH_LINK_NAMESPACE`, and rejects a mesh-link path that overlaps an application WebSocket endpoint.
+
+After authentication succeeds, `MeshSrpcServer` waits for mesh readiness before admitting the stream. Application authorizers should perform application authentication and authorization only; they do not need their own mesh-readiness gate.
+
 ```typescript
 import { MeshSrpcServer } from '@zyno-io/ts-server-foundation';
 import { ClientMessage, ServerMessage } from './generated/proto';
@@ -334,15 +338,15 @@ new MeshSrpcServer(options: ISrpcServerOptions & MeshSrpcServerOptions)
 
 `MeshSrpcServerOptions`:
 
-| Option            | Type                             | Description                                                                                                       |
-| ----------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `meshKey`         | `string`                         | Mesh key                                                                                                          |
-| `meshOptions`     | `MeshServiceOptions`             | Optional mesh tuning                                                                                              |
-| `autoLifecycle`   | `boolean`                        | Defaults to `true`; set `false` to call `meshStart()` / `meshStop()` through application-owned lifecycle handling |
-| `registryBackend` | `MeshClientRegistryBackend`      | Optional custom backend                                                                                           |
-| `registryOptions` | `MeshClientRedisRegistryOptions` | Optional limits for the built-in Redis backend                                                                    |
-| `extractMetadata` | `(stream) => TRegistryMeta`      | Optional metadata extraction from SRPC streams                                                                    |
-| `meshLink`        | `object`                         | Direct WebSocket configuration; `secret` (or `MESH_LINK_SECRET`) enables cross-node client operations             |
+| Option                    | Type                             | Description                                                                                                       |
+| ------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `meshKey`                 | `string`                         | Mesh key                                                                                                          |
+| `meshOptions`             | `MeshServiceOptions`             | Optional mesh tuning                                                                                              |
+| `autoLifecycle`           | `boolean`                        | Defaults to `true`; set `false` to call `meshStart()` / `meshStop()` through application-owned lifecycle handling |
+| `registryBackend`         | `MeshClientRegistryBackend`      | Optional custom backend                                                                                           |
+| `registryOptions`         | `MeshClientRedisRegistryOptions` | Optional limits for the built-in Redis backend                                                                    |
+| `extractRegistryMetadata` | `(stream) => TRegistryMeta`      | Optional metadata extraction from SRPC streams                                                                    |
+| `meshLink`                | `object`                         | Direct WebSocket configuration; `secret` (or `MESH_LINK_SECRET`) enables cross-node client operations             |
 
 #### Properties
 
@@ -362,6 +366,8 @@ new MeshSrpcServer(options: ISrpcServerOptions & MeshSrpcServerOptions)
 | `invoke(clientId, prefix, data, timeoutMs?)` | Type-safe invoke on any client across any node                                                                                                                               |
 | `registerBroadcastHandler(type, handler)`    | Register a handler for a broadcast type (see [MeshService broadcasts](./mesh-service.md))                                                                                    |
 | `broadcast(type, data, options?)`            | Broadcast to all nodes in the mesh                                                                                                                                           |
+| `listClients()`                              | List connected clients across the mesh                                                                                                                                       |
+| `getLocalStreams()`                          | List only streams physically connected to this process                                                                                                                       |
 | `onClientConnected(handler)`                 | Fires on the node the client connected to                                                                                                                                    |
 | `onClientDisconnected(handler)`              | Fires on the node the client disconnected from                                                                                                                               |
 | `onNodeClientsOrphaned(handler)`             | Fires on one durable single-claimer when a dead node's client chunk is cleaned up                                                                                            |

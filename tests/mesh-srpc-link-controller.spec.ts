@@ -45,7 +45,7 @@ const JsonMessage = {
 };
 
 // Remote handles expose the registry shape while local handles retain full
-// client metadata, so reduced extractMetadata remains supported.
+// client metadata, so reduced extractRegistryMetadata remains supported.
 type ReducedRemoteMetadataIsSupported = MeshSrpcServer<FullClientMeta, BaseMessage, BaseMessage, { role: string }>;
 type PrimitiveRemoteMetadataIsSupported = MeshSrpcServer<FullClientMeta, BaseMessage, BaseMessage, string>;
 
@@ -132,7 +132,7 @@ describe('MeshSrpcLinkController', () => {
                 return true;
             }
         };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.isCurrentStream = (candidate: unknown) => candidate === stream;
         server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
         server.syncStreamMeta = () => {
@@ -154,7 +154,7 @@ describe('MeshSrpcLinkController', () => {
 
         assert.equal(activations, 0);
         assert.equal(metadataSyncs, 0);
-        assert.deepEqual(server.clientMetadata.get('client-1'), { role: 'changed-during-startup' });
+        assert.deepEqual(server.clientRegistryMetadata.get('client-1'), { role: 'changed-during-startup' });
     });
 
     it('waits for in-flight startup backfill when a locally reserved stream crosses into mesh activation', async () => {
@@ -177,7 +177,7 @@ describe('MeshSrpcLinkController', () => {
                 return true;
             }
         };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshClientService = meshClientService;
         server.isCurrentStream = (candidate: unknown) => candidate === stream;
         server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
@@ -233,7 +233,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshStopping = false;
         server.meshClosed = false;
         server.meshStartGeneration = 0;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map([[stream.clientId, stream]]);
         server.clientRegistryChains = new Map();
@@ -267,7 +267,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshClientService = {
             prepareStart: () => {},
             fenceForShutdown: () => {}
@@ -304,7 +304,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshClientService = {
             prepareStart: () => {},
             fenceForShutdown: () => {},
@@ -410,7 +410,7 @@ describe('MeshSrpcLinkController', () => {
         server.publishedStreams = new Set([existingStream]);
         server.streamDisconnectionHandlers = [];
         server.lifecycleConnectedStreams = new WeakSet([existingStream]);
-        server.clientMetadata = new Map([[existingStream.clientId, { role: 'client' }]]);
+        server.clientRegistryMetadata = new Map([[existingStream.clientId, { role: 'client' }]]);
         server.clientRegistryChains = new Map([['existing-client', cleanupBlocked]]);
         server.clientCallbackChains = new Map();
         server.meshClientService = meshClientService;
@@ -460,7 +460,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshStopping = false;
         server.meshClosed = false;
         server.meshStartGeneration = 0;
-        server.clientMetadata = new Map([[old.clientId, { role: 'client' }]]);
+        server.clientRegistryMetadata = new Map([[old.clientId, { role: 'client' }]]);
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map([[old.clientId, old]]);
         server.streamsById = new Map([[old.id, old]]);
@@ -523,7 +523,7 @@ describe('MeshSrpcLinkController', () => {
         let stops = 0;
         server.meshRunning = true;
         server.meshStopping = false;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.clientRegistryChains = new Map();
         server.clientCallbackChains = new Map();
         server.meshClientService = {
@@ -555,7 +555,7 @@ describe('MeshSrpcLinkController', () => {
         let stops = 0;
         server.meshRunning = true;
         server.meshStopping = false;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.clientRegistryChains = new Map();
         server.clientCallbackChains = new Map([['client-1', new Promise<void>(() => {})]]);
         server.meshClientService = {
@@ -581,7 +581,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.clientRegistryChains = new Map();
         server.clientCallbackChains = new Map();
         server.meshClientService = {
@@ -606,7 +606,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.clientRegistryChains = new Map();
         server.clientCallbackChains = new Map();
         server.meshClientService = {
@@ -633,7 +633,7 @@ describe('MeshSrpcLinkController', () => {
             server.meshClosed = false;
             server.meshStartGeneration = 0;
             server.meshLogger = { warn: () => {} };
-            server.clientMetadata = new Map();
+            server.clientRegistryMetadata = new Map();
             server.clientRegistryChains = new Map();
             server.clientCallbackChains = new Map();
             server.meshClientService = {
@@ -658,7 +658,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.clientRegistryChains = new Map();
         server.clientCallbackChains = new Map();
         server.meshClientService = {
@@ -686,7 +686,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshStopping = false;
         server.meshClosed = false;
         server.meshStartGeneration = 0;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map();
         server.clientRegistryChains = new Map();
@@ -727,7 +727,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshClosed = false;
         server.meshStartGeneration = 0;
         server.meshLogger = { warn: () => {} };
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map();
         server.clientRegistryChains = new Map();
@@ -796,7 +796,7 @@ describe('MeshSrpcLinkController', () => {
         assert.equal(server.resolveMeshLinkConfig().httpServer, explicitMeshListener);
     });
 
-    it('reads registry presence without reserving a remote handle and projects local pre-start streams', async () => {
+    it('reads registered clients without reserving a remote handle and projects local pre-start streams', async () => {
         const record = {
             clientId: 'remote-client',
             nodeId: 41,
@@ -814,28 +814,28 @@ describe('MeshSrpcLinkController', () => {
             }
         };
         running.resolveClient = async () => {
-            throw new Error('presence reads must not resolve remote handles');
+            throw new Error('registry reads must not resolve remote handles');
         };
 
-        assert.deepEqual(await running.getClientPresence(record.clientId), record);
-        assert.deepEqual(await running.listClientPresences(), [record]);
+        assert.deepEqual(await running.getRegisteredClient(record.clientId), record);
+        assert.deepEqual(await running.listRegisteredClients(), [record]);
 
         const local = Object.create(MeshSrpcServer.prototype) as any;
         local.meshRunning = false;
         local.meshClientService = { instanceId: 9 };
-        local.extractMetadataFn = (stream: { meta: FullClientMeta }) => ({ role: stream.meta.role });
+        local.extractRegistryMetadataFn = (stream: { meta: FullClientMeta }) => ({ role: stream.meta.role });
         local.streamsByClientId = new Map([
             ['local-client', { clientId: 'local-client', id: 'local-generation', connectedAt: 5678, meta: { role: 'local', secret: 'hidden' } }]
         ]);
 
-        assert.deepEqual(await local.getClientPresence('local-client'), {
+        assert.deepEqual(await local.getRegisteredClient('local-client'), {
             clientId: 'local-client',
             nodeId: 9,
             connectionId: 'local-generation',
             connectedAt: 5678,
             metadata: { role: 'local' }
         });
-        assert.deepEqual((await local.listClientPresences())[0], {
+        assert.deepEqual((await local.listRegisteredClients())[0], {
             clientId: 'local-client',
             nodeId: 9,
             connectionId: 'local-generation',
@@ -843,10 +843,10 @@ describe('MeshSrpcLinkController', () => {
             metadata: { role: 'local' }
         });
 
-        local.extractMetadataFn = undefined;
-        const localPresence = await local.getClientPresence('local-client');
-        assert.ok(localPresence);
-        (localPresence.metadata as FullClientMeta).role = 'mutated-through-presence';
+        local.extractRegistryMetadataFn = undefined;
+        const localRegistration = await local.getRegisteredClient('local-client');
+        assert.ok(localRegistration);
+        (localRegistration.metadata as FullClientMeta).role = 'mutated-through-registration';
         assert.equal(local.streamsByClientId.get('local-client').meta.role, 'local');
     });
 
@@ -887,7 +887,7 @@ describe('MeshSrpcLinkController', () => {
             server.meshSupersedeReconcileRetryMs = 1;
             server.clientRegistryChains = new Map();
             server.clientCallbackChains = new Map();
-            server.clientMetadata = new Map([[stream.clientId, stream.meta]]);
+            server.clientRegistryMetadata = new Map([[stream.clientId, stream.meta]]);
             server.streamsById = new Map([[stream.id, stream]]);
             server.streamsByClientId = new Map([[stream.clientId, stream]]);
             server.pendingStreamsByClientId = new Map();
@@ -1013,7 +1013,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshRunning = true;
         server.streamsByClientId = new Map();
         server.pendingStreamsByClientId = new Map();
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshLinkRuntime = {};
         server.meshLinkController = { close: async () => controllerCloses++ };
         server.unregisterMeshLinkRoute = () => routeUnregistrations++;
@@ -1176,7 +1176,7 @@ describe('MeshSrpcLinkController', () => {
         server.clientCallbackChains = new Map();
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map();
-        server.clientMetadata = new Map([[stream.clientId, { role: 'old' }]]);
+        server.clientRegistryMetadata = new Map([[stream.clientId, { role: 'old' }]]);
         server.meshLinkController = { invalidateConnection: () => {} };
         server.meshClientService = { unregisterClient: async () => true };
         server.disconnectedCallbacks = new Set([() => disconnected++]);
@@ -1186,7 +1186,7 @@ describe('MeshSrpcLinkController', () => {
         await Promise.all([...server.clientCallbackChains.values()]);
 
         assert.equal(disconnected, 0);
-        assert.equal(server.clientMetadata.has(stream.clientId), false);
+        assert.equal(server.clientRegistryMetadata.has(stream.clientId), false);
     });
 
     it('rejects stale local handles before updating replacement metadata', async () => {
@@ -1194,7 +1194,7 @@ describe('MeshSrpcLinkController', () => {
         const current = { id: 'connection-2', clientId: 'client-1', meta: { role: 'current' } };
         const server = Object.create(MeshSrpcServer.prototype) as any;
         server.streamsByClientId = new Map([[current.clientId, current]]);
-        server.clientMetadata = new Map([[current.clientId, { ...current.meta }]]);
+        server.clientRegistryMetadata = new Map([[current.clientId, { ...current.meta }]]);
         server.meshClientService = {
             updateClientMetadata: async (_clientId: string, metadata: SrpcMeta) => {
                 Object.assign(current.meta, metadata);
@@ -1224,7 +1224,7 @@ describe('MeshSrpcLinkController', () => {
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map();
         server.streamsById = new Map();
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshClientService = { instanceId: 1, clientRegistry: registry };
 
         const controller = server.createMeshLinkController({
@@ -1237,7 +1237,7 @@ describe('MeshSrpcLinkController', () => {
             const replacement = { id: 'connection-new', clientId: 'client-1', connected: true, meta: { role: 'replacement' } };
             server.streamsByClientId.set(old.clientId, old);
             server.streamsById.set(old.id, old);
-            server.clientMetadata.set(old.clientId, { ...old.meta });
+            server.clientRegistryMetadata.set(old.clientId, { ...old.meta });
             registeredClient = {
                 clientId: old.clientId,
                 nodeId: 1,
@@ -1269,7 +1269,7 @@ describe('MeshSrpcLinkController', () => {
 
             await assert.rejects(updating, SrpcStaleConnectionError);
             assert.deepEqual(old.meta, { role: 'old' });
-            assert.deepEqual(server.clientMetadata.get(old.clientId), { role: 'old' });
+            assert.deepEqual(server.clientRegistryMetadata.get(old.clientId), { role: 'old' });
         };
 
         try {
@@ -1300,7 +1300,7 @@ describe('MeshSrpcLinkController', () => {
             server.clientCallbackChains = new Map();
             server.pendingStreamsByClientId = replaceWhileUnregistering ? new Map() : new Map([[old.clientId, replacement]]);
             server.streamsByClientId = new Map();
-            server.clientMetadata = new Map([[old.clientId, { role: 'replacement' }]]);
+            server.clientRegistryMetadata = new Map([[old.clientId, { role: 'replacement' }]]);
             server.connectedCallbacks = [];
             server.disconnectedCallbacks = [];
             server.meshLinkController = { invalidateConnection: () => {} };
@@ -1323,7 +1323,7 @@ describe('MeshSrpcLinkController', () => {
                 releaseUnregister!();
             }
             await cleanup;
-            assert.deepEqual(server.clientMetadata.get(old.clientId), { role: 'replacement' });
+            assert.deepEqual(server.clientRegistryMetadata.get(old.clientId), { role: 'replacement' });
             return currentRegistration;
         };
 
@@ -1356,7 +1356,7 @@ describe('MeshSrpcLinkController', () => {
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map();
         server.streamsById = new Map([[old.id, old]]);
-        server.clientMetadata = new Map([[old.clientId, { role: 'old' }]]);
+        server.clientRegistryMetadata = new Map([[old.clientId, { role: 'old' }]]);
         server.connectedCallbacks = [];
         server.disconnectedCallbacks = [
             async () => {
@@ -1403,7 +1403,7 @@ describe('MeshSrpcLinkController', () => {
         server.pendingStreamsByClientId = new Map();
         server.streamsByClientId = new Map([[old.clientId, old]]);
         server.streamsById = new Map([[old.id, old]]);
-        server.clientMetadata = new Map([[old.clientId, { role: 'old' }]]);
+        server.clientRegistryMetadata = new Map([[old.clientId, { role: 'old' }]]);
         server.connectedCallbacks = [];
         server.disconnectedCallbacks = [async () => callbacks++];
         server.meshLinkController = { invalidateConnection: () => {} };
@@ -1451,7 +1451,7 @@ describe('MeshSrpcLinkController', () => {
             [old.id, old],
             [replacement.id, replacement]
         ]);
-        server.clientMetadata = new Map([[old.clientId, { role: 'old' }]]);
+        server.clientRegistryMetadata = new Map([[old.clientId, { role: 'old' }]]);
         server.connectedCallbacks = [];
         server.disconnectedCallbacks = [async () => callbacks++];
         server.meshLinkController = { invalidateConnection: () => {} };
@@ -1714,7 +1714,7 @@ describe('MeshSrpcLinkController', () => {
         server.streamsByClientId = new Map([[other.clientId, other]]);
         server.streamsById = new Map([[other.id, other]]);
         server.lifecycleConnectedStreams = new Set([other]);
-        server.clientMetadata = new Map([[other.clientId, other.meta]]);
+        server.clientRegistryMetadata = new Map([[other.clientId, other.meta]]);
         server.isCurrentStream = (stream: unknown) => stream === other;
         server.disconnectedCallbacks = [
             async (clientId: string) => {
@@ -1798,14 +1798,14 @@ describe('MeshSrpcLinkController', () => {
 
     it('projects owner metadata after applying full-stream updates', () => {
         const server = Object.create(MeshSrpcServer.prototype) as any;
-        server.extractMetadataFn = (stream: { meta: FullClientMeta }) => ({ role: stream.meta.role });
+        server.extractRegistryMetadataFn = (stream: { meta: FullClientMeta }) => ({ role: stream.meta.role });
         const stream = { meta: { role: 'before', secret: 'local-only' } };
 
         const projected = server.applyMetadataToLocalStream(stream, { role: 'after' });
 
         assert.deepEqual(projected, { role: 'after' });
         assert.deepEqual(stream.meta, { role: 'after', secret: 'local-only' });
-        server.extractMetadataFn = (candidate: { meta: FullClientMeta }) => candidate.meta.role;
+        server.extractRegistryMetadataFn = (candidate: { meta: FullClientMeta }) => candidate.meta.role;
         assert.equal(server.applyMetadataToLocalStream(stream, { role: 'primitive' }), 'primitive');
     });
 
@@ -1813,13 +1813,13 @@ describe('MeshSrpcLinkController', () => {
         const stream = { id: 'connection-1', clientId: 'client-1', meta: { role: 'before', secret: 'local-only' } };
         const server = Object.create(MeshSrpcServer.prototype) as any;
         server.streamsByClientId = new Map([[stream.clientId, stream]]);
-        server.clientMetadata = new Map([[stream.clientId, undefined]]);
-        server.extractMetadataFn = () => undefined;
+        server.clientRegistryMetadata = new Map([[stream.clientId, undefined]]);
+        server.extractRegistryMetadataFn = () => undefined;
         server.meshClientService = { clientRegistry: { updateMetadata: async () => false } };
 
         await assert.rejects(server.updateClientMetadata(stream, { role: 'after' }), SrpcStaleConnectionError);
-        assert.equal(server.clientMetadata.has(stream.clientId), true);
-        assert.equal(server.clientMetadata.get(stream.clientId), undefined);
+        assert.equal(server.clientRegistryMetadata.has(stream.clientId), true);
+        assert.equal(server.clientRegistryMetadata.get(stream.clientId), undefined);
     });
 
     it('keeps failed metadata sync dirty and retries before updating the cache', async () => {
@@ -1833,11 +1833,11 @@ describe('MeshSrpcLinkController', () => {
         const server = Object.create(MeshSrpcServer.prototype) as any;
         server.streamsByClientId = new Map([[stream.clientId, stream]]);
         server.pendingStreamsByClientId = new Map();
-        server.clientMetadata = new Map([[stream.clientId, { role: 'before' }]]);
+        server.clientRegistryMetadata = new Map([[stream.clientId, { role: 'before' }]]);
         server.clientRegistryChains = new Map();
         server.meshLinkRequestTimeoutMs = 20;
         server.meshLogger = { warn: () => {} };
-        server.extractMetadataFn = (clientStream: { meta: SrpcMeta }) => ({ ...clientStream.meta });
+        server.extractRegistryMetadataFn = (clientStream: { meta: SrpcMeta }) => ({ ...clientStream.meta });
         server.meshClientService = {
             isRunning: true,
             clientRegistry: {
@@ -1851,9 +1851,9 @@ describe('MeshSrpcLinkController', () => {
         server.syncStreamMeta(stream);
         await new Promise<void>(resolve => setImmediate(resolve));
         assert.equal(attempts, 1);
-        assert.deepEqual(server.clientMetadata.get(stream.clientId), { role: 'before' });
+        assert.deepEqual(server.clientRegistryMetadata.get(stream.clientId), { role: 'before' });
         await waitFor(() => attempts === 2);
-        await waitFor(() => server.clientMetadata.get(stream.clientId)?.role === 'after');
+        await waitFor(() => server.clientRegistryMetadata.get(stream.clientId)?.role === 'after');
     });
 
     it('uses mesh metadata delivery before a direct handle exists, but never after direct delivery starts', async () => {
@@ -1915,7 +1915,7 @@ describe('MeshSrpcLinkController', () => {
         failing.meshStartGeneration = 0;
         failing.meshMessageSecurityResolved = false;
         failing.meshLogger = { warn: () => {}, debug: () => {} };
-        failing.clientMetadata = new Map([['backfill-client', { role: 'backfill' }]]);
+        failing.clientRegistryMetadata = new Map([['backfill-client', { role: 'backfill' }]]);
         const backfillStream = {
             id: 'backfill-connection',
             clientId: 'backfill-client',
@@ -1976,7 +1976,7 @@ describe('MeshSrpcLinkController', () => {
         const preconfigured = Object.create(MeshSrpcServer.prototype) as any;
         preconfigured.meshRunning = false;
         preconfigured.meshClosed = false;
-        preconfigured.clientMetadata = new Map();
+        preconfigured.clientRegistryMetadata = new Map();
         preconfigured.pendingStreamsByClientId = new Map();
         preconfigured.streamsByClientId = new Map();
         preconfigured.clientRegistryChains = new Map();
@@ -2010,7 +2010,7 @@ describe('MeshSrpcLinkController', () => {
         });
         server.meshRunning = true;
         server.meshStopping = false;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.meshClientService = {
             setRemoteTransport: () => {},
             stop: async () => {
@@ -2039,7 +2039,7 @@ describe('MeshSrpcLinkController', () => {
         server.meshRunning = false;
         server.meshStopping = false;
         server.meshClosed = false;
-        server.clientMetadata = new Map();
+        server.clientRegistryMetadata = new Map();
         server.startMesh = async () => {
             starts++;
             if (starts === 1) await firstStartBlocked;

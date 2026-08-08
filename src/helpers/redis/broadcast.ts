@@ -107,9 +107,11 @@ export function createDistributedMethod<T>(options: IDistributedMethodOptions, f
     // invoke locally when remotely requested
     channel.subscribe(wrappedFn);
 
-    // publish & invoke locally when locally executed
+    // Publish to peers while invoking locally. Local failures are returned to
+    // the caller so durable consumers can decide whether to retry; peer
+    // handler failures remain isolated and logged by wrappedFn.
     return async (data: T): Promise<void> => {
-        const [publishResult, localResult] = await Promise.allSettled([channel.publish(data), wrappedFn(data)]);
+        const [publishResult, localResult] = await Promise.allSettled([channel.publish(data), fn(data)]);
         if (localResult.status === 'rejected') throw localResult.reason;
         if (publishResult.status === 'rejected') throw publishResult.reason;
     };

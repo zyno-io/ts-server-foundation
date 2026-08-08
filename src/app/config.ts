@@ -77,6 +77,8 @@ export class BaseAppConfig {
     MESH_REDIS_HOST?: string;
     MESH_REDIS_PORT?: number;
     MESH_REDIS_PREFIX?: string;
+    /** Namespace shared by replicas that belong to one sRPC mesh deployment. */
+    MESH_LINK_NAMESPACE?: string;
     MESH_LINK_ADVERTISE_URL?: string;
     MESH_LINK_PATH: string = '/_tsf/mesh';
     MESH_LINK_SECRET?: string;

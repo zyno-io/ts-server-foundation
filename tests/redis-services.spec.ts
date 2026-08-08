@@ -1095,7 +1095,7 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         }
     });
 
-    it('executes distributed methods locally and logs handler failures', async () => {
+    it('executes distributed methods locally and propagates local handler failures', async () => {
         const error = new Error('boom');
         const logger = { error: mock.fn() };
         const handled = mock.fn(async (_data: { value: string }) => {});
@@ -1105,12 +1105,11 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         });
 
         await local({ value: 'ok' });
-        await failing({ value: 'bad' });
+        await assert.rejects(failing({ value: 'bad' }), value => value === error);
 
         assert.equal(handled.mock.callCount(), 1);
         assert.deepStrictEqual(handled.mock.calls[0].arguments[0], { value: 'ok' });
-        assert.equal(logger.error.mock.callCount(), 1);
-        assert.strictEqual(logger.error.mock.calls[0].arguments[1], error);
+        assert.equal(logger.error.mock.callCount(), 0);
     });
 });
 

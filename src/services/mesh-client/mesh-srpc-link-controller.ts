@@ -19,6 +19,7 @@ import type { MeshNode } from '../mesh';
 import type { MeshLinkFrame, MeshLinkFrameHeader } from '../mesh-link';
 import { MeshLinkPeer, MeshLinkRuntime } from '../mesh-link';
 import type { MeshClientRemoteTransport, MeshClientService } from './mesh-client-service';
+import type { MeshSrpcConnection } from './srpc-registry-metadata';
 import { MeshRemoteSrpcConnection, type MeshRemoteConnectionTransport } from './mesh-srpc-remote-connection';
 import { ClientDisconnectedError, ClientInvocationError, type RegisteredClient } from './types';
 
@@ -337,7 +338,7 @@ export class MeshSrpcLinkController<TMeta extends SrpcMeta, TRegistryMeta>
     async resolveClient(
         clientId: string,
         deadlineAt = Date.now() + this.options.requestTimeoutMs
-    ): Promise<SrpcConnection<TMeta | TRegistryMeta> | undefined> {
+    ): Promise<MeshSrpcConnection<TMeta, TRegistryMeta> | undefined> {
         const record = await withinDeadline(this.options.service.clientRegistry.getClient(clientId), deadlineAt, clientId);
         if (!record) {
             this.invalidateClientConnections(clientId);
@@ -348,7 +349,7 @@ export class MeshSrpcLinkController<TMeta extends SrpcMeta, TRegistryMeta>
         return this.resolveRegisteredClient(record, deadlineAt);
     }
 
-    async listClients(): Promise<SrpcConnection<TMeta | TRegistryMeta>[]> {
+    async listClients(): Promise<MeshSrpcConnection<TMeta, TRegistryMeta>[]> {
         const records = await this.options.service.clientRegistry.listClients();
         const currentConnectionKeys = new Set(
             records.flatMap(record => (record.connectionId ? [connectionKey(record.clientId, record.connectionId)] : []))

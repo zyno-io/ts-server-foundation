@@ -398,6 +398,14 @@ export class SrpcServer<
     }
 
     /**
+     * Runs after client authentication succeeds but before an sRPC stream is
+     * created. Subclasses may use this to fence admission on external state.
+     */
+    protected beforeClientAdmission(): Promise<void> {
+        return Promise.resolve();
+    }
+
+    /**
      * Hook for private/cluster CAS work after the initial protocol frame is
      * queued but before user connection handlers and public local publication.
      */
@@ -782,7 +790,9 @@ export class SrpcServer<
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
             const result = await this.clientAuthorizer(meta, request);
-            return result === false ? new AuthenticationFailure('custom authorizer rejected') : result;
+            if (result === false) return new AuthenticationFailure('custom authorizer rejected');
+            await this.beforeClientAdmission();
+            return result;
         }
 
         const appv = String(meta.appv ?? '');
@@ -810,6 +820,7 @@ export class SrpcServer<
             if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
                 return new AuthenticationFailure('invalid signature');
             if (!(await this.consumeAuthReplayToken(cid, id, tsInt + driftMs))) return new AuthenticationFailure('replayed stream ID');
+            await this.beforeClientAdmission();
             return true;
         }
 
@@ -846,6 +857,7 @@ export class SrpcServer<
         if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return new AuthenticationFailure('invalid audience');
         const expiresAt = tsInt + driftMs;
         if (!(await this.consumeAuthReplayToken(cid, String(meta.nonce), expiresAt))) return new AuthenticationFailure('replayed nonce');
+        await this.beforeClientAdmission();
         return true;
     }
 
@@ -1024,6 +1036,11 @@ export class SrpcServer<
     }
 
     async listClients(): Promise<SrpcConnection<TMeta | TResolvedMeta>[]> {
+        return this.getLocalStreams();
+    }
+
+    /** List streams physically connected to this server process. */
+    async getLocalStreams(): Promise<SrpcStream<TMeta>[]> {
         return [...this.streamsByClientId.values()];
     }
 
