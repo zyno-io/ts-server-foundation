@@ -1831,7 +1831,7 @@ describe('srpc', () => {
         assert.equal((await streamError(emptyReceiver)).message, '');
     });
 
-    it('aborts an attached receiver when incoming writes exceed its readable buffer', async () => {
+    it('allows attached receivers to absorb relay backpressure until their bounded buffer is full', async () => {
         const destroys: Array<{ streamId: number; error?: unknown }> = [];
         const stream = createFakeByteStreamable(destroys);
         const receiver = SrpcByteStream.createReceiver(stream, 14);
@@ -1839,10 +1839,11 @@ describe('srpc', () => {
         (server as any).backpressuredByteStreams = new WeakMap();
         (server as any).backpressuredByteStreamBytes = new WeakMap();
 
-        for (let index = 0; index < 128 && !receiver.destroyed; index++) {
+        const chunk = Buffer.alloc(receiver.readableHighWaterMark);
+        for (let index = 0; index <= 512 && !receiver.destroyed; index++) {
             (server as any).handleByteSubstreamOperation(stream, {
                 streamId: 14,
-                write: { chunk: Buffer.alloc(1024) }
+                write: { chunk }
             });
         }
         await streamClosed(receiver);
@@ -1904,7 +1905,7 @@ describe('srpc', () => {
         await Promise.all([streamClosed(second), streamClosed(replacement)]);
     });
 
-    it('starts a new backpressure episode after the receiver makes progress', async () => {
+    it('keeps a server receiver open while it remains below the aggregate buffer limit', async () => {
         const destroys: Array<{ streamId: number; error?: unknown }> = [];
         const stream = createFakeByteStreamable(destroys);
         const server = Object.create(SrpcServer.prototype) as SrpcServer;
@@ -1929,13 +1930,13 @@ describe('srpc', () => {
         write(chunkBytes);
         assert.equal(receiver.destroyed, false);
         write(1);
+        assert.equal(receiver.destroyed, false);
+        receiver.destroy();
         await streamClosed(receiver);
-        assert.equal(receiver.destroyed, true);
     });
 
-    it('gives client receivers one bounded backpressure episode and resets it on progress', async () => {
-        const destroys: Array<{ streamId: number; error?: unknown }> = [];
-        const parent = createFakeByteStreamable(destroys);
+    it('keeps a client receiver open while it remains below the aggregate buffer limit', async () => {
+        const parent = createFakeByteStreamable([]);
         parent.byteStream.remoteSenderIdParity = 0;
         const client = Object.create(SrpcClient.prototype) as any;
         client.generation = 7;
@@ -1961,12 +1962,10 @@ describe('srpc', () => {
         write(chunkBytes);
         assert.equal(receiver.destroyed, false);
         write(1);
+        assert.equal(receiver.destroyed, false);
+        assert.equal(client.byteStreamPressureByGeneration.get(7).backpressured.has(2), true);
+        receiver.destroy();
         await streamClosed(receiver);
-        assert.equal(receiver.destroyed, true);
-        assert.equal(
-            destroys.some(entry => entry.streamId === 2),
-            true
-        );
     });
 
     it('rejects mixed and malformed byte-stream operations', () => {

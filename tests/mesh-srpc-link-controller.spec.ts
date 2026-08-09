@@ -4286,7 +4286,7 @@ describe('MeshSrpcLinkController', () => {
         await controller.close();
     });
 
-    it('allows a remote Readable pressure episode to drain and finish, while bounding non-draining abuse', async () => {
+    it('allows remote receivers to absorb mesh relay pressure until their bounded buffer is full', async () => {
         let destroys = 0;
         const connection = new MeshRemoteSrpcConnection({
             id: 'remote-pressure',
@@ -4321,7 +4321,9 @@ describe('MeshSrpcLinkController', () => {
 
         const abusive = SrpcByteStream.createReceiver(connection, 3);
         abusive.on('error', () => {});
-        assert.equal(connection.receiveWrite(3, chunk), true);
+        for (let index = 0; index < 128; index++) {
+            assert.equal(connection.receiveWrite(3, chunk), true);
+        }
         assert.equal(connection.receiveWrite(3, chunk), false);
         assert.equal(destroys, 1);
 
@@ -4604,7 +4606,7 @@ describe('MeshSrpcLinkController', () => {
         controller.close();
     });
 
-    it('destroys a remote receiver tunnel when its readable buffer stops accepting data', async () => {
+    it('destroys a remote receiver tunnel when its buffered bytes exceed capacity', async () => {
         let destroyed = 0;
         const connection = new MeshRemoteSrpcConnection({
             id: 'connection-1',
@@ -4627,8 +4629,9 @@ describe('MeshSrpcLinkController', () => {
         const receiver = SrpcByteStream.createReceiver(connection, 7);
         receiver.once('error', () => {});
         let accepted = true;
-        for (let index = 0; index < 128 && accepted; index++) {
-            accepted = connection.receiveWrite(7, Buffer.alloc(1024));
+        const chunk = Buffer.alloc(64 * 1024);
+        for (let index = 0; index < 129 && accepted; index++) {
+            accepted = connection.receiveWrite(7, chunk);
         }
         await waitFor(() => destroyed === 1);
         assert.equal(accepted, false);

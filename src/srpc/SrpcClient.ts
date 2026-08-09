@@ -435,15 +435,16 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         if (op.write != null) {
             const state = this.getByteStreamPressureState(generation);
             const wasBackpressured = state.backpressured.has(op.streamId);
+            const hasReceiver = SrpcByteStream.hasReceiver(this, op.streamId);
             const accepted = SrpcByteStream.writeReceiver(this, op.streamId, op.write.chunk);
             this.updateByteStreamBufferedBytes(generation, op.streamId, SrpcByteStream.getReceiverBufferedBytes(this, op.streamId));
-            if (!accepted && wasBackpressured) {
+            if (!accepted && wasBackpressured && !hasReceiver) {
                 this.logger?.warn('SRPC client byte-stream receiver is not draining', { srpc: { ...this.logData(), byteStreamId: op.streamId } });
                 SrpcByteStream.abortReceiver(this, op.streamId, new Error(`SRPC byte stream ${op.streamId} receiver is not draining`));
                 this.clearByteStreamPressure(generation, op.streamId);
                 return;
             }
-            if (!accepted) {
+            if (!accepted && !wasBackpressured) {
                 if (state.backpressured.size >= MaxBackpressuredByteStreams) {
                     this.logger?.warn('SRPC client has too many backpressured byte streams', {
                         srpc: { ...this.logData(), byteStreamId: op.streamId, backpressuredStreams: state.backpressured.size }
@@ -453,7 +454,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                     return;
                 }
                 state.backpressured.add(op.streamId);
-            } else if (wasBackpressured) {
+            } else if (accepted && wasBackpressured) {
                 state.backpressured.delete(op.streamId);
             }
             if (this.totalByteStreamBufferedBytes(state) > this.maxBufferedBytes) {

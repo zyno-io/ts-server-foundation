@@ -152,16 +152,15 @@ export class MeshRemoteSrpcConnection<TMeta = object> implements SrpcConnection<
             }
             if (accepted) return true;
             if (!hasReceiver) return false;
-            // Readable.push(false) still accepted this chunk. Permit one bounded
-            // pressure episode; a second false without read progress is abuse.
+            // Readable.push(false) still accepted this chunk. Mesh relays pause
+            // their receiver while a forwarded write is in flight, so multiple
+            // chunks can arrive before it resumes. The aggregate receiver limit
+            // above bounds that normal pressure without treating one mesh RTT as
+            // a non-draining stream.
             if (!wasBackpressured && this.backpressuredReceivers.size < MaxBackpressuredReceiverStreams) {
                 this.backpressuredReceivers.add(streamId);
-                return true;
             }
-            const error = new SrpcBackpressureError(`Remote sRPC byte stream ${streamId} receiver is not draining`);
-            this.receiveDestroy(streamId, error.message);
-            void this.transport.destroyStream(this, streamId, error).catch(() => {});
-            return false;
+            return true;
         } catch (error) {
             this.markStale();
             throw error;

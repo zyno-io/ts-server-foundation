@@ -572,26 +572,35 @@ export class SrpcServer<
         if (op.write != null) {
             const backpressured = this.backpressuredByteStreams.get(stream);
             const wasBackpressured = backpressured?.has(op.streamId) ?? false;
+            const hasReceiver = SrpcByteStream.hasReceiver(stream, op.streamId);
             const accepted = SrpcByteStream.writeReceiver(stream, op.streamId, op.write.chunk);
             this.updateByteStreamBufferedBytes(stream, op.streamId, SrpcByteStream.getReceiverBufferedBytes(stream, op.streamId));
             if (!accepted) {
-                if (wasBackpressured) {
+                // A registered receiver can be paused while a relay writes a
+                // chunk to another transport. Its aggregate buffer limit below
+                // provides the bound; aborting after the next chunk makes
+                // normal cross-mesh streams fail at a single RTT of pressure.
+                // An unregistered receiver is different: it cannot make
+                // progress, so retain the existing two-strike rejection.
+                if (wasBackpressured && !hasReceiver) {
                     this.logger?.warn('SRPC byte-stream receiver is not draining', { srpc: { ...streamLogData(stream), byteStreamId: op.streamId } });
                     SrpcByteStream.abortReceiver(stream, op.streamId, new Error(`SRPC byte stream ${op.streamId} receiver is not draining`));
                     this.clearByteStreamState(stream, op.streamId);
                     return;
                 }
-                const ids = backpressured ?? new Set<number>();
-                if (ids.size >= MaxBackpressuredByteStreamsPerStream) {
-                    this.logger?.warn('SRPC stream has too many backpressured byte streams', {
-                        srpc: { ...streamLogData(stream), byteStreamId: op.streamId, backpressuredStreams: ids.size }
-                    });
-                    SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many backpressured SRPC byte streams'));
-                    this.clearByteStreamState(stream, op.streamId);
-                    return;
+                if (!wasBackpressured) {
+                    const ids = backpressured ?? new Set<number>();
+                    if (ids.size >= MaxBackpressuredByteStreamsPerStream) {
+                        this.logger?.warn('SRPC stream has too many backpressured byte streams', {
+                            srpc: { ...streamLogData(stream), byteStreamId: op.streamId, backpressuredStreams: ids.size }
+                        });
+                        SrpcByteStream.abortReceiver(stream, op.streamId, new Error('Too many backpressured SRPC byte streams'));
+                        this.clearByteStreamState(stream, op.streamId);
+                        return;
+                    }
+                    ids.add(op.streamId);
+                    this.backpressuredByteStreams.set(stream, ids);
                 }
-                ids.add(op.streamId);
-                this.backpressuredByteStreams.set(stream, ids);
             } else if (wasBackpressured) {
                 this.clearByteStreamBackpressureFlag(stream, op.streamId);
             }
