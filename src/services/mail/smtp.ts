@@ -35,6 +35,7 @@ export class SmtpProvider implements MailProvider {
             subject: message.subject,
             html: message.message,
             text: message.plainMessage,
+            priority: message.priority,
             replyTo: message.replyTo,
             attachments: message.attachments?.map(attachment => ({
                 filename: attachment.name,

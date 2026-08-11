@@ -1,6 +1,6 @@
 import { ServerClient } from 'postmark';
 
-import type { MailProvider, PreparedMessageProperties } from '.';
+import type { MailPriority, MailProvider, PreparedMessageProperties } from '.';
 
 import { BaseAppConfig } from '../../app/config';
 import type { ScopedLogger } from '../logger';
@@ -26,6 +26,7 @@ export class PostmarkProvider implements MailProvider {
             HtmlBody: message.message,
             TextBody: message.plainMessage,
             ReplyTo: message.replyTo,
+            Headers: this.priorityHeaders(message.priority),
             Attachments: message.attachments?.map(attachment => ({
                 Name: attachment.name,
                 Content: attachment.content.toString('base64'),
@@ -35,5 +36,16 @@ export class PostmarkProvider implements MailProvider {
             }))
         });
         return response.MessageID;
+    }
+
+    private priorityHeaders(priority: MailPriority | undefined): Array<{ Name: string; Value: string }> | undefined {
+        if (!priority || priority === 'normal') return undefined;
+
+        const high = priority === 'high';
+        return [
+            { Name: 'Importance', Value: high ? 'High' : 'Low' },
+            { Name: 'X-Priority', Value: high ? '1' : '5' },
+            { Name: 'X-MSMail-Priority', Value: high ? 'High' : 'Low' }
+        ];
     }
 }

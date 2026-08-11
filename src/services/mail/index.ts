@@ -14,6 +14,8 @@ export abstract class MailTemplate<T> {
     }
 }
 
+export type MailPriority = 'high' | 'normal' | 'low';
+
 export interface MessageProperties {
     from?: {
         name?: string;
@@ -30,6 +32,8 @@ export interface MessageProperties {
     subject: string;
     message: string;
     plainMessage?: string;
+    /** Marks the message for clients that support high/normal/low priority. */
+    priority?: MailPriority;
     attachments?: {
         name: string;
         content: Buffer;
