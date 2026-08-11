@@ -2,7 +2,7 @@ import { BaseAppConfig } from '../../app';
 import { createRedisOptions } from '../../helpers/redis/redis';
 import type { JobClass, QueuedWorkerJob, IJobOptions } from './types';
 import { notifyWorkerObservers } from './observer';
-import { Queue, type Job as BullJob, type QueueOptions, type WorkerOptions } from 'bullmq';
+import { Queue, type ConnectionOptions, type Job as BullJob, type QueueOptions, type WorkerOptions } from 'bullmq';
 
 export interface BullMqWorkerJobData<I = unknown> {
     data: I;
@@ -246,8 +246,15 @@ export class WorkerQueueRegistry {
             );
         }
 
+        const { retryStrategy, ...redisOptions } = options;
+        const connection: ConnectionOptions = {
+            ...redisOptions,
+            ...(retryStrategy ? { retryStrategy } : {}),
+            maxRetriesPerRequest: null
+        };
+
         return {
-            connection: { ...options, maxRetriesPerRequest: null },
+            connection,
             prefix: `${prefix}:bmq`
         };
     }
