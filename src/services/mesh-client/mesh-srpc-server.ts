@@ -87,6 +87,16 @@ export class MeshSrpcServer<
     private meshLeaseCleanupRequired = false;
     private meshLeaseCleanupRetryTimer?: ReturnType<typeof setTimeout>;
     private meshLeaseCleanupRetryMs = 1_000;
+    /** Retry a fresh, fenced mesh generation after Redis becomes available again. */
+    private meshRecoveryTimer?: ReturnType<typeof setTimeout>;
+    private meshRecoveryPromise?: Promise<void>;
+    private meshRecoveryGeneration = 0;
+    private meshRecoveryAttempt = 0;
+    private meshRecoveryEnabled = true;
+    /** @internal Overridable by focused recovery tests. */
+    private meshRecoveryRetryMs = 1_000;
+    /** @internal Overridable by focused recovery tests. */
+    private meshRecoveryMaxRetryMs = 30_000;
     /**
      * A start that shutdown abandoned. New starts wait for its eventual
      * rollback so a late mesh start cannot overlap a replacement lifecycle.
@@ -293,6 +303,7 @@ export class MeshSrpcServer<
             () => {
                 this.meshLeaseCleanupRequired = false;
                 if (this.meshLeaseCleanupPromise === tracked) this.meshLeaseCleanupPromise = undefined;
+                this.scheduleMeshRecovery();
             },
             error => {
                 if (this.meshLeaseCleanupPromise === tracked) this.meshLeaseCleanupPromise = undefined;
@@ -318,7 +329,95 @@ export class MeshSrpcServer<
         this.meshLeaseCleanupRetryTimer = undefined;
     }
 
+    /**
+     * Lease loss is a hard split-brain boundary, but not a permanent process
+     * failure. Once the exact old ownership is removed, start a new mesh
+     * generation. Existing streams were already fenced and must reconnect.
+     */
+    private scheduleMeshRecovery(): void {
+        const generation = this.meshRecoveryGeneration;
+        if (!this.canRecoverMesh(generation) || this.meshRunning || this.meshRecoveryTimer || this.meshRecoveryPromise) return;
+
+        const delay = Math.min(this.meshRecoveryRetryMs * 2 ** this.meshRecoveryAttempt, this.meshRecoveryMaxRetryMs);
+        this.meshRecoveryTimer = setTimeout(() => {
+            this.meshRecoveryTimer = undefined;
+            if (!this.canRecoverMesh(generation) || this.meshRunning) return;
+
+            const recovery = this.attemptMeshRecovery(generation);
+            const tracked = recovery.then(() => undefined);
+            this.meshRecoveryPromise = tracked;
+            void recovery.then(
+                () => {
+                    if (this.meshRecoveryPromise !== tracked) return;
+                    this.meshRecoveryPromise = undefined;
+                    this.scheduleMeshRecovery();
+                },
+                error => {
+                    if (this.meshRecoveryPromise !== tracked) return;
+                    this.meshRecoveryPromise = undefined;
+                    if (!this.canRecoverMesh(generation)) return;
+                    this.meshLeaseFailure = toError(error);
+                    this.meshRecoveryAttempt++;
+                    this.meshLogger.warn('sRPC mesh recovery attempt failed; will retry', {
+                        error: this.meshLeaseFailure,
+                        attempt: this.meshRecoveryAttempt
+                    });
+                    this.scheduleMeshRecovery();
+                }
+            );
+        }, delay);
+        this.meshRecoveryTimer.unref?.();
+    }
+
+    private async attemptMeshRecovery(generation: number): Promise<boolean> {
+        if (!this.canRecoverMesh(generation)) return true;
+
+        // meshStart deliberately rejects a lease-fenced instance. The cleanup
+        // barrier above has removed its exact old ownership, so this is now a
+        // safe new generation rather than a resurrection of the old one.
+        this.meshLeaseFailure = undefined;
+        try {
+            const start = this.startMeshLifecycle(false);
+            await start;
+        } catch (error) {
+            if (!this.canRecoverMesh(generation)) return true;
+            this.meshLeaseFailure = toError(error);
+            this.meshRecoveryAttempt++;
+            this.meshLogger.warn('sRPC mesh recovery attempt failed; will retry', {
+                error: this.meshLeaseFailure,
+                attempt: this.meshRecoveryAttempt
+            });
+            return false;
+        }
+
+        if (!this.canRecoverMesh(generation)) return true;
+        this.meshRecoveryAttempt = 0;
+        this.meshLogger.info('sRPC mesh recovered after lease loss');
+        return true;
+    }
+
+    private canRecoverMesh(generation: number): boolean {
+        return (
+            generation === this.meshRecoveryGeneration &&
+            this.meshRecoveryEnabled &&
+            !this.meshClosed &&
+            !this.meshStopping &&
+            !this.meshCleanupFailure &&
+            !this.meshLeaseCleanupRequired
+        );
+    }
+
+    private cancelMeshRecovery(disable = false): void {
+        if (disable) this.meshRecoveryEnabled = false;
+        this.meshRecoveryGeneration++;
+        this.meshRecoveryAttempt = 0;
+        if (!this.meshRecoveryTimer) return;
+        clearTimeout(this.meshRecoveryTimer);
+        this.meshRecoveryTimer = undefined;
+    }
+
     private async handleMeshLeaseLost(reason?: Error): Promise<void> {
+        this.cancelMeshRecovery();
         this.meshLogger.warn('Fencing local sRPC streams after mesh lease loss', { reason });
         this.meshRunning = false;
         this.meshLeaseFailure ??= reason ?? new Error('sRPC mesh lease was lost');
@@ -927,23 +1026,28 @@ export class MeshSrpcServer<
     }
 
     async meshStart(): Promise<void> {
+        return this.startMeshLifecycle(true);
+    }
+
+    private async startMeshLifecycle(enableRecovery: boolean): Promise<void> {
+        if (enableRecovery) this.meshRecoveryEnabled = true;
         if (this.meshLeaseFailure) throw this.meshLeaseFailure;
         if (this.meshCleanupFailure) throw this.meshCleanupFailure;
         if (this.meshClosed) throw new Error('sRPC mesh server is closed');
         if (this.meshStopPromise) {
             await this.meshStopPromise;
-            return this.meshStart();
+            return this.startMeshLifecycle(enableRecovery);
         }
         // A shutdown is allowed to return before an uncooperative underlying
         // mesh start settles. Do not let a new start overlap that deferred
         // rollback or inherit its partially-created membership.
         if (this.meshPendingStartCleanup) {
             await this.meshPendingStartCleanup;
-            return this.meshStart();
+            return this.startMeshLifecycle(enableRecovery);
         }
         if (this.meshPendingLinkClose) {
             await this.meshPendingLinkClose;
-            return this.meshStart();
+            return this.startMeshLifecycle(enableRecovery);
         }
         if (this.meshRunning) return;
         if (this.meshStartPromise) {
@@ -952,7 +1056,7 @@ export class MeshSrpcServer<
             // inherit the cancelled start's rejection. Wait for its rollback,
             // then begin a fresh lifecycle.
             await this.meshStartPromise.catch(() => {});
-            return this.meshStart();
+            return this.startMeshLifecycle(enableRecovery);
         }
         const generation = (this.meshStartGeneration ?? 0) + 1;
         this.meshStartGeneration = generation;
@@ -1066,6 +1170,9 @@ export class MeshSrpcServer<
     }
 
     async meshStop(): Promise<void> {
+        // A normal lifecycle stop must not be followed by a background
+        // recovery, even when it joins lease cleanup already underway.
+        this.cancelMeshRecovery(true);
         if (this.meshFatalCleanupPromise) return this.meshFatalCleanupPromise;
         if (this.meshLeaseCleanupPromise) return this.meshLeaseCleanupPromise;
         if (this.meshLeaseCleanupRequired) return this.beginMeshLeaseCleanup();
@@ -1528,6 +1635,7 @@ export class MeshSrpcServer<
     }
 
     override close(): void {
+        this.cancelMeshRecovery();
         this.meshClosed = true;
         for (const unregister of this.unregisterLifecycleHandlers.splice(0)) unregister();
         void this.meshStop().catch(error => this.meshLogger.warn('sRPC mesh shutdown failed', { error }));

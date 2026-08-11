@@ -1047,6 +1047,139 @@ describe('MeshSrpcLinkController', () => {
         assert.equal(server.meshLinkRuntime, undefined);
     });
 
+    it('restarts a fresh mesh generation after lease cleanup and retries a transient recovery failure', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseRecovery'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-recovery',
+            meshKey: 'lease-recovery',
+            autoLifecycle: false
+        });
+        (server as any).meshRecoveryRetryMs = 1;
+        (server as any).meshRecoveryMaxRetryMs = 5;
+        const recoveries: string[] = [];
+        (server as any).meshLogger = {
+            info: (message: string) => recoveries.push(message),
+            warn: () => {}
+        };
+        let releaseCleanup!: () => void;
+        const cleanupBlocked = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
+        (server as any).handleMeshLeaseLost = async (reason?: Error) => {
+            (server as any).meshLeaseFailure ??= reason ?? new Error('lease lost');
+            await cleanupBlocked;
+        };
+
+        let starts = 0;
+        (server as any).startMeshLifecycle = async () => {
+            starts++;
+            if (starts === 1) throw new Error('Redis still unavailable');
+            (server as any).meshRunning = true;
+        };
+
+        try {
+            const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+            const leaseCleanup = leaseCallback(new Error('lease lost'));
+
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.equal(starts, 0);
+
+            releaseCleanup();
+            await leaseCleanup;
+
+            await waitFor(() => starts === 2);
+            assert.equal((server as any).meshLeaseFailure, undefined);
+            assert.equal(server.startupState, 'ready');
+            assert.deepEqual(recoveries, ['sRPC mesh recovered after lease loss']);
+        } finally {
+            server.close();
+        }
+    });
+
+    it('does not recover after meshStop joins lease cleanup during shutdown', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseRecoveryShutdown'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-recovery-shutdown',
+            meshKey: 'lease-recovery-shutdown',
+            autoLifecycle: false
+        });
+        (server as any).meshRecoveryRetryMs = 1;
+        let releaseCleanup!: () => void;
+        const cleanupBlocked = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
+        (server as any).handleMeshLeaseLost = async (reason?: Error) => {
+            (server as any).meshLeaseFailure ??= reason ?? new Error('lease lost');
+            await cleanupBlocked;
+        };
+        let starts = 0;
+        (server as any).startMeshLifecycle = async () => {
+            starts++;
+        };
+
+        try {
+            const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+            const leaseCleanup = leaseCallback(new Error('lease lost'));
+            const stop = server.meshStop();
+
+            releaseCleanup();
+            await Promise.all([leaseCleanup, stop]);
+            await new Promise<void>(resolve => setTimeout(resolve, 20));
+
+            assert.equal(starts, 0);
+        } finally {
+            server.close();
+        }
+    });
+
+    it('recovers after a second lease loss interrupts an in-flight recovery start', async () => {
+        const server = new MeshSrpcServer({
+            logger: createLogger('MeshLeaseRecoveryGeneration'),
+            clientMessage: JsonMessage,
+            serverMessage: JsonMessage,
+            wsPath: '/lease-recovery-generation',
+            meshKey: 'lease-recovery-generation',
+            autoLifecycle: false
+        });
+        (server as any).meshRecoveryRetryMs = 1;
+        let releaseFirstStart!: () => void;
+        const firstStartBlocked = new Promise<void>(resolve => {
+            releaseFirstStart = resolve;
+        });
+        (server as any).handleMeshLeaseLost = async (reason?: Error) => {
+            (server as any).cancelMeshRecovery();
+            (server as any).meshRunning = false;
+            (server as any).meshLeaseFailure ??= reason ?? new Error('lease lost');
+        };
+        let starts = 0;
+        (server as any).startMeshLifecycle = async () => {
+            starts++;
+            if (starts === 1) {
+                await firstStartBlocked;
+                return;
+            }
+            (server as any).meshRunning = true;
+        };
+
+        try {
+            const leaseCallback = (server as any).meshClientService.leaseLostCallbacks[0] as (reason?: Error) => Promise<void>;
+            await leaseCallback(new Error('first lease lost'));
+            await waitFor(() => starts === 1);
+
+            await leaseCallback(new Error('second lease lost'));
+            releaseFirstStart();
+
+            await waitFor(() => starts === 2);
+            assert.equal(server.startupState, 'ready');
+        } finally {
+            server.close();
+        }
+    });
+
     it('preinstalls the lease cleanup join barrier before synchronous teardown can reenter meshStop', async () => {
         const server = new MeshSrpcServer({
             logger: createLogger('MeshLeaseCleanupJoin'),
