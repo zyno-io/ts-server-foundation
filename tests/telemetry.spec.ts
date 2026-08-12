@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { afterEach, describe, it, mock } from 'node:test';
 
 import type { Instrumentation } from '@opentelemetry/instrumentation';
+import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis';
 import { AggregationTemporality, InMemoryMetricExporter, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 
@@ -156,6 +157,24 @@ describe('telemetry', () => {
 
         await otel.shutdownTelemetry();
         assert.equal(instrumentation.disable.mock.callCount() > 0, true);
+    });
+
+    it('only enables the built-in ioredis instrumentation when requested', () => {
+        const setTracerProvider = mock.method(IORedisInstrumentation.prototype, 'setTracerProvider');
+        const exporter = new InMemorySpanExporter();
+
+        init({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        assert.equal(setTracerProvider.mock.callCount(), 0);
+
+        resetTelemetryForTests();
+        setTracerProvider.mock.resetCalls();
+
+        init({
+            enableRedisInstrumentation: true,
+            spanProcessors: [new SimpleSpanProcessor(exporter)]
+        });
+
+        assert.equal(setTracerProvider.mock.callCount() > 0, true);
     });
 
     it('reads telemetry settings from loaded app config when env is unavailable', async () => {

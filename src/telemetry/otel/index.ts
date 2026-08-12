@@ -37,6 +37,7 @@ export interface TelemetryInitOptions {
     disabled?: boolean;
     instrumentations?: Instrumentation[];
     httpIncomingRequestAttributeHook?: HttpIncomingRequestAttributeHook;
+    enableRedisInstrumentation?: boolean;
     enableMetricsEndpoint?: boolean;
     spanProcessors?: SpanProcessor[];
     metricReaders?: MetricReader[];
@@ -198,7 +199,7 @@ function createDefaultInstrumentations(options: TelemetryInitOptions): Instrumen
             ignoreRequestHook: (request: UndiciRequest) => /(\/healthz|\/readyz|\/livez|\/metrics|sentry\.)/.test(`${request.origin}${request.path}`)
         }),
         new DnsInstrumentation(),
-        new IORedisInstrumentation(),
+        ...(options.enableRedisInstrumentation === true ? [new IORedisInstrumentation()] : []),
         new MySQL2Instrumentation(),
         new PgInstrumentation(),
         ...(options.instrumentations ?? [])

@@ -22,6 +22,7 @@ const { createApp } = await import('@zyno-io/ts-server-foundation');
 init({
     serviceName: 'api',
     serviceVersion: '1.2.3',
+    enableRedisInstrumentation: true,
     enableMetricsEndpoint: true,
     httpIncomingRequestAttributeHook: request => ({
         'http.request.host': request.headers.host ?? ''
@@ -38,6 +39,7 @@ Options:
 | `disabled`                         | Skips initialization when true.                              |
 | `instrumentations`                 | Additional OpenTelemetry instrumentations.                   |
 | `httpIncomingRequestAttributeHook` | Adds attributes to incoming HTTP spans.                      |
+| `enableRedisInstrumentation`       | Set to `true` to enable built-in ioredis tracing.            |
 | `enableMetricsEndpoint`            | Enables the Prometheus `/metrics` endpoint.                  |
 | `spanProcessors`                   | Custom trace span processors.                                |
 | `metricReaders`                    | Custom metric readers.                                       |
@@ -59,13 +61,13 @@ Trace providers are installed when an OTLP trace endpoint or custom span process
 
 TSF adds these resource attributes to installed trace and metric providers:
 
-| Attribute | Source |
-| --- | --- |
-| `service.name` | `serviceName`, then the working package name, then `unknown`. |
-| `service.version` | `serviceVersion`, then the working package version, then `unknown`. |
-| `deployment.environment` | `APP_ENV`. |
-| `host.name` | Operating-system hostname. |
-| `process.pid` | Current process ID. |
+| Attribute                | Source                                                              |
+| ------------------------ | ------------------------------------------------------------------- |
+| `service.name`           | `serviceName`, then the working package name, then `unknown`.       |
+| `service.version`        | `serviceVersion`, then the working package version, then `unknown`. |
+| `deployment.environment` | `APP_ENV`.                                                          |
+| `host.name`              | Operating-system hostname.                                          |
+| `process.pid`            | Current process ID.                                                 |
 
 The default OTLP trace exporter uses a `SimpleSpanProcessor` in development and a `BatchSpanProcessor` otherwise. OTLP metrics use a periodic reader with a 10-second export interval. Passing custom `spanProcessors` or `metricReaders` replaces the corresponding default processor/reader choice while retaining any separately enabled Prometheus endpoint.
 
@@ -76,9 +78,10 @@ Default instrumentation includes:
 - HTTP
 - Undici
 - DNS
-- ioredis
 - mysql2
 - pg
+
+ioredis instrumentation is disabled by default. Set `enableRedisInstrumentation: true` to include it. This does not affect an ioredis instrumentation passed explicitly through `instrumentations`.
 
 HTTP context is connected to TSF request handling so request logs and Sentry events can include trace context.
 

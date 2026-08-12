@@ -150,7 +150,7 @@ describe('package exports', () => {
 
                 type Input = HttpBody<{ birthday: DateString }>;
                 const reflected: Type = typeOf<Input>();
-                const telemetry: TelemetryInitOptions = { disabled: true };
+                const telemetry: TelemetryInitOptions = { disabled: true, enableRedisInstrumentation: true };
                 const availability: AvailabilityMonitor | undefined = undefined;
                 void [
                     AlphanumericCharacters,
