@@ -654,14 +654,20 @@ function isBodylessRequest(request: HttpRequest): boolean {
     return request.headers['transfer-encoding'] === undefined;
 }
 
-function collectFileUploadPolicies(type: Type, files: Record<string, FileUploadPolicy>, path: string[] = [], seen = new Set<Type>()): void {
+function collectFileUploadPolicies(
+    type: Type,
+    files: Record<string, FileUploadPolicy>,
+    path: string[] = [],
+    seen = new Set<Type>(),
+    arrayDepth = 0
+): void {
     if (seen.has(type)) return;
     seen.add(type);
 
     try {
         if (isReflectedClass(type, FileUpload)) {
-            if (path.length !== 1) {
-                const location = path.length ? path.join('.') : '<body>';
+            if (path.length !== 1 || arrayDepth > 1) {
+                const location = `${path.length ? path.join('.') : '<body>'}${'.[]'.repeat(arrayDepth)}`;
                 throw new Error(`FileUpload body properties must be top-level; found "${location}"`);
             }
             addFileUploadPolicy(files, path[0], fileUploadPolicyFromType(type));
@@ -679,7 +685,7 @@ function collectFileUploadPolicies(type: Type, files: Record<string, FileUploadP
         }
 
         if (type.kind === ReflectionKind.array) {
-            collectFileUploadPolicies(type.type, files, [...path, '[]'], seen);
+            collectFileUploadPolicies(type.type, files, path, seen, arrayDepth + 1);
             return;
         }
 

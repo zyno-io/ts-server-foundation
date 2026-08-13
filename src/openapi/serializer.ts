@@ -228,7 +228,9 @@ function buildRequestBody(route: HttpRoutePlan, schemaContext: ReturnType<typeof
                 encoding: Object.keys(encoding).length ? encoding : undefined
             }
         };
-        if (!bodyParamsRequireFiles) content['application/json'] = { schema };
+        if (!bodyParamsRequireFiles) {
+            content['application/json'] = { schema: schemaForJsonBodyWithoutFileUploads(bodyParams[0].type, schemaContext) };
+        }
         return {
             required: !bodyParams[0].optional,
             content
@@ -278,6 +280,22 @@ function buildRequestBody(route: HttpRoutePlan, schemaContext: ReturnType<typeof
             }
         }
     };
+}
+
+function schemaForJsonBodyWithoutFileUploads(type: Type, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): OpenApiSchemaObject {
+    const schema: OpenApiSchemaObject = { type: 'object', properties: {} };
+    const required: string[] = [];
+
+    for (const property of listOpenApiTypeProperties(type)) {
+        if (typeHasOpenApiFileUpload(property.type)) continue;
+        const propertySchema = typeToOpenApiSchema(property.type, schemaContext);
+        if (property.description && !('$ref' in propertySchema)) propertySchema.description = property.description;
+        schema.properties![property.name] = propertySchema;
+        if (property.required) required.push(property.name);
+    }
+
+    if (required.length) schema.required = required;
+    return schema;
 }
 
 function uploadEncodingForRoute(route: HttpRoutePlan): Record<string, { contentType?: string }> {

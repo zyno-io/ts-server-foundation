@@ -2221,7 +2221,7 @@ describe('http router', () => {
         assert.match(String(multipart.json.error), /file.*required/i);
     });
 
-    it('selects the first duplicate direct upload, supports a single declared-file fallback, and rejects typed multi-file bodies', async () => {
+    it('selects the first duplicate direct upload and binds repeated typed body uploads as an optional array', async () => {
         interface AttachmentBody {
             attachment: FileUpload;
         }
@@ -2244,8 +2244,11 @@ describe('http router', () => {
             }
 
             @http.POST('/typed')
-            typed(_body: HttpBody<{ file: FileUpload }>) {
-                return { ok: true };
+            typed(body: HttpBody<{ files?: FileUpload[] }>) {
+                return {
+                    names: body.files?.map(file => file.originalName) ?? [],
+                    contents: body.files?.map(file => readFileSync(file.path, 'utf8')) ?? []
+                };
             }
 
             @http.POST('/text')
@@ -2265,6 +2268,12 @@ describe('http router', () => {
             { name: 'label', value: 'first' },
             { name: 'label', value: 'second' }
         ]);
+        const typedFiles = makeMultipartBody([
+            { name: '_payload', value: '{}' },
+            { name: 'files', filename: 'first.txt', contentType: 'text/plain', value: 'first' },
+            { name: 'files', filename: 'second.txt', contentType: 'text/plain', value: 'second' }
+        ]);
+        const typedNoFiles = makeMultipartBody([{ name: '_payload', value: '{}' }]);
 
         const direct = await app.request(
             new HttpRequest('POST', '/duplicate-uploads/direct', { 'content-type': duplicates.contentType }, duplicates.body)
@@ -2273,7 +2282,10 @@ describe('http router', () => {
             new HttpRequest('POST', '/duplicate-uploads/fallback', { 'content-type': fallback.contentType }, fallback.body)
         );
         const typed = await app.request(
-            new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': duplicates.contentType }, duplicates.body)
+            new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': typedFiles.contentType }, typedFiles.body)
+        );
+        const typedWithoutFiles = await app.request(
+            new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': typedNoFiles.contentType }, typedNoFiles.body)
         );
         const text = await app.request(
             new HttpRequest('POST', '/duplicate-uploads/text', { 'content-type': repeatedText.contentType }, repeatedText.body)
@@ -2286,7 +2298,8 @@ describe('http router', () => {
         });
         assert.ok(direct.json.paths.every((path: string) => !existsSync(path)));
         assert.deepStrictEqual(fallbackResponse.json, { sameFile: true, name: 'attachment.txt' });
-        assert.equal(typed.statusCode, 400);
+        assert.deepStrictEqual(typed.json, { names: ['first.txt', 'second.txt'], contents: ['first', 'second'] });
+        assert.deepStrictEqual(typedWithoutFiles.json, { names: [], contents: [] });
         assert.deepStrictEqual(text.json, { labels: ['first', 'second'] });
     });
 
@@ -2456,7 +2469,7 @@ describe('http router', () => {
         assert.throws(() => createApp({ controllers: [InvalidUploadPolicyController] }), /Invalid FileUpload allowedTypes/);
     });
 
-    it('rejects nested and array FileUpload body properties at startup', () => {
+    it('rejects nested and multidimensional FileUpload body properties at startup', () => {
         class NestedUploadPart {
             file!: FileUpload;
         }
@@ -2469,10 +2482,10 @@ describe('http router', () => {
             }
         }
 
-        @http.controller('/invalid-array-upload')
+        @http.controller('/invalid-multidimensional-array-upload')
         class InvalidArrayUploadController {
             @http.POST()
-            array(_body: HttpBody<{ files: FileUpload[] }>) {
+            array(_body: HttpBody<{ files: FileUpload[][] }>) {
                 return {};
             }
         }
@@ -2492,7 +2505,7 @@ describe('http router', () => {
         );
         assert.throws(
             () => createApp({ controllers: [InvalidArrayUploadController] }),
-            /FileUpload body properties must be top-level; found "files.\[\]"/
+            /FileUpload body properties must be top-level; found "files\.\[\]\.\[\]"/
         );
         assert.throws(() => createApp({ controllers: [InvalidFileNameUploadController] }), /File field "nested\[file\]" must be a top-level field/);
     });

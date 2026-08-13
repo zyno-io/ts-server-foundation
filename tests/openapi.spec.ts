@@ -94,6 +94,11 @@ class OpenApiNestedUploadBody {
     caption?: string;
 }
 
+class OpenApiAttachmentsBody {
+    caption!: string;
+    attachments?: FileUpload<{ maxSize: '600KiB'; allowedTypes: ['image/jpeg', 'image/png', 'image/gif'] }>[];
+}
+
 class OpenApiDraftAttachmentFields {
     title!: string;
     attachment!: FileUpload<{ maxSize: '2MB'; allowedTypes: 'application/pdf' }> | null;
@@ -423,6 +428,11 @@ class OpenApiUsersController {
 
     @http.POST('/nested-upload')
     async uploadNested(_body: HttpBody<OpenApiNestedUploadBody>): Promise<OpenApiUserDto> {
+        return new OpenApiUserDto();
+    }
+
+    @http.POST('/attachments')
+    async uploadAttachments(_body: HttpBody<OpenApiAttachmentsBody>): Promise<OpenApiUserDto> {
         return new OpenApiUserDto();
     }
 
@@ -1257,11 +1267,29 @@ describe('openapi', () => {
         assert.deepStrictEqual(schemaObject(nestedUploadBody?.properties?.file)['x-allowedTypes'], ['image/png']);
         assert.equal(nestedUploadContent?.['multipart/form-data'].encoding?.file?.contentType, 'image/png');
 
+        const attachmentsContent = doc.paths['/users/attachments'].post?.requestBody?.content;
+        assert.ok(attachmentsContent?.['application/json']);
+        assert.ok(attachmentsContent?.['multipart/form-data']);
+        const attachmentsBody = doc.components?.schemas?.OpenApiAttachmentsBody;
+        const attachments = schemaObject(attachmentsBody?.properties?.attachments);
+        assert.equal(attachments.type, 'array');
+        assert.equal(schemaObject(attachments.items).format, 'binary');
+        assert.equal(schemaObject(attachments.items)['x-maxSizeBytes'], 600 * 1024);
+        assert.deepStrictEqual(schemaObject(attachments.items)['x-allowedTypes'], ['image/jpeg', 'image/png', 'image/gif']);
+        assert.equal(attachmentsContent?.['multipart/form-data'].encoding?.attachments?.contentType, 'image/jpeg, image/png, image/gif');
+        const attachmentsJsonBody = schemaObject(attachmentsContent?.['application/json'].schema);
+        assert.deepStrictEqual(Object.keys(attachmentsJsonBody.properties ?? {}), ['caption']);
+        assert.deepStrictEqual(attachmentsJsonBody.required, ['caption']);
+        assert.equal(attachmentsJsonBody.properties?.attachments, undefined);
+
         const optionalUploadContent = doc.paths['/users/optional-upload'].post?.requestBody?.content;
         assert.ok(optionalUploadContent?.['application/json']);
         assert.ok(optionalUploadContent['multipart/form-data']);
-        assert.deepStrictEqual(optionalUploadContent?.['application/json'].schema, optionalUploadContent?.['multipart/form-data'].schema);
         assert.equal(optionalUploadContent?.['multipart/form-data'].encoding?.attachment?.contentType, 'application/pdf');
+        const optionalUploadJsonBody = schemaObject(optionalUploadContent?.['application/json'].schema);
+        assert.deepStrictEqual(Object.keys(optionalUploadJsonBody.properties ?? {}), ['title']);
+        assert.equal(optionalUploadJsonBody.required, undefined);
+        assert.equal(optionalUploadJsonBody.properties?.attachment, undefined);
 
         const nativeClassBodyContent = doc.paths['/users/native-class-body'].post?.requestBody?.content;
         assert.equal(nativeClassBodyContent?.['multipart/form-data'], undefined);
