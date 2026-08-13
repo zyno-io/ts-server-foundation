@@ -82,6 +82,9 @@ func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) st
 	if parts := nonEmptyParts(splitTop(raw, "&")); len(parts) > 1 {
 		return "{kind: 13, types: [" + mapJoin(parts, func(part string) string { return typeExprCtx(info, reg, part, ctx) }) + "]}"
 	}
+	if strings.HasSuffix(raw, "[]") {
+		return "{kind: 14, type: " + typeExprCtx(info, reg, strings.TrimSuffix(raw, "[]"), ctx) + "}"
+	}
 	if strings.HasPrefix(raw, "\"") || strings.HasPrefix(raw, "'") {
 		return "{kind: 10, literal: " + normalizeStringLiteral(raw) + "}"
 	}
@@ -90,9 +93,6 @@ func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) st
 	}
 	if _, err := strconv.ParseFloat(raw, 64); err == nil {
 		return "{kind: 10, literal: " + raw + "}"
-	}
-	if strings.HasSuffix(raw, "[]") {
-		return "{kind: 14, type: " + typeExprCtx(info, reg, strings.TrimSuffix(raw, "[]"), ctx) + "}"
 	}
 	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
 		items := splitTop(strings.TrimSpace(raw[1:len(raw)-1]), ",")

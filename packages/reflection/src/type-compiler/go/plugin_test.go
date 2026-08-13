@@ -218,6 +218,18 @@ func TestTypeExprIgnoresCommentsInsideUnions(t *testing.T) {
 	)
 }
 
+func TestTypeExprRendersLiteralArrayTypes(t *testing.T) {
+	info, reg := testTypeInfo()
+
+	got := typeExpr(info, reg, "'heplify-wire'[]")
+	if got != `{kind: 14, type: {kind: 10, literal: "heplify-wire"}}` {
+		t.Fatalf("literal array metadata = %s", got)
+	}
+	if _, err := parseExpressionTemplate(got); err != nil {
+		t.Fatalf("literal array metadata must be valid JavaScript: %v", err)
+	}
+}
+
 func TestTypeExprForNodeUsesAstUnionMemberOrder(t *testing.T) {
 	file := parseTestSourceFile(t, "/project/ordered-union.ts", `
 		type Status =
