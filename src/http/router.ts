@@ -1001,6 +1001,7 @@ function isStructuredBodyType(type: Type): boolean {
 
 function normalizeRawHttpValue(value: unknown, type: Type): unknown {
     if (value === undefined || value === null) return value;
+    if (value instanceof FileUpload && isFileUploadArrayType(type)) value = [value];
     if (isDateType(type)) return normalizeDateValue(value);
     if (isTrimmedStringType(type) && typeof value === 'string') return value.trim();
 
@@ -1289,6 +1290,11 @@ function isReflectedClass(type: Type, classType: ClassType): boolean {
         type.kind === ReflectionKind.class &&
         (type.classType === classType || type.classType?.name === classType.name || type.typeName === classType.name)
     );
+}
+
+function isFileUploadArrayType(type: Type): boolean {
+    const unwrapped = unwrapValueType(type);
+    return unwrapped.kind === ReflectionKind.array && isReflectedClass(unwrapped.type, FileUpload);
 }
 
 function normalizeDateValue(value: unknown): unknown {

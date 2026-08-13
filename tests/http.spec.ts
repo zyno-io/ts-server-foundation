@@ -2221,7 +2221,7 @@ describe('http router', () => {
         assert.match(String(multipart.json.error), /file.*required/i);
     });
 
-    it('selects the first duplicate direct upload and binds repeated typed body uploads as an optional array', async () => {
+    it('selects the first duplicate direct upload and binds one or repeated typed body uploads as an array', async () => {
         interface AttachmentBody {
             attachment: FileUpload;
         }
@@ -2251,6 +2251,11 @@ describe('http router', () => {
                 };
             }
 
+            @http.POST('/required')
+            required(_body: HttpBody<{ files: FileUpload[] }>) {
+                return {};
+            }
+
             @http.POST('/text')
             text(body: HttpBody<{ label: string[] }>) {
                 return { labels: body.label };
@@ -2273,6 +2278,10 @@ describe('http router', () => {
             { name: 'files', filename: 'first.txt', contentType: 'text/plain', value: 'first' },
             { name: 'files', filename: 'second.txt', contentType: 'text/plain', value: 'second' }
         ]);
+        const typedSingleFile = makeMultipartBody([
+            { name: '_payload', value: '{}' },
+            { name: 'files', filename: 'first.txt', contentType: 'text/plain', value: 'first' }
+        ]);
         const typedNoFiles = makeMultipartBody([{ name: '_payload', value: '{}' }]);
 
         const direct = await app.request(
@@ -2284,8 +2293,14 @@ describe('http router', () => {
         const typed = await app.request(
             new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': typedFiles.contentType }, typedFiles.body)
         );
+        const typedWithSingleFile = await app.request(
+            new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': typedSingleFile.contentType }, typedSingleFile.body)
+        );
         const typedWithoutFiles = await app.request(
             new HttpRequest('POST', '/duplicate-uploads/typed', { 'content-type': typedNoFiles.contentType }, typedNoFiles.body)
+        );
+        const requiredWithoutFiles = await app.request(
+            new HttpRequest('POST', '/duplicate-uploads/required', { 'content-type': typedNoFiles.contentType }, typedNoFiles.body)
         );
         const text = await app.request(
             new HttpRequest('POST', '/duplicate-uploads/text', { 'content-type': repeatedText.contentType }, repeatedText.body)
@@ -2299,7 +2314,10 @@ describe('http router', () => {
         assert.ok(direct.json.paths.every((path: string) => !existsSync(path)));
         assert.deepStrictEqual(fallbackResponse.json, { sameFile: true, name: 'attachment.txt' });
         assert.deepStrictEqual(typed.json, { names: ['first.txt', 'second.txt'], contents: ['first', 'second'] });
+        assert.deepStrictEqual(typedWithSingleFile.json, { names: ['first.txt'], contents: ['first'] });
         assert.deepStrictEqual(typedWithoutFiles.json, { names: [], contents: [] });
+        assert.equal(requiredWithoutFiles.statusCode, 400);
+        assert.match(String(requiredWithoutFiles.json.error), /files.*required/i);
         assert.deepStrictEqual(text.json, { labels: ['first', 'second'] });
     });
 
