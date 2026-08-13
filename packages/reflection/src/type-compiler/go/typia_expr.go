@@ -453,6 +453,9 @@ func cachedTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Nod
 
 func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {
 	raw = strings.TrimSpace(trimParens(raw))
+	if len(nonEmptyParts(splitTop(raw, "|"))) > 1 || len(nonEmptyParts(splitTop(raw, "&"))) > 1 {
+		return "", false
+	}
 	if strings.HasSuffix(raw, "[]") {
 		element := strings.TrimSpace(strings.TrimSuffix(raw, "[]"))
 		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, nil, pos, true) + "}", true

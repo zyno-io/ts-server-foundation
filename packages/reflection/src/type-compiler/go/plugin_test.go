@@ -230,6 +230,24 @@ func TestTypeExprRendersLiteralArrayTypes(t *testing.T) {
 	}
 }
 
+func TestInterfacePropertyPreservesUnionWithAnArrayMember(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/union-array-property.ts", `
+		interface ScalarOrArrayValue {
+			value: string | string[];
+		}
+	`)
+	decl := interfaceFromNode(file, file.Statements.Nodes[0])
+	info, reg := testTypeInfo()
+	info.file = file
+
+	property := decl.properties[0]
+	got := typeExprForNodePreferred(info, reg, property.typeText, property.typeNode, decl.pos, true)
+	want := `{kind: 12, types: [{kind: 6}, {kind: 14, type: {kind: 6}}]}`
+	if got != want {
+		t.Fatalf("scalar-or-array property metadata = %s, want %s", got, want)
+	}
+}
+
 func TestTypeExprForNodeUsesAstUnionMemberOrder(t *testing.T) {
 	file := parseTestSourceFile(t, "/project/ordered-union.ts", `
 		type Status =
