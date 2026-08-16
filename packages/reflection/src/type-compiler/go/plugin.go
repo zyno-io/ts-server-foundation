@@ -102,6 +102,7 @@ type propertyInfo struct {
 	name         string
 	typeText     string
 	typeNode     *shimast.Node
+	declaration  *shimast.Node
 	metadataText string
 	optional     bool
 }

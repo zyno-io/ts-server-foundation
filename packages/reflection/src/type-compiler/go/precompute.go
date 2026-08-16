@@ -57,6 +57,13 @@ func precomputeClassMetadataExpressions(info *fileInfo, reg *registry, class *cl
 	}
 	for i := range class.properties {
 		prop := &class.properties[i]
+		if prop.typeNode == nil && prop.declaration != nil && reg.checker != nil {
+			inferredType := reg.checker.GetTypeAtLocation(prop.declaration)
+			if metadata, ok := typiaTypeExprFromType(info, reg, inferredType, class.pos, ""); ok {
+				prop.metadataText = metadata
+				continue
+			}
+		}
 		prop.metadataText = typeExprForNode(info, reg, prop.typeText, prop.typeNode, class.pos)
 	}
 	for i := range class.methods {

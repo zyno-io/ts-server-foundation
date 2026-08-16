@@ -90,10 +90,11 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 				continue
 			}
 			class.properties = append(class.properties, propertyInfo{
-				name:     name,
-				typeText: nodeText(file, member.Type()),
-				typeNode: member.Type(),
-				optional: member.QuestionToken() != nil,
+				name:        name,
+				typeText:    nodeText(file, member.Type()),
+				typeNode:    member.Type(),
+				declaration: member,
+				optional:    member.QuestionToken() != nil,
 			})
 		case shimast.KindMethodDeclaration:
 			name := memberName(file, member)

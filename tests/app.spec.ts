@@ -133,6 +133,22 @@ describe('config loader', () => {
         assert.equal(config.NAME, 'process');
     });
 
+    it('coerces environment values for unannotated primitive defaults', () => {
+        class AppConfig extends BaseAppConfig {
+            FEATURE_ENABLED = false;
+            LIMIT = 1;
+        }
+
+        process.env.APP_ENV = 'test';
+        process.env.FEATURE_ENABLED = 'true';
+        process.env.LIMIT = '12';
+
+        const config = new ConfigLoader(AppConfig).load();
+
+        assert.equal(config.FEATURE_ENABLED, true);
+        assert.equal(config.LIMIT, 12);
+    });
+
     it('decrypts encrypted secret values from env files', () => {
         class AppConfig extends BaseAppConfig {
             API_SECRET!: string;
