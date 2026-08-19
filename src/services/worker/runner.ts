@@ -258,7 +258,8 @@ export class WorkerRunnerService {
             const worker = new BullWorker<BullMqWorkerJobData>(
                 queueName,
                 async job => {
-                    await this.executeBullMqJob(job);
+                    const execution = await this.executeBullMqJob(job);
+                    return execution.result;
                 },
                 this.queueRegistry.getBullMqOptions()
             );
