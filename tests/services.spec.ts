@@ -438,6 +438,12 @@ describe('services', () => {
         const mutexPrefixLeader = new LeaderService('main');
         assert.equal((mutexPrefixLeader as unknown as { key: string }).key, 'mutex-prefix:leader:main');
 
+        process.env.APP_ENV = 'test';
+        process.env.BULL_REDIS_PREFIX = 'bull-prefix';
+        createApp({});
+        const bullPrefixLeader = new LeaderService('worker-recorder:default', { redisConfigPrefix: 'BULL' });
+        assert.equal((bullPrefixLeader as unknown as { key: string }).key, 'bull-prefix:leader:worker-recorder:default');
+
         void defaultPrefixApp;
     });
 

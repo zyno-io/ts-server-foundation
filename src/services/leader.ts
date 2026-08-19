@@ -36,21 +36,22 @@ type LeaderRedisClient = ReturnType<typeof createRedis>['client'] & {
     RELEASE: (key: string, value: string) => Promise<number>;
 };
 
-let redisClient: LeaderRedisClient | undefined;
+const redisClients = new Map<string, LeaderRedisClient>();
 
-function getRedisClient(): LeaderRedisClient {
-    if (!redisClient) {
-        const { client } = createRedis('MUTEX');
+function getRedisClient(configPrefix: string): LeaderRedisClient {
+    const existing = redisClients.get(configPrefix);
+    if (!existing) {
+        const { client } = createRedis(configPrefix);
         client.defineCommand('ACQUIRE', { lua: ACQUIRE_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('RENEW', { lua: RENEW_SCRIPT, numberOfKeys: 1 });
         client.defineCommand('RELEASE', { lua: RELEASE_SCRIPT, numberOfKeys: 1 });
         const nextClient = client as LeaderRedisClient;
         registerRedisStateReset(nextClient, () => {
-            if (redisClient === nextClient) redisClient = undefined;
+            if (redisClients.get(configPrefix) === nextClient) redisClients.delete(configPrefix);
         });
-        redisClient = nextClient;
+        redisClients.set(configPrefix, nextClient);
     }
-    return redisClient;
+    return redisClients.get(configPrefix)!;
 }
 
 type LeaderCallback = () => void | Promise<void>;
@@ -59,6 +60,8 @@ export interface LeaderServiceOptions {
     ttlMs?: number;
     renewalIntervalMs?: number;
     retryDelayMs?: number;
+    /** Redis configuration namespace, such as `BULL`; defaults to `MUTEX`. */
+    redisConfigPrefix?: string;
 }
 
 export class LeaderService {
@@ -75,16 +78,22 @@ export class LeaderService {
     private ttlMs: number;
     private renewalIntervalMs: number;
     private retryDelayMs: number;
+    private readonly redisConfigPrefix: string;
 
     private logger = createLogger(this);
 
     constructor(key: string, options?: LeaderServiceOptions) {
         const config = getAppConfig();
-        const prefix = config.MUTEX_REDIS_PREFIX ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app';
+        this.redisConfigPrefix = options?.redisConfigPrefix ?? 'MUTEX';
+        const prefix = config[`${this.redisConfigPrefix}_REDIS_PREFIX` as keyof typeof config] ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app';
         this.key = `${prefix}:leader:${key}`;
         this.ttlMs = options?.ttlMs ?? 30000;
         this.renewalIntervalMs = options?.renewalIntervalMs ?? 10000;
         this.retryDelayMs = options?.retryDelayMs ?? 5000;
+    }
+
+    private getRedisClient(): LeaderRedisClient {
+        return getRedisClient(this.redisConfigPrefix);
     }
 
     get isLeader(): boolean {
@@ -124,7 +133,7 @@ export class LeaderService {
 
         if (this._isLeader) {
             try {
-                await getRedisClient().RELEASE(this.key, this.lockId);
+                await this.getRedisClient().RELEASE(this.key, this.lockId);
             } catch (err) {
                 this.logger.warn('failed to release leader lock during stop', { err });
             }
@@ -136,13 +145,13 @@ export class LeaderService {
         if (!this.running) return;
 
         try {
-            const result = await getRedisClient().ACQUIRE(this.key, this.lockId, this.ttlMs);
+            const result = await this.getRedisClient().ACQUIRE(this.key, this.lockId, this.ttlMs);
 
             if (result === 1) {
                 // If stop() was called while ACQUIRE was in-flight, release immediately
                 if (!this.running) {
                     try {
-                        await getRedisClient().RELEASE(this.key, this.lockId);
+                        await this.getRedisClient().RELEASE(this.key, this.lockId);
                     } catch {
                         // ignore - lock will expire via TTL
                     }
@@ -173,7 +182,7 @@ export class LeaderService {
             if (!this.running) return;
 
             try {
-                const result = await getRedisClient().RENEW(this.key, this.lockId, this.ttlMs);
+                const result = await this.getRedisClient().RENEW(this.key, this.lockId, this.ttlMs);
                 if (result === 0) {
                     this.handleLostLeadership();
                 }

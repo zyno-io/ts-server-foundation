@@ -1,5 +1,6 @@
 import type { App } from '../../app';
 import { createAvailabilityMonitor, withContextData, type AvailabilityMonitor } from '../../helpers';
+import { LeaderService } from '../leader';
 import { ScopedLogger } from '../logger';
 import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData } from './queue';
 import { WorkerRecorderService } from './recorder';
@@ -20,6 +21,7 @@ export class WorkerRunnerService {
     private readonly executing = new Set<string>();
     private readonly bullWorkers = new Map<string, BullWorker<BullMqWorkerJobData>>();
     private readonly bullWorkerRedisLifecycleCleanup = new Set<() => void>();
+    private readonly recorderLeaders = new Map<string, LeaderService>();
     private bullWorkerRedisMonitor?: AvailabilityMonitor;
 
     constructor(
@@ -48,7 +50,9 @@ export class WorkerRunnerService {
             // again before this worker starts consuming jobs so a materialized stale repeat job
             // cannot reach this process and perpetuate its own chain.
             await this.removeStaleBullMqCronJobs();
+            await this.recorder.ensureTableExists();
             await this.startBullMqWorkers();
+            this.startBullMqRecorders();
             await this.scheduleBullMqCronJobs();
             this.logger.info('Worker started', {
                 backend: 'bullmq',
@@ -95,6 +99,9 @@ export class WorkerRunnerService {
             })
         );
         this.bullWorkers.clear();
+        await Promise.all([...this.recorderLeaders.values()].map(leader => leader.stop()));
+        this.recorderLeaders.clear();
+        await this.recorder.stop();
         while (this.executing.size) {
             await new Promise(resolve => setTimeout(resolve, 10));
         }
@@ -156,7 +163,12 @@ export class WorkerRunnerService {
         return this.executeJob(job, options, true);
     }
 
-    private async executeJob<I, O>(job: QueuedWorkerJob<I>, options: IJobOptions, logFailure: boolean): Promise<WorkerExecutionResult<I, O>> {
+    private async executeJob<I, O>(
+        job: QueuedWorkerJob<I>,
+        options: IJobOptions,
+        logFailure: boolean,
+        recordTerminalJob = true
+    ): Promise<WorkerExecutionResult<I, O>> {
         if (this.executing.has(job.id)) throw new Error(`Job ${job.name}:${job.id} is already executing`);
 
         this.executing.add(job.id);
@@ -176,7 +188,7 @@ export class WorkerRunnerService {
                 async () => this.resolveJob(job.jobClass).handle(job.data)
             );
             this.queueRegistry.markCompleted(job, result);
-            await this.recorder.recordCompleted(job, result, options);
+            if (recordTerminalJob) await this.recorder.recordCompleted(job, result, options);
             this.logger.info('Job completed', { job: getJobLogData(job) });
             return { job, result: result as O };
         } catch (error) {
@@ -185,7 +197,7 @@ export class WorkerRunnerService {
             if (logFailure) {
                 this.logger.error(`Job failed: ${failure.message}`, error, { job: getJobLogData(job) });
             }
-            await this.recorder.recordFailed(job, failure, options);
+            if (recordTerminalJob) await this.recorder.recordFailed(job, failure, options);
             throw error;
         } finally {
             this.queueRegistry.remove(job);
@@ -292,6 +304,23 @@ export class WorkerRunnerService {
         }
     }
 
+    private startBullMqRecorders(): void {
+        for (const queueName of this.getRegisteredQueueNames()) {
+            if (this.recorderLeaders.has(queueName)) continue;
+            const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL' });
+            leader.setBecameLeaderCallback(async () => {
+                this.logger.info('This worker is now the recorder leader', { queue: queueName });
+                await this.recorder.start(queueName, this.queueRegistry);
+            });
+            leader.setLostLeaderCallback(async () => {
+                this.logger.info('This worker lost recorder leadership', { queue: queueName });
+                await this.recorder.stop(queueName);
+            });
+            this.recorderLeaders.set(queueName, leader);
+            leader.start();
+        }
+    }
+
     private async scheduleBullMqCronJobs(): Promise<void> {
         for (const jobClass of getRegisteredWorkerJobs()) {
             const schedule = jobClass.CRON_SCHEDULE;
@@ -308,8 +337,8 @@ export class WorkerRunnerService {
                         options: { repeatKey }
                     },
                     opts: {
-                        removeOnComplete: 1000,
-                        removeOnFail: 1000
+                        removeOnComplete: false,
+                        removeOnFail: false
                     }
                 }
             );
@@ -325,7 +354,8 @@ export class WorkerRunnerService {
             throw new Error(`Job handler is not registered as a provider: ${job.name}`);
         }
         const queuedJob = this.queueRegistry.fromBullJob(job, jobClass);
-        return this.executeJob<I, O>(queuedJob, queuedJob.options, false);
+        // Terminal BullMQ events are recorded and removed by the elected QueueEvents observer.
+        return this.executeJob<I, O>(queuedJob, queuedJob.options, false, false);
     }
 
     private findRegisteredJobClass<I, O>(name: string): JobClass<I, O> | undefined {

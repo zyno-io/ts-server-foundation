@@ -55,8 +55,11 @@ export class WorkerQueueRegistry {
             },
             {
                 delay: options.delay,
-                removeOnComplete: 1000,
-                removeOnFail: 1000
+                // The elected worker recorder removes terminal BullMQ jobs only after their
+                // durable _jobs record has been written. Keeping them here makes leader
+                // handoff and recorder restart recovery possible.
+                removeOnComplete: false,
+                removeOnFail: false
             }
         );
 

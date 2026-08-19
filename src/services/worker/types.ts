@@ -51,6 +51,7 @@ export interface IJobOptions {
     queueName?: string;
     runInTest?: boolean;
     runImmediately?: boolean;
+    /** Defaults to true when a database is configured; set false to opt out. */
     recordToDatabase?: boolean;
     repeatKey?: string;
 }

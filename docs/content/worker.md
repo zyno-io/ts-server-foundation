@@ -94,14 +94,14 @@ await worker.queueJob(SendEmailJob, data, {
 
 ## Job Options
 
-| Option             | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `delay`            | Delay in milliseconds before the job is ready.         |
-| `queueName`        | Override the queue for this job instance.              |
-| `runInTest`        | Allow queueing in `APP_ENV=test`.                      |
-| `runImmediately`   | Bypass BullMQ and execute inline through the runner.   |
-| `recordToDatabase` | Insert a `_jobs` record when a database is configured. |
-| `repeatKey`        | Internal repeat key used for cron scheduling.          |
+| Option             | Description                                              |
+| ------------------ | -------------------------------------------------------- |
+| `delay`            | Delay in milliseconds before the job is ready.           |
+| `queueName`        | Override the queue for this job instance.                |
+| `runInTest`        | Allow queueing in `APP_ENV=test`.                        |
+| `runImmediately`   | Bypass BullMQ and execute inline through the runner.     |
+| `recordToDatabase` | Set to `false` to opt out of the default `_jobs` record. |
+| `repeatKey`        | Internal repeat key used for cron scheduling.            |
 
 The default queue comes from `BaseAppConfig.BULL_QUEUE`. If unset, it is `default`.
 
@@ -143,18 +143,19 @@ Outside test mode, `WorkerService.queueJob()` writes to BullMQ. Workers deserial
 
 ## Recorder
 
-`WorkerRecorderService` keeps in-memory execution records for the lifetime of the process and can optionally write completed/failed records into a `_jobs` table when a `BaseDatabase` provider is configured and the job option `recordToDatabase` is true. The application must provision that table through its own migration; registering worker services does not add it to the database entity registry or create it automatically. `getRecords()` returns shallow copies. The recorder itself is unbounded; DevConsole intentionally displays only the latest 200 records.
+`WorkerRecorderService` keeps in-memory execution records for the lifetime of the process and writes completed/failed records into the internal `_jobs` table by default when a `BaseDatabase` provider is configured. It provisions that table from `JobEntity` before a BullMQ worker consumes jobs (and before inline database recording); applications do not include it in their own migrations.
+
+For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. This preserves completed jobs across recorder restart or leader handoff until their database record is durable. `getRecords()` returns shallow copies. The recorder itself is unbounded; DevConsole intentionally displays only the latest 200 records.
 
 ```typescript
 await worker.queueJob(SendEmailJob, data, {
-    runImmediately: true,
-    recordToDatabase: true
+    runImmediately: true
 });
 
 const records = app.get(WorkerRecorderService).getRecords();
 ```
 
-The database record contains queue, queue id, attempt, job name, input data, status, result, and timestamps.
+Set `recordToDatabase: false` only when a job must not have a durable audit record. The database record contains queue, queue id, attempt, job name, input data, status, result, and timestamps.
 
 ## Request Context
 
@@ -184,5 +185,5 @@ Entries are `added`, `delayed`, `active`, `completed`, or `failed`; completed/fa
 
 - Queue names are discovered from `BULL_QUEUE` and registered `@WorkerJob({ queueName })` classes. Avoid arbitrary per-call `queueName` overrides unless worker processes also register a job class on that queue.
 - Retry/backoff policy is application-defined; the current worker options do not expose BullMQ retry options.
-- Recorder/database failures currently propagate through job execution and can turn an otherwise successful handler into a failed job; choose `recordToDatabase` only when that failure coupling is intended.
+- For inline/in-process execution, a recorder/database failure propagates through job execution. For BullMQ execution, the elected observer logs the failure and keeps the terminal job in BullMQ for recovery rather than removing it.
 - Runner shutdown waits for active handlers without a timeout or cancellation signal.

@@ -101,11 +101,7 @@ class FullStackSmokeController {
             };
         });
 
-        const queued = await this.worker.queueJob(
-            FullStackSmokeJob,
-            { id: result.entity.id, name: 'Other World' },
-            { recordToDatabase: true, queueName: activeQueueName }
-        );
+        const queued = await this.worker.queueJob(FullStackSmokeJob, { id: result.entity.id, name: 'Other World' }, { queueName: activeQueueName });
         const queuedJob = queued ? ('job' in queued ? queued.job : queued) : undefined;
 
         return {
@@ -237,6 +233,7 @@ describe('full-stack smoke parity', () => {
                 assert.equal(job.name, 'FullStackSmokeJob');
                 assert.deepEqual(parseJsonColumn(job.data), { id: body.entityId, name: 'Other World' });
                 assert.deepEqual(parseJsonColumn(job.result), { output: 'updated:Other World' });
+                assert.equal(await app.get(WorkerQueueRegistry).getBullQueue(activeQueueName).getJob(body.job.id), undefined);
             } finally {
                 await app.stop();
                 await resetSchema(db);
@@ -257,24 +254,6 @@ async function createSchema(db: BaseDatabase): Promise<void> {
         CREATE TABLE ${quote(SAMPLE_TABLE)} (
             id int NOT NULL AUTO_INCREMENT,
             name varchar(255) NOT NULL,
-            PRIMARY KEY (id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-    `);
-    await db.rawExecuteUnsafe(`
-        CREATE TABLE ${quote(JOBS_TABLE)} (
-            id varchar(191) NOT NULL,
-            queue varchar(191) NOT NULL,
-            queueId varchar(191) NOT NULL,
-            attempt int NOT NULL,
-            name varchar(191) NOT NULL,
-            data json NULL,
-            traceId varchar(64) NULL,
-            status varchar(32) NOT NULL,
-            result json NULL,
-            createdAt datetime(3) NOT NULL,
-            shouldExecuteAt datetime(3) NOT NULL,
-            executedAt datetime(3) NOT NULL,
-            completedAt datetime(3) NOT NULL,
             PRIMARY KEY (id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
     `);

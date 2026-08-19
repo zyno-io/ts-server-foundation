@@ -245,9 +245,7 @@ describe('worker services', () => {
             defaultConfig: { BULL_QUEUE: 'critical' }
         });
 
-        const result = await app
-            .get(WorkerService)
-            .queueJob(ExampleJob, { name: 'Alpha' }, { runInTest: true, runImmediately: true, recordToDatabase: true });
+        const result = await app.get(WorkerService).queueJob(ExampleJob, { name: 'Alpha' }, { runInTest: true, runImmediately: true });
         const execution = result as {
             job: QueuedWorkerJob;
             result: { message: string; contextName: string };
@@ -257,11 +255,28 @@ describe('worker services', () => {
         assert.deepEqual(execution.result, { message: 'Alpha:done', contextName: 'ExampleJob' });
         assert.equal(app.get(WorkerRecorderService).getRecords()[0].status, 'completed');
         assert.deepEqual(app.get(WorkerQueueRegistry).getQueuedJobs('critical'), []);
-        assert.equal(WorkerDatabase.driver.executes.length, 1);
-        assert.equal(WorkerDatabase.driver.executes[0].sql.startsWith('INSERT INTO "_jobs"'), true);
-        assert.equal(WorkerDatabase.driver.executes[0].bindings[4], 'ExampleJob');
-        assert.equal(WorkerDatabase.driver.executes[0].bindings[5], JSON.stringify({ name: 'Alpha' }));
-        assert.equal(WorkerDatabase.driver.executes[0].bindings[8], JSON.stringify({ message: 'Alpha:done', contextName: 'ExampleJob' }));
+        assert.equal(WorkerDatabase.driver.executes[0].sql.startsWith('CREATE TABLE "_jobs"'), true);
+        const insert = WorkerDatabase.driver.executes.find(query => query.sql.startsWith('INSERT INTO "_jobs"'));
+        assert.ok(insert);
+        assert.match(insert.sql, /ON CONFLICT \("id"\) DO NOTHING$/);
+        assert.equal(insert.bindings[4], 'ExampleJob');
+        assert.equal(insert.bindings[5], JSON.stringify({ name: 'Alpha' }));
+        assert.equal(insert.bindings[8], JSON.stringify({ message: 'Alpha:done', contextName: 'ExampleJob' }));
+    });
+
+    it('allows inline jobs to opt out of durable recording', async () => {
+        process.env.APP_ENV = 'test';
+        WorkerDatabase.driver.executes = [];
+        const app = createApp({
+            db: WorkerDatabase,
+            enableWorker: true,
+            providers: [WorkerDependency, ExampleJob]
+        });
+
+        await app.get(WorkerService).queueJob(ExampleJob, { name: 'NoAudit' }, { runInTest: true, runImmediately: true, recordToDatabase: false });
+
+        assert.equal(app.get(WorkerRecorderService).getRecords().length, 1);
+        assert.deepEqual(WorkerDatabase.driver.executes, []);
     });
 
     it('uses BULL_QUEUE for default jobs and drains queued jobs through the runner', async () => {
