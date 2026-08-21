@@ -85,6 +85,8 @@ ioredis instrumentation is disabled by default. Set `enableRedisInstrumentation:
 
 HTTP context is connected to TSF request handling so request logs and Sentry events can include trace context.
 
+When TSF installs a meter provider, it also registers Node runtime metrics. The Prometheus output includes heap usage and capacity (`nodejs_heap_size_used_bytes`, `nodejs_heap_size_total_bytes`), resident memory (`process_resident_memory_bytes`), external memory, GC, event-loop latency, CPU time, handles, and heap-space gauges.
+
 ## Metrics Endpoint
 
 When enabled, `createApp()` registers:

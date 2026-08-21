@@ -238,7 +238,9 @@ describe('telemetry', () => {
         try {
             const response = await tf.request(new HttpRequest('GET', '/metrics'));
             assert.equal(response.statusCode, 200);
-            assert.match(response.text, /target_info|otelcol_/);
+            assert.match(response.text, /^nodejs_heap_size_used_bytes(?:\{|\s)/m);
+            assert.match(response.text, /^nodejs_heap_size_total_bytes(?:\{|\s)/m);
+            assert.match(response.text, /^process_resident_memory_bytes(?:\{|\s)/m);
         } finally {
             await tf.stop();
         }

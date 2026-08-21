@@ -18,6 +18,7 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import { MeterProvider, PeriodicExportingMetricReader, type MetricReader } from '@opentelemetry/sdk-metrics';
 import { BatchSpanProcessor, SimpleSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import installNodeMetrics from 'opentelemetry-node-metrics';
 
 import { isDevelopmentEnvironment } from '../../app/const';
 import { getCurrentApp } from '../../app/current';
@@ -67,6 +68,7 @@ export function init(options: TelemetryInitOptions = {}): void {
     if (shouldInstallMetrics) {
         const { meterProvider, prometheusExporter } = createMeterProvider(resource, options);
         metrics.setGlobalMeterProvider(meterProvider);
+        installNodeMetrics(meterProvider);
         OtelState.meterProvider = meterProvider;
         OtelState.prometheusExporter = prometheusExporter;
     }

@@ -2433,6 +2433,7 @@ __metadata:
     lefthook: "npm:^2.1.10"
     mysql2: "npm:^3.23.2"
     nodemailer: "npm:^9.0.5"
+    opentelemetry-node-metrics: "npm:^3.0.0"
     oxlint: "npm:^1.77.0"
     pg: "npm:^8.23.0"
     pino: "npm:^10.3.1"
@@ -4695,6 +4696,13 @@ __metadata:
     regex: "npm:^6.0.1"
     regex-recursion: "npm:^6.0.2"
   checksum: 10c0/8eb8390076a396674bf8fe9fe6036fe4ea3316f9793d36fd7fe23dc443492ef52a06f5113408bec7d5ea5ad1dc1984623fcb998b2d2198e35ba2aed3ecb91676
+  languageName: node
+  linkType: hard
+
+"opentelemetry-node-metrics@npm:^3.0.0":
+  version: 3.0.0
+  resolution: "opentelemetry-node-metrics@npm:3.0.0"
+  checksum: 10c0/9619e35f23ba9f5ec5a61a8e5bd2ad470e9ff93de48a45f00ad69901ae84dbb269a74841648ec96a8335b7b571a250088af0256bce631f2ebbef5925c25d671d
   languageName: node
   linkType: hard
 
