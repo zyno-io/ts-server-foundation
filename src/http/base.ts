@@ -1,4 +1,8 @@
+import { unwatchFile, watchFile } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer as createSecureServer, type Server as SecureServer, type ServerOptions as SecureServerOptions } from 'node:https';
+import { createSecureContext } from 'node:tls';
 
 import type { BaseAppConfig } from '../app/config';
 import { getContext, getPackageName, withContextData } from '../helpers';
@@ -63,6 +67,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
     private readonly upgradeHandlers = new Set<HttpUpgradeHandler>();
     private readonly observers = new Map<HttpRequestObserver, HttpRequestObserverOptions>();
     private server?: Server;
+    private tlsContextWatcher?: HttpTlsContextWatcher;
 
     constructor(private readonly options: HttpServerRuntimeOptions<C>) {
         this.corsOptions = resolveCorsOptions(options.config, options.cors);
@@ -127,15 +132,20 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async listen(port?: number, host?: string, hooks: HttpServerListenHooks = {}): Promise<Server> {
+        if (this.server) return this.server;
+
+        const tlsConfig = resolveTlsConfig(this.options.config);
+        const tlsOptions = tlsConfig ? await readTlsOptions(tlsConfig) : undefined;
         const listenHooks = composeListenHooks(resolveListenHooks(this.options.listenHooks), hooks);
         await listenHooks.start?.();
         if (this.server) return this.server;
 
-        const server = createServer((request, response) => {
+        const requestListener = (request: IncomingMessage, response: ServerResponse) => {
             this.handleNodeRequest(request, response).catch(error => {
                 writeUnhandledNodeError(response, error);
             });
-        });
+        };
+        const server = tlsOptions ? (createSecureServer(tlsOptions, requestListener) as unknown as Server) : createServer(requestListener);
         this.server = server;
         installUpgradeClaimHandling(server);
         for (const handler of this.upgradeHandlers) server.prependListener('upgrade', handler);
@@ -148,15 +158,18 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
         try {
             const listenPort = this.getPort(port);
             await listenServer(server, listenPort, host);
+            if (tlsConfig) this.tlsContextWatcher = new HttpTlsContextWatcher(tlsConfig, server as unknown as SecureServer, this.appLogger);
             await listenHooks.afterListen?.(server);
             if (shouldLogStartup) {
-                logServerListening(this.appLogger, server, listenPort, host);
+                logServerListening(this.appLogger, server, listenPort, host, !!tlsConfig);
                 this.appLogger.info('Server started');
-                if (this.options.devConsoleEnabled) logDevConsoleAvailable(this.appLogger, server, listenPort);
+                if (this.options.devConsoleEnabled) logDevConsoleAvailable(this.appLogger, server, listenPort, !!tlsConfig);
             }
             return server;
         } catch (error) {
             const cleanupErrors: unknown[] = [];
+            this.tlsContextWatcher?.close();
+            this.tlsContextWatcher = undefined;
             try {
                 // Keep the server reachable while app-level rollback runs so
                 // app.stop() can close a socket that already bound successfully.
@@ -198,6 +211,8 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async close(): Promise<void> {
+        this.tlsContextWatcher?.close();
+        this.tlsContextWatcher = undefined;
         if (!this.server) return;
         const server = this.server;
         this.server = undefined;
@@ -363,4 +378,104 @@ function closeServer(server: Server): Promise<void> {
             else resolve();
         });
     });
+}
+
+interface HttpTlsConfig {
+    certPath: string;
+    keyPath: string;
+}
+
+const TlsReloadDebounceMs = 100;
+const TlsFileWatchIntervalMs = 1_000;
+
+function resolveTlsConfig(config: BaseAppConfig): HttpTlsConfig | undefined {
+    const certPath = config.HTTP_TLS_CERT_PATH;
+    const keyPath = config.HTTP_TLS_KEY_PATH;
+    if (!certPath && !keyPath) return undefined;
+    if (!certPath || !keyPath) throw new Error('HTTP_TLS_CERT_PATH and HTTP_TLS_KEY_PATH must be configured together');
+    return { certPath, keyPath };
+}
+
+async function readTlsOptions(config: HttpTlsConfig): Promise<Pick<SecureServerOptions, 'cert' | 'key'>> {
+    const files = await Promise.all([readFile(config.certPath), readFile(config.keyPath)]);
+    const [cert, key] = files;
+    const options = { cert, key };
+    createSecureContext(options);
+    return options;
+}
+
+class HttpTlsContextWatcher {
+    private closed = false;
+    private reloadInProgress = false;
+    private reloadRequested = false;
+    private reloadTimer?: NodeJS.Timeout;
+    private readonly paths: readonly string[];
+    private readonly onFileChange = (
+        current: { ctimeMs: number; ino: number; mtimeMs: number; size: number },
+        previous: {
+            ctimeMs: number;
+            ino: number;
+            mtimeMs: number;
+            size: number;
+        }
+    ) => {
+        if (!didTlsFileChange(current, previous)) return;
+        this.scheduleReload();
+    };
+
+    constructor(
+        private readonly config: HttpTlsConfig,
+        private readonly server: SecureServer,
+        private readonly logger: ScopedLogger
+    ) {
+        this.paths = [...new Set([config.certPath, config.keyPath])];
+        for (const path of this.paths) {
+            watchFile(path, { interval: TlsFileWatchIntervalMs, persistent: false }, this.onFileChange);
+        }
+    }
+
+    close(): void {
+        this.closed = true;
+        if (this.reloadTimer) clearTimeout(this.reloadTimer);
+        for (const path of this.paths) unwatchFile(path, this.onFileChange);
+    }
+
+    private scheduleReload(): void {
+        this.reloadRequested = true;
+        if (this.closed || this.reloadInProgress || this.reloadTimer) return;
+        this.reloadTimer = setTimeout(() => {
+            this.reloadTimer = undefined;
+            void this.reload();
+        }, TlsReloadDebounceMs);
+        this.reloadTimer.unref();
+    }
+
+    private async reload(): Promise<void> {
+        if (this.closed || !this.reloadRequested) return;
+        this.reloadRequested = false;
+        this.reloadInProgress = true;
+        try {
+            const tlsOptions = await readTlsOptions(this.config);
+            if (this.closed) return;
+            this.server.setSecureContext(tlsOptions);
+            this.logger.info('HTTP TLS secure context reloaded', { certPath: this.config.certPath, keyPath: this.config.keyPath });
+        } catch (error) {
+            this.logger.error('Failed to reload HTTP TLS secure context', error, {
+                certPath: this.config.certPath,
+                keyPath: this.config.keyPath
+            });
+        } finally {
+            this.reloadInProgress = false;
+            if (this.reloadRequested) this.scheduleReload();
+        }
+    }
+}
+
+function didTlsFileChange(
+    current: { ctimeMs: number; ino: number; mtimeMs: number; size: number },
+    previous: { ctimeMs: number; ino: number; mtimeMs: number; size: number }
+): boolean {
+    return (
+        current.ctimeMs !== previous.ctimeMs || current.ino !== previous.ino || current.mtimeMs !== previous.mtimeMs || current.size !== previous.size
+    );
 }

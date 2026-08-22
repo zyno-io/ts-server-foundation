@@ -41,6 +41,8 @@ export class BaseAppConfig {
     CRYPTO_IV_LENGTH: number = 12;
 
     USE_REAL_IP_HEADER?: boolean;
+    HTTP_TLS_CERT_PATH?: string;
+    HTTP_TLS_KEY_PATH?: string;
 
     REDIS_SENTINEL_HOST?: string;
     REDIS_SENTINEL_PORT?: number;

@@ -41,6 +41,8 @@ export interface EnvObject {
     CRYPTO_IV_LENGTH?: string;
 
     USE_REAL_IP_HEADER?: string;
+    HTTP_TLS_CERT_PATH?: string;
+    HTTP_TLS_KEY_PATH?: string;
 
     REDIS_SENTINEL_HOST?: string;
     REDIS_SENTINEL_PORT?: string;

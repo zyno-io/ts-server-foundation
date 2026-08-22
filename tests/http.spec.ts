@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { request as nodeHttpRequest, type ServerResponse } from 'node:http';
+import { request as nodeHttpsRequest } from 'node:https';
 import { Socket, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, it } from 'node:test';
+import type { TLSSocket } from 'node:tls';
 import { gzipSync } from 'node:zlib';
 
 import {
@@ -3848,6 +3850,64 @@ describe('http router', () => {
         }
     });
 
+    it('serves HTTPS and reloads its TLS secure context when certificate files change', async () => {
+        const tlsDirectory = mkdtempSync(join(tmpdir(), 'tsf-http-tls-'));
+        const certPath = join(tlsDirectory, 'service.crt');
+        const keyPath = join(tlsDirectory, 'service.key');
+        const fixturePath = join(process.cwd(), 'tests', 'fixtures');
+        const certificate = readFileSync(join(fixturePath, 'http-tls.crt'));
+        const rotatedCertificate = readFileSync(join(fixturePath, 'http-tls-rotated.crt'));
+        const key = readFileSync(join(fixturePath, 'http-tls.key'));
+        const previousCertPath = process.env.HTTP_TLS_CERT_PATH;
+        const previousKeyPath = process.env.HTTP_TLS_KEY_PATH;
+        const entries: LogEntry[] = [];
+        writeFileSync(certPath, certificate);
+        writeFileSync(keyPath, key);
+        process.env.APP_ENV = 'test';
+        process.env.HTTP_TLS_CERT_PATH = certPath;
+        process.env.HTTP_TLS_KEY_PATH = keyPath;
+        setLogSink(entry => entries.push(entry));
+
+        @http.controller('/tls')
+        class TlsController {
+            @http.GET()
+            get() {
+                return { secure: true };
+            }
+        }
+
+        const app = createApp({ controllers: [TlsController] });
+        try {
+            const server = await app.http.listen(0, '127.0.0.1');
+            const address = server.address() as AddressInfo;
+            const initialResponse = await requestNodeHttps(address.port, '/tls');
+            assert.equal(initialResponse.statusCode, 200);
+            assert.deepStrictEqual(JSON.parse(initialResponse.text), { secure: true });
+            assert.equal(initialResponse.certificateCommonName, 'first.tsf.test');
+
+            await new Promise(resolve => setTimeout(resolve, 20));
+            writeFileSync(certPath, rotatedCertificate);
+            await waitFor(
+                () => entries.some(entry => entry.message === 'HTTP TLS secure context reloaded'),
+                3_000,
+                'TLS secure context did not reload after the certificate changed'
+            );
+
+            const reloadedResponse = await requestNodeHttps(address.port, '/tls');
+            assert.equal(reloadedResponse.statusCode, 200);
+            assert.deepStrictEqual(JSON.parse(reloadedResponse.text), { secure: true });
+            assert.equal(reloadedResponse.certificateCommonName, 'rotated.tsf.test');
+        } finally {
+            await app.stop();
+            resetLogSink();
+            if (previousCertPath === undefined) delete process.env.HTTP_TLS_CERT_PATH;
+            else process.env.HTTP_TLS_CERT_PATH = previousCertPath;
+            if (previousKeyPath === undefined) delete process.env.HTTP_TLS_KEY_PATH;
+            else process.env.HTTP_TLS_KEY_PATH = previousKeyPath;
+            rmSync(tlsDirectory, { recursive: true, force: true });
+        }
+    });
+
     it('cleans up lifecycle state when HTTP listen fails', async () => {
         process.env.APP_ENV = 'test';
         const firstApp = createApp({});
@@ -4311,6 +4371,26 @@ function requestNodeHttp(
                     statusCode: response.statusCode ?? 0,
                     statusMessage: response.statusMessage ?? '',
                     headers: response.headers,
+                    text: Buffer.concat(chunks).toString()
+                });
+            });
+        });
+        request.on('error', reject);
+        request.end();
+    });
+}
+
+function requestNodeHttps(port: number, path: string): Promise<{ certificateCommonName?: string; statusCode: number; text: string }> {
+    return new Promise((resolve, reject) => {
+        const request = nodeHttpsRequest({ host: '127.0.0.1', port, path, rejectUnauthorized: false, agent: false }, response => {
+            const chunks: Buffer[] = [];
+            const socket = response.socket as TLSSocket;
+            const certificate = socket.getPeerCertificate();
+            response.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+            response.on('end', () => {
+                resolve({
+                    certificateCommonName: certificate.subject?.CN,
+                    statusCode: response.statusCode ?? 0,
                     text: Buffer.concat(chunks).toString()
                 });
             });

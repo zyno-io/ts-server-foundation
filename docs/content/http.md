@@ -63,6 +63,17 @@ removeUpgrade();
 
 `app.http.getPort()` resolves an explicit or configured listen port before binding. When `listen(0)` asks the operating system for an ephemeral port, read the actual port from `server.address()` as shown above.
 
+## TLS
+
+Set both `HTTP_TLS_CERT_PATH` and `HTTP_TLS_KEY_PATH` to serve HTTPS directly. The certificate file may include its intermediate certificate chain. The server reads both PEM files before binding and refuses to start when either path is missing or the certificate and key do not form a valid secure context.
+
+```bash
+HTTP_TLS_CERT_PATH=/run/secrets/service.crt
+HTTP_TLS_KEY_PATH=/run/secrets/service.key
+```
+
+The runtime watches both paths, including replacement-based secret rotations, and reloads the HTTPS secure context after a change. New TLS connections use the replacement certificate; connections already established continue with their existing TLS session. If a rotation briefly exposes an invalid or mismatched pair, the active certificate remains in use and the runtime logs the reload failure until a later file change supplies a valid pair.
+
 `app.http.request(request, response?)` sends an in-memory `HttpRequest` through the same router/CORS/static-file flow without creating a Node server.
 
 Observers run once after every in-memory or Node request, including CORS, static-file, `404`, and error results. The observation contains `request`, `response`, `startedAt`, `durationMs`, and the processing `error` when one was recorded. An observer exception is isolated from request handling, and the function returned by `registerObserver()` unregisters it.

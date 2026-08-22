@@ -17,20 +17,22 @@ export function logStartupDetails(logger: ScopedLogger, packageName: string, rou
     }
 }
 
-export function logServerListening(logger: ScopedLogger, server: Server, fallbackPort: number, host?: string): void {
-    logger.info('HTTP listening', { url: formatServerAddress(server, fallbackPort, host) });
+export function logServerListening(logger: ScopedLogger, server: Server, fallbackPort: number, host?: string, secure = false): void {
+    logger.info('HTTP listening', { url: formatServerAddress(server, fallbackPort, host, secure) });
 }
 
-export function logDevConsoleAvailable(logger: ScopedLogger, server: Server, fallbackPort: number): void {
-    const url = `http://localhost:${getServerPort(server, fallbackPort)}/_devconsole`;
+export function logDevConsoleAvailable(logger: ScopedLogger, server: Server, fallbackPort: number, secure = false): void {
+    const protocol = secure ? 'https' : 'http';
+    const url = `${protocol}://localhost:${getServerPort(server, fallbackPort)}/_devconsole`;
     logger.info(`DevConsole available at ${url}`);
 }
 
-export function formatServerAddress(server: Server, fallbackPort: number, host?: string): string {
+export function formatServerAddress(server: Server, fallbackPort: number, host?: string, secure = false): string {
+    const protocol = secure ? 'https' : 'http';
     const address = server.address();
     if (typeof address === 'string') return address;
-    if (address) return `http://${formatListenHost(address, host)}:${address.port}`;
-    return `http://${host ?? 'localhost'}:${fallbackPort}`;
+    if (address) return `${protocol}://${formatListenHost(address, host)}:${address.port}`;
+    return `${protocol}://${host ?? 'localhost'}:${fallbackPort}`;
 }
 
 function getServerPort(server: Server, fallbackPort: number): number {
