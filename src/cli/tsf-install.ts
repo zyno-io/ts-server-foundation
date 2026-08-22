@@ -1,8 +1,21 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, globSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+    copyFileSync,
+    existsSync,
+    globSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync
+} from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 
@@ -13,6 +26,8 @@ const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
 const REFLECTION_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-reflection/type-compiler';
+const TTSC_NODE_24_PATCH_VERSION = '0.28.1';
+const TTSC_NODE_24_PATCH_FILE = `ttsc+${TTSC_NODE_24_PATCH_VERSION}.patch`;
 
 interface PackageJson {
     version?: string;
@@ -563,6 +578,15 @@ function prepareCompilerWorkspaces(workspaces: WorkspacePackage[]): number {
         if (!tsconfig) continue;
 
         const projectRequire = createRequire(join(workspace.dir, 'package.json'));
+        try {
+            applyTtscNode24Patch(projectRequire);
+        } catch (error) {
+            console.error(
+                `tsf-install: could not apply the ttsc Node 24 compatibility patch for ${workspace.dir}: ${error instanceof Error ? error.message : String(error)}`
+            );
+            return 1;
+        }
+
         let ttscEntry: string;
         try {
             ttscEntry = projectRequire.resolve('ttsc');
@@ -593,6 +617,46 @@ function prepareCompilerWorkspaces(workspaces: WorkspacePackage[]): number {
         }
     }
     return 0;
+}
+
+function applyTtscNode24Patch(projectRequire: NodeRequire): void {
+    let ttscPackageJsonPath: string;
+    try {
+        ttscPackageJsonPath = projectRequire.resolve('ttsc/package.json');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'MODULE_NOT_FOUND') return;
+        throw error;
+    }
+
+    const ttscPackage = readPackageJson(ttscPackageJsonPath);
+    if (ttscPackage.version !== TTSC_NODE_24_PATCH_VERSION) return;
+
+    const foundationPackageRoot = findPackageRoot();
+    const patchesDirectory = join(foundationPackageRoot, 'patches');
+    const patchFilePath = join(patchesDirectory, TTSC_NODE_24_PATCH_FILE);
+    if (!existsSync(patchFilePath)) throw new Error(`Missing ${TTSC_NODE_24_PATCH_FILE}`);
+
+    const foundationRequire = createRequire(join(foundationPackageRoot, 'package.json'));
+    const patchPackageEntry = foundationRequire.resolve('patch-package');
+    const temporaryDirectory = mkdtempSync(join(tmpdir(), 'tsf-patch-package-'));
+    try {
+        const temporaryNodeModules = join(temporaryDirectory, 'node_modules');
+        const temporaryPatchesDirectory = join(temporaryDirectory, 'patches');
+        mkdirSync(temporaryNodeModules);
+        mkdirSync(temporaryPatchesDirectory);
+        writeFileSync(join(temporaryDirectory, 'package.json'), '{"private":true}\n');
+        copyFileSync(patchFilePath, join(temporaryPatchesDirectory, TTSC_NODE_24_PATCH_FILE));
+        symlinkSync(dirname(ttscPackageJsonPath), join(temporaryNodeModules, 'ttsc'), process.platform === 'win32' ? 'junction' : 'dir');
+
+        const result = spawnSync(process.execPath, [patchPackageEntry, '--patch-dir', 'patches', '--error-on-fail'], {
+            cwd: temporaryDirectory,
+            stdio: 'inherit'
+        });
+        if (result.error) throw result.error;
+        if (result.status !== 0) throw new Error(`patch-package exited with status ${result.status ?? 'unknown'}`);
+    } finally {
+        rmSync(temporaryDirectory, { force: true, recursive: true });
+    }
 }
 
 function main(args = process.argv.slice(2)): number {

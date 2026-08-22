@@ -1,0 +1,17 @@
+diff --git a/node_modules/ttsc/lib/launcher/internal/runtimeHookPreload.js b/node_modules/ttsc/lib/launcher/internal/runtimeHookPreload.js
+index a4359e5..da472a0 100644
+--- a/node_modules/ttsc/lib/launcher/internal/runtimeHookPreload.js
++++ b/node_modules/ttsc/lib/launcher/internal/runtimeHookPreload.js
+@@ -12,5 +12,11 @@ const runtimeHooks_1 = require("./runtimeHooks");
+  * bootstrap, which loads the entry itself; here we only register
+  * (idempotently).
+  */
+-(0, runtimeHooks_1.installRuntimeHooks)();
++const nodeMajorVersion = Number.parseInt(process.versions.node, 10);
++// Node 24 cannot synchronously resolve through module.registerHooks while an
++// isolated plugin descriptor is loading. The descriptor itself is CommonJS,
++// so its regular Node loader is sufficient.
++if (process.env.TTSC_PLUGIN_DESCRIPTOR_LOAD !== "1" || nodeMajorVersion !== 24) {
++    (0, runtimeHooks_1.installRuntimeHooks)();
++}
+ //# sourceMappingURL=runtimeHookPreload.js.map

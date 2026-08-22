@@ -4386,10 +4386,11 @@ function requestNodeHttps(port: number, path: string): Promise<{ certificateComm
             const chunks: Buffer[] = [];
             const socket = response.socket as TLSSocket;
             const certificate = socket.getPeerCertificate();
+            const commonName = certificate.subject?.CN;
             response.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
             response.on('end', () => {
                 resolve({
-                    certificateCommonName: certificate.subject?.CN,
+                    certificateCommonName: Array.isArray(commonName) ? commonName[0] : commonName,
                     statusCode: response.statusCode ?? 0,
                     text: Buffer.concat(chunks).toString()
                 });
