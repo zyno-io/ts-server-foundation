@@ -42,6 +42,7 @@ afterEach(() => {
     delete Env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT;
     delete Env.OTEL_METRICS_ENDPOINT_ENABLED;
     delete Env.OTEL_SDK_DISABLED;
+    delete Env.PYROSCOPE_APPLICATION_NAME;
     mock.restoreAll();
 });
 
@@ -120,6 +121,29 @@ describe('telemetry', () => {
         await shutdownTelemetry();
 
         assert.equal(pyroscopeStop.mock.callCount(), 1);
+    });
+
+    it('uses a safe package name when deriving the Pyroscope app name', () => {
+        const pyroscopeInit = mock.method(Pyroscope, 'init', () => undefined);
+        mock.method(Pyroscope, 'start', () => undefined);
+        const exporter = new InMemorySpanExporter();
+
+        init({ spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+
+        const pyroscopeOptions = pyroscopeInit.mock.calls[0].arguments[0] as { appName?: string };
+        assert.equal(pyroscopeOptions.appName, 'zyno-io-ts-server-foundation');
+    });
+
+    it('allows PYROSCOPE_APPLICATION_NAME to override the derived package name', () => {
+        const pyroscopeInit = mock.method(Pyroscope, 'init', () => undefined);
+        mock.method(Pyroscope, 'start', () => undefined);
+        const exporter = new InMemorySpanExporter();
+        Env.PYROSCOPE_APPLICATION_NAME = 'zynotalk-api-server';
+
+        init({ spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+
+        const pyroscopeOptions = pyroscopeInit.mock.calls[0].arguments[0] as { appName?: string };
+        assert.equal(pyroscopeOptions.appName, 'zynotalk-api-server');
     });
 
     it('records helper errors, root spans, and linked root spans', async () => {

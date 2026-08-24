@@ -57,6 +57,11 @@ interface PackageManagerInfo {
     manager: PackageManager;
 }
 
+interface YarnPnpCompatibilityResult {
+    detected: boolean;
+    changed: boolean;
+}
+
 interface BaselineVersions {
     framework: string;
     opentelemetryCore: string;
@@ -93,14 +98,19 @@ export function install(options: InstallOptions = {}): number {
     const workspacePkg = resolve(workspaceRoot) === resolve(projectDir) ? pkg : readPackageJson(join(workspaceRoot, 'package.json'));
     const packageManager = detectPackageManager(workspaceRoot, workspacePkg);
     const baselineVersions = readBaselineVersions();
-    const yarnConfigChanged = packageManager.manager === 'yarn' && ensureYarnPnpCompatibility(workspaceRoot, baselineVersions.opentelemetryCore);
+    const yarnPnpCompatibility =
+        packageManager.manager === 'yarn'
+            ? ensureYarnPnpCompatibility(workspaceRoot, baselineVersions.opentelemetryCore)
+            : { detected: false, changed: false };
+    const yarnConfigChanged = yarnPnpCompatibility.changed;
+    const pnpScriptChanged = yarnPnpCompatibility.detected && ensureYarnPnpLauncherScript(pkg);
     const postinstallChanged = ensurePostinstallScript(pkg);
     const changedPackages = new Map<string, PackageJson>();
     let compilerSetupChanged = false;
     let tsconfigChanged = false;
     const compilerWorkspaces = findCompilerWorkspaces(workspaceRoot, workspacePkg, packageJsonPath, pkg);
 
-    if (postinstallChanged) changedPackages.set(resolve(packageJsonPath), pkg);
+    if (postinstallChanged || pnpScriptChanged) changedPackages.set(resolve(packageJsonPath), pkg);
     for (const workspace of compilerWorkspaces) {
         const packageChanged = ensureCompilerSetup(workspace.pkg, baselineVersions, packageManager.manager === 'yarn');
         if (packageChanged) {
@@ -113,7 +123,7 @@ export function install(options: InstallOptions = {}): number {
     for (const [changedPackageJsonPath, changedPkg] of changedPackages) writePackageJson(changedPackageJsonPath, changedPkg);
     if (postinstallChanged) console.log('tsf-install: updated postinstall script');
     if (compilerSetupChanged) console.log('tsf-install: updated TypeScript compiler setup');
-    if (yarnConfigChanged) console.log("tsf-install: updated Yarn Plug'n'Play compatibility");
+    if (yarnConfigChanged || pnpScriptChanged) console.log("tsf-install: updated Yarn Plug'n'Play compatibility");
     if (tsconfigChanged) console.log('tsf-install: updated tsconfig compiler plugin');
 
     if ((compilerSetupChanged || yarnConfigChanged) && options.runPackageManager !== false && process.env[PACKAGE_MANAGER_RERUN_ENV] !== '1') {
@@ -192,17 +202,48 @@ function readBaselineVersions(): BaselineVersions {
     };
 }
 
-function ensureYarnPnpCompatibility(projectRoot: string, opentelemetryCoreVersion: string): boolean {
+function ensureYarnPnpCompatibility(projectRoot: string, opentelemetryCoreVersion: string): YarnPnpCompatibilityResult {
     const configPath = join(projectRoot, '.yarnrc.yml');
     const document = parseDocument(existsSync(configPath) ? readFileSync(configPath, 'utf8') : '');
     if (document.errors.length > 0) throw document.errors[0];
     const nodeLinker = document.get('nodeLinker');
-    if (nodeLinker !== undefined && nodeLinker !== 'pnp') return false;
+    if (nodeLinker !== undefined && nodeLinker !== 'pnp') return { detected: false, changed: false };
 
+    let changed = false;
+    if (document.get('pnpEnableEsmLoader') !== true) {
+        document.set('pnpEnableEsmLoader', true);
+        changed = true;
+    }
     const dependencyPath = ['packageExtensions', '@sentry/node@*', 'dependencies', '@opentelemetry/core'];
-    if (document.getIn(dependencyPath) === opentelemetryCoreVersion) return false;
-    document.setIn(dependencyPath, opentelemetryCoreVersion);
-    writeFileSync(configPath, String(document));
+    if (document.getIn(dependencyPath) !== opentelemetryCoreVersion) {
+        document.setIn(dependencyPath, opentelemetryCoreVersion);
+        changed = true;
+    }
+    if (changed) writeFileSync(configPath, String(document));
+    return { detected: true, changed };
+}
+
+function ensureYarnPnpLauncherScript(pkg: PackageJson): boolean {
+    const script = pkg.scripts?.tsf;
+    if (!script || script.includes('.pnp.loader.mjs')) return false;
+
+    const pnpRequire = '--require=./.pnp.cjs';
+    if (!script.includes(pnpRequire)) return false;
+
+    const pnpLoader = '--experimental-loader=./.pnp.loader.mjs';
+    const quotedNodeOptions = /NODE_OPTIONS=(['"])([^'"\r\n]*)\1/;
+    const updatedScript = script.replace(quotedNodeOptions, (match, quote: string, nodeOptions: string) => {
+        if (!nodeOptions.includes(pnpRequire)) return match;
+        return `NODE_OPTIONS=${quote}${nodeOptions} ${pnpLoader}${quote}`;
+    });
+    if (updatedScript !== script) {
+        pkg.scripts!.tsf = updatedScript;
+        return true;
+    }
+
+    const unquotedNodeOptions = `NODE_OPTIONS=${pnpRequire}`;
+    if (!script.includes(unquotedNodeOptions)) return false;
+    pkg.scripts!.tsf = script.replace(unquotedNodeOptions, `NODE_OPTIONS='${pnpRequire} ${pnpLoader}'`);
     return true;
 }
 

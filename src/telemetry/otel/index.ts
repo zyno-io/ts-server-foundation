@@ -291,7 +291,11 @@ function isPyroscopeEnabled(options: TelemetryInitOptions['pyroscope']): options
 
 function createPyroscopeConfig(options: TelemetryInitOptions, pyroscopeOptions: PyroscopeOptions): PyroscopeClientOptions {
     const packageJson = getPackageJson();
-    const appName = pyroscopeOptions.appName ?? options.serviceName ?? packageJson?.name;
+    const appName =
+        pyroscopeOptions.appName ??
+        options.serviceName ??
+        readTelemetrySetting('PYROSCOPE_APPLICATION_NAME') ??
+        sanitizePyroscopePackageName(packageJson?.name);
     const serviceVersion = options.serviceVersion ?? packageJson?.version;
     const deploymentEnvironment = readTelemetrySetting('APP_ENV');
     const tags: Record<string, string | number> = { 'host.name': hostname() };
@@ -305,6 +309,12 @@ function createPyroscopeConfig(options: TelemetryInitOptions, pyroscopeOptions: 
         ...(appName ? { appName } : {}),
         tags
     };
+}
+
+function sanitizePyroscopePackageName(packageName: string | undefined): string | undefined {
+    if (!packageName) return undefined;
+    const sanitizedName = packageName.replace(/[^A-Za-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '');
+    return sanitizedName || undefined;
 }
 
 function loadPyroscope(): PyroscopeClient {

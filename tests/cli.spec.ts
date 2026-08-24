@@ -23,6 +23,7 @@ import { afterEach, describe, it, mock } from 'node:test';
 import { BaseAppConfig } from '../src/app';
 import { getDevStatePaths, pruneDevState, readDevState, registerDevRun, unregisterDevRun, updateDevState } from '../src/cli/dev-state';
 import { genProto } from '../src/cli/tsf-gen-proto';
+import { removeYarnPnpEsmLoader } from '../src/cli/tsf-dev';
 import { normalizeReplUrl, parseReplCliArgs, resolveExistingReplTarget } from '../src/cli/tsf-repl';
 import { resolveTestWorkerConcurrency } from '../src/cli/tsf-test';
 import { resetLogSink, setLogSink, type LogEntry } from '../src/services/logger';
@@ -424,6 +425,49 @@ describe('CLI', () => {
         };
         assert.equal(tsconfig.reflection, true);
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
+    });
+
+    it("configures the TSF launcher for Yarn Plug'n'Play ESM dependencies", () => {
+        const dir = tempDir();
+        writeFileSync(
+            join(dir, 'package.json'),
+            JSON.stringify(
+                {
+                    name: 'fixture',
+                    packageManager: 'yarn@4.17.1',
+                    scripts: {
+                        tsf: 'NODE_OPTIONS=--require=./.pnp.cjs tsf-dev'
+                    },
+                    devDependencies: {
+                        '@zyno-io/ts-server-foundation': '*',
+                        ttsc: expectedTtscVersion,
+                        typescript: expectedTypescriptVersion
+                    }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(join(dir, '.yarnrc.yml'), 'nodeLinker: pnp\n');
+        writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
+
+        const result = runCli('tsf-install.js', ['--no-install'], dir);
+
+        assert.equal(result.status, 0, result.stderr);
+        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+        assert.equal(pkg.scripts?.tsf, "NODE_OPTIONS='--require=./.pnp.cjs --experimental-loader=./.pnp.loader.mjs' tsf-dev");
+        const yarnrc = readFileSync(join(dir, '.yarnrc.yml'), 'utf8');
+        assert.match(yarnrc, /pnpEnableEsmLoader: true/);
+        assert.match(yarnrc, /[\"']@sentry\/node@\*[\"']:[\s\S]+[\"']@opentelemetry\/core[\"']:/);
+    });
+
+    it('removes only Yarn’s asynchronous PnP loader from compiler processes', () => {
+        assert.equal(removeYarnPnpEsmLoader('--require=./.pnp.cjs --experimental-loader=./.pnp.loader.mjs'), '--require=./.pnp.cjs');
+        assert.equal(
+            removeYarnPnpEsmLoader('--require /project/.pnp.cjs --experimental-loader file:///project/.pnp.loader.mjs --trace-warnings'),
+            '--require /project/.pnp.cjs --trace-warnings'
+        );
+        assert.equal(removeYarnPnpEsmLoader('--require=./hook.cjs'), '--require=./hook.cjs');
     });
 
     it('does not modify an installed dependency during its postinstall', () => {

@@ -6,7 +6,7 @@ import { existsSync, globSync, mkdirSync, readdirSync, readFileSync, statSync, u
 import { dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { Env } from '../env';
+import { Env, type EnvObject } from '../env';
 import { cleanDist, extractTsconfigArg, findProjectRoot, resolveFromProject, runNode } from './common';
 import {
     TSF_DEV_RUNNER_PID_ENV,
@@ -277,7 +277,24 @@ function cmdOpenApiGenerate(args: string[]): number {
 }
 
 function runTsc(tsconfig: string): number {
-    return runNode([getTscPath(), '-p', tsconfig], projectDir).status;
+    return runNode([getTscPath(), '-p', tsconfig], projectDir, getCompilerEnvironment()).status;
+}
+
+function getCompilerEnvironment(): EnvObject {
+    // Node 24 cannot synchronously call ttsc's module.registerHooks through
+    // Yarn's asynchronous PnP ESM loader. The CJS PnP preload remains intact.
+    const nodeOptions = removeYarnPnpEsmLoader(Env.NODE_OPTIONS);
+    if (nodeOptions === Env.NODE_OPTIONS) return Env;
+    return { ...Env, NODE_OPTIONS: nodeOptions };
+}
+
+export function removeYarnPnpEsmLoader(nodeOptions: string | undefined): string | undefined {
+    if (!nodeOptions) return nodeOptions;
+    const withoutPnpEsmLoader = nodeOptions
+        .replace(/(?:^|\s)--(?:experimental-)?loader(?:=|\s+)(?:file:\/\/)?\S*\.pnp\.loader\.mjs(?=\s|$)/g, ' ')
+        .trim()
+        .replace(/\s{2,}/g, ' ');
+    return withoutPnpEsmLoader || undefined;
 }
 
 function runTscIfNeeded(tsconfig: string, existingStatus = getBuildStatus(tsconfig)): number {
