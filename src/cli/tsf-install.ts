@@ -26,7 +26,7 @@ const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
 const REFLECTION_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-reflection/type-compiler';
-const TTSC_NODE_24_PATCH_VERSION = '0.28.1';
+const TTSC_NODE_24_PATCH_VERSION = '0.28.2';
 const TTSC_NODE_24_PATCH_FILE = `ttsc+${TTSC_NODE_24_PATCH_VERSION}.patch`;
 
 interface PackageJson {

@@ -494,6 +494,7 @@ describe('CLI', () => {
         const dir = tempDir();
         const marker = join(dir, 'prepared.json');
         const ttscPackage = join(dir, 'node_modules', 'ttsc');
+        const runtimeHookPreload = join(ttscPackage, 'lib', 'launcher', 'internal', 'runtimeHookPreload.js');
         mkdirSync(ttscPackage, { recursive: true });
         writeFileSync(
             join(dir, 'package.json'),
@@ -511,7 +512,21 @@ describe('CLI', () => {
             )
         );
         writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
-        writeFileSync(join(ttscPackage, 'package.json'), JSON.stringify({ name: 'ttsc', main: 'index.js' }));
+        writeFileSync(join(ttscPackage, 'package.json'), JSON.stringify({ name: 'ttsc', version: expectedTtscVersion, main: 'index.js' }));
+        mkdirSync(dirname(runtimeHookPreload), { recursive: true });
+        writeFileSync(
+            runtimeHookPreload,
+            [
+                'const runtimeHooks_1 = require("./runtimeHooks");',
+                '/**',
+                ' * bootstrap, which loads the entry itself; here we only register',
+                ' * (idempotently).',
+                ' */',
+                '(0, runtimeHooks_1.installRuntimeHooks)();',
+                '//# sourceMappingURL=runtimeHookPreload.js.map',
+                ''
+            ].join('\n')
+        );
         writeFileSync(
             join(ttscPackage, 'index.js'),
             [
@@ -532,6 +547,7 @@ describe('CLI', () => {
             cwd: realpathSync(dir),
             tsconfig: join(realpathSync(dir), 'tsconfig.json')
         });
+        assert.match(readFileSync(runtimeHookPreload, 'utf8'), /TTSC_PLUGIN_DESCRIPTOR_LOAD/);
     });
 
     it('preserves an existing postinstall script and installs itself only once', () => {
