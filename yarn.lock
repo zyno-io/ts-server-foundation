@@ -339,6 +339,18 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@datadog/pprof@npm:5.14.4":
+  version: 5.14.4
+  resolution: "@datadog/pprof@npm:5.14.4"
+  dependencies:
+    node-gyp: "npm:latest"
+    node-gyp-build: "npm:^4.8.4"
+    pprof-format: "npm:^2.2.1"
+    source-map: "npm:^0.7.4"
+  checksum: 10c0/6386c1660892c9910fa4da9c0b7b76bdfd1b3026da3f4a6457c80a93d3f9f87cbaa5c4f30bb739704e2f88667ef21ec9fc6686d3495692ebd82b810cd529c74e
+  languageName: node
+  linkType: hard
+
 "@docsearch/css@npm:3.8.2":
   version: 3.8.2
   resolution: "@docsearch/css@npm:3.8.2"
@@ -1185,6 +1197,28 @@ __metadata:
   version: 0.4.0
   resolution: "@pinojs/redact@npm:0.4.0"
   checksum: 10c0/4b311ba17ee0cf154ff9c39eb063ec04cd0d0017cb3750efcdf06c2d485df3e1095e13e872175993568c5568c23e4508dd877c981bbc9c5ae5e384d569efcdff
+  languageName: node
+  linkType: hard
+
+"@pyroscope/nodejs@npm:^0.6.3":
+  version: 0.6.3
+  resolution: "@pyroscope/nodejs@npm:0.6.3"
+  dependencies:
+    "@datadog/pprof": "npm:5.14.4"
+    debug: "npm:^4.4.3"
+    p-limit: "npm:^7.3.0"
+    pprof-format: "npm:^2.2.1"
+    regenerator-runtime: "npm:^0.14.1"
+    source-map: "npm:^0.7.6"
+  peerDependencies:
+    express: ^4.0.0 || ^5.0.0
+    fastify: ^5.8.5
+  peerDependenciesMeta:
+    express:
+      optional: true
+    fastify:
+      optional: true
+  checksum: 10c0/0399a53f4e68b3339b769a08b39f3b9f9713f7582cee24707136542dfee03ecb8bfa28b5022b0c5f47ddff343e68b182e102ca79bc2e59eeceacf14ddba635a7
   languageName: node
   linkType: hard
 
@@ -2407,6 +2441,7 @@ __metadata:
     "@opentelemetry/sdk-metrics": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-base": "npm:^2.10.0"
     "@opentelemetry/sdk-trace-node": "npm:^2.10.0"
+    "@pyroscope/nodejs": "npm:^0.6.3"
     "@sentry/node": "npm:^10.70.0"
     "@ttsc/graph": "npm:^0.28.1"
     "@types/bcrypt": "npm:^6.0.0"
@@ -4749,6 +4784,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"p-limit@npm:^7.3.0":
+  version: 7.3.1
+  resolution: "p-limit@npm:7.3.1"
+  dependencies:
+    yocto-queue: "npm:^1.2.1"
+  checksum: 10c0/49b7d7fcc244d4659fa3b260c7b4e632bc72333c60e76e4cd24c7befdeb9b8e22da644e5064e83df9e2ded75245e3e3b9df0e9cf8500b08db8ebf58ac18c6764
+  languageName: node
+  linkType: hard
+
 "package-manager-detector@npm:^1.6.0":
   version: 1.8.0
   resolution: "package-manager-detector@npm:1.8.0"
@@ -5061,6 +5105,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"pprof-format@npm:^2.2.1":
+  version: 2.3.1
+  resolution: "pprof-format@npm:2.3.1"
+  checksum: 10c0/5372d63b5c3152c550a79edd132c1f99be766df5558b14a1a85904756bd9fd12f26e41e861c223742693724aaec5f9395983500ef1566577a32490e175110d99
+  languageName: node
+  linkType: hard
+
 "preact@npm:^10.0.0":
   version: 10.29.8
   resolution: "preact@npm:10.29.8"
@@ -5201,6 +5252,13 @@ __metadata:
   version: 1.2.0
   resolution: "redis-errors@npm:1.2.0"
   checksum: 10c0/5b316736e9f532d91a35bff631335137a4f974927bb2fb42bf8c2f18879173a211787db8ac4c3fde8f75ed6233eb0888e55d52510b5620e30d69d7d719c8b8a7
+  languageName: node
+  linkType: hard
+
+"regenerator-runtime@npm:^0.14.1":
+  version: 0.14.1
+  resolution: "regenerator-runtime@npm:0.14.1"
+  checksum: 10c0/1b16eb2c4bceb1665c89de70dcb64126a22bc8eb958feef3cd68fe11ac6d2a4899b5cd1b80b0774c7c03591dc57d16631a7f69d2daa2ec98100e2f29f7ec4cc4
   languageName: node
   linkType: hard
 
@@ -5652,6 +5710,13 @@ __metadata:
   version: 0.6.1
   resolution: "source-map@npm:0.6.1"
   checksum: 10c0/ab55398007c5e5532957cb0beee2368529618ac0ab372d789806f5718123cc4367d57de3904b4e6a4170eb5a0b0f41373066d02ca0735a0c4d75c7d328d3e011
+  languageName: node
+  linkType: hard
+
+"source-map@npm:^0.7.4, source-map@npm:^0.7.6":
+  version: 0.7.6
+  resolution: "source-map@npm:0.7.6"
+  checksum: 10c0/59f6f05538539b274ba771d2e9e32f6c65451982510564438e048bc1352f019c6efcdc6dd07909b1968144941c14015c2c7d4369fb7c4d7d53ae769716dcc16c
   languageName: node
   linkType: hard
 
@@ -6535,6 +6600,13 @@ __metadata:
   bin:
     yaml: bin.mjs
   checksum: 10c0/f340718df45e97a9551b9bf9dac61c80050bc464513b710debfb5067c380c8472e3b67809cffacb4ab5ffb5e66ef9310816c88b05f371cec60abfedd8c88e0a2
+  languageName: node
+  linkType: hard
+
+"yocto-queue@npm:^1.2.1":
+  version: 1.2.2
+  resolution: "yocto-queue@npm:1.2.2"
+  checksum: 10c0/36d4793e9cf7060f9da543baf67c55e354f4862c8d3d34de1a1b1d7c382d44171315cc54abf84d8900b8113d742b830108a1434f4898fb244f9b7e8426d4b8f5
   languageName: node
   linkType: hard
 

@@ -24,6 +24,7 @@ export const OtelState = {
     tracerProvider: undefined as NodeTracerProvider | undefined,
     meterProvider: undefined as MeterProvider | undefined,
     prometheusExporter: undefined as PrometheusExporter | undefined,
+    pyroscope: undefined as { stop(): Promise<void> } | undefined,
     unregisterInstrumentations: undefined as ReturnType<typeof registerInstrumentations> | undefined,
     metricsEndpointEnabled: false,
     metricsEndpointPreference: undefined as boolean | undefined,

@@ -43,6 +43,7 @@ Options:
 | `enableMetricsEndpoint`            | Enables the Prometheus `/metrics` endpoint.                  |
 | `spanProcessors`                   | Custom trace span processors.                                |
 | `metricReaders`                    | Custom metric readers.                                       |
+| `pyroscope`                        | Enables Grafana Pyroscope after tracing is installed.        |
 
 ## Environment
 
@@ -56,6 +57,28 @@ Options:
 | `OTEL_METRICS_ENDPOINT_ENABLED`       | Enables or disables `/metrics`.           |
 
 Trace providers are installed when an OTLP trace endpoint or custom span processors are configured. Metric providers are installed when metric push, `/metrics`, or custom metric readers are configured.
+
+## Grafana Pyroscope
+
+The Pyroscope SDK is installed with TSF, but profiling remains opt-in. Enable it through the early telemetry bootstrap. TSF starts Pyroscope only when it has installed an OpenTelemetry trace provider—configure an OTLP trace endpoint or a custom span processor—and stops it through the normal application telemetry shutdown path. Metrics-only telemetry does not activate profiling.
+
+```ts
+import { init } from '@zyno-io/ts-server-foundation/otel';
+
+init({
+    serviceName: 'api',
+    pyroscope: {
+        serverAddress: process.env.PYROSCOPE_SERVER_ADDRESS,
+        basicAuthUser: process.env.PYROSCOPE_BASIC_AUTH_USER,
+        basicAuthPassword: process.env.PYROSCOPE_BASIC_AUTH_PASSWORD,
+        tags: { region: process.env.REGION ?? 'unknown' }
+    }
+});
+```
+
+Use `pyroscope: true` to use the Pyroscope SDK's environment-based configuration without supplying options. A Pyroscope object with `enabled: false` is disabled. TSF derives the Pyroscope application name from `serviceName` (or the package name) and adds `service.version`, `deployment.environment`, and `host.name` labels; explicit `tags` override those defaults. `OTEL_SDK_DISABLED` and `disabled: true` prevent both tracing and Pyroscope startup.
+
+Pyroscope continuous profiles can be correlated with traces by service and labels. Grafana's span-level trace-to-profile view requires a language-specific profiling bridge, which is separate from this integration.
 
 ## Resources And Export
 

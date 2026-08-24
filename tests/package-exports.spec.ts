@@ -145,12 +145,17 @@ describe('package exports', () => {
                 import {
                     init,
                     shutdownTelemetry,
+                    type PyroscopeOptions,
                     type TelemetryInitOptions
                 } from '@zyno-io/ts-server-foundation/otel';
 
                 type Input = HttpBody<{ birthday: DateString }>;
                 const reflected: Type = typeOf<Input>();
-                const telemetry: TelemetryInitOptions = { disabled: true, enableRedisInstrumentation: true };
+                const pyroscope: PyroscopeOptions = {
+                    serverAddress: 'http://pyroscope:4040',
+                    wall: { collectCpuTime: true }
+                };
+                const telemetry: TelemetryInitOptions = { enableRedisInstrumentation: true, pyroscope };
                 const availability: AvailabilityMonitor | undefined = undefined;
                 void [
                     AlphanumericCharacters,
@@ -184,6 +189,7 @@ describe('package exports', () => {
                     init,
                     installSentry,
                     monitorRedisAvailability,
+                    pyroscope,
                     registerAppCleanup,
                     reflected,
                     serializeOpenApiSchema,

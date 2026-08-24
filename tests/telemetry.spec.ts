@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { hostname } from 'node:os';
 import { afterEach, describe, it, mock } from 'node:test';
 
 import type { Instrumentation } from '@opentelemetry/instrumentation';
@@ -21,12 +22,17 @@ import {
     withRootSpan,
     withSpan
 } from '../src';
-import { init, resetTelemetryForTests } from '../src/telemetry/otel';
+import { init, resetTelemetryForTests, shutdownTelemetry } from '../src/telemetry/otel';
 import * as otel from '../src/telemetry/otel';
 import { installSentry, resetSentryForTests } from '../src/telemetry/sentry';
 
 const requireFromTest = createRequire(__filename);
 const Sentry = requireFromTest('@sentry/node') as typeof import('@sentry/node');
+const Pyroscope = requireFromTest('@pyroscope/nodejs') as {
+    init(options: Record<string, unknown>): void;
+    start(): void;
+    stop(): Promise<void>;
+};
 
 afterEach(() => {
     resetTelemetryForTests();
@@ -86,6 +92,34 @@ describe('telemetry', () => {
         assert.equal(spans[0].attributes.alpha, 'beta');
         assert.equal(spans[0].attributes.runtime, 42);
         assert.equal(spans[0].spanContext().traceId, result);
+    });
+
+    it('starts and stops Pyroscope only alongside tracing', async () => {
+        const pyroscopeInit = mock.method(Pyroscope, 'init', () => undefined);
+        const pyroscopeStart = mock.method(Pyroscope, 'start', () => undefined);
+        const pyroscopeStop = mock.method(Pyroscope, 'stop', async () => undefined);
+
+        init({ pyroscope: true });
+
+        assert.equal(pyroscopeInit.mock.callCount(), 0);
+        assert.equal(pyroscopeStart.mock.callCount(), 0);
+
+        const exporter = new InMemorySpanExporter();
+        init({ serviceName: 'pyroscope-test', spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+
+        assert.equal(pyroscopeInit.mock.callCount(), 1);
+        assert.equal(pyroscopeStart.mock.callCount(), 1);
+        const pyroscopeOptions = pyroscopeInit.mock.calls[0].arguments[0] as {
+            appName?: string;
+            tags?: Record<string, string | number>;
+        };
+        assert.equal(pyroscopeOptions.appName, 'pyroscope-test');
+        assert.equal(pyroscopeOptions.tags?.['host.name'], hostname());
+        assert.equal(typeof pyroscopeOptions.tags?.['service.version'], 'string');
+
+        await shutdownTelemetry();
+
+        assert.equal(pyroscopeStop.mock.callCount(), 1);
     });
 
     it('records helper errors, root spans, and linked root spans', async () => {
@@ -286,8 +320,11 @@ describe('telemetry', () => {
     });
 
     it('shuts down installed telemetry when the app stops', async () => {
+        mock.method(Pyroscope, 'init', () => undefined);
+        mock.method(Pyroscope, 'start', () => undefined);
+        const pyroscopeStop = mock.method(Pyroscope, 'stop', async () => undefined);
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'app-shutdown-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'app-shutdown-test', spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
 
         const tf = TestingHelpers.createTestingFacade({});
         await tf.start();
@@ -298,6 +335,7 @@ describe('telemetry', () => {
 
         assert.equal(isTelemetryInitialized(), false);
         assert.equal(otel.OtelState.tracerProvider, undefined);
+        assert.equal(pyroscopeStop.mock.callCount(), 1);
     });
 
     it('adds active trace ids to HTTP request context', async () => {
