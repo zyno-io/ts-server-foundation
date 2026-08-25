@@ -5,7 +5,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
-const os = require('node:os');
 const path = require('node:path');
 
 const MAX_BINARY_BYTES = 128 * 1024 * 1024;
@@ -22,11 +21,12 @@ async function main() {
     if (digest !== manifest.binarySha256) throw new Error(`binary checksum mismatch: expected ${manifest.binarySha256}, received ${digest}`);
     if (binary.length !== manifest.binarySize) throw new Error(`binary size mismatch: expected ${manifest.binarySize}, received ${binary.length}`);
 
-    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'tsf-type-compiler-'));
+    const destinationDirectory = path.dirname(input.destination);
+    fs.mkdirSync(destinationDirectory, { recursive: true });
+    const temporaryDirectory = fs.mkdtempSync(path.join(destinationDirectory, '.tsf-type-compiler-'));
     const temporaryBinary = path.join(temporaryDirectory, path.basename(input.destination));
     try {
         fs.writeFileSync(temporaryBinary, binary, { mode: 0o755 });
-        fs.mkdirSync(path.dirname(input.destination), { recursive: true });
         if (fs.existsSync(input.destination)) return;
         try {
             fs.renameSync(temporaryBinary, input.destination);
