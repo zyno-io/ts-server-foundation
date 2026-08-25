@@ -4,7 +4,7 @@ import { LeaderService } from '../leader';
 import { ScopedLogger } from '../logger';
 import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData } from './queue';
 import { WorkerRecorderService } from './recorder';
-import { BaseJob, getRegisteredWorkerJobs, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
+import { BaseJob, getRegisteredWorkerJobs, getWorkerJobMetadata, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
 import { notifyWorkerObservers } from './observer';
 import { Worker as BullWorker, type Job as BullJob } from 'bullmq';
 
@@ -36,11 +36,13 @@ export class WorkerRunnerService {
         this.running = true;
         const registeredJobs = this.getRegisteredJobs();
         for (const jobClass of registeredJobs) {
+            const metadata = getWorkerJobMetadata(jobClass);
             this.logger.info('Registering job', {
                 job: {
                     name: jobClass.name,
                     queue: this.queueRegistry.getQueueName(jobClass),
-                    schedule: jobClass.CRON_SCHEDULE
+                    schedule: metadata.cronSchedule,
+                    ...(metadata.cronTz === null ? {} : { timeZone: metadata.cronTz })
                 }
             });
         }
@@ -111,13 +113,16 @@ export class WorkerRunnerService {
     async removeStaleBullMqCronJobs(): Promise<void> {
         const desiredSchedules: BullMqCronJobSchedule[] = [];
         for (const jobClass of getRegisteredWorkerJobs()) {
-            const pattern = jobClass.CRON_SCHEDULE;
+            const metadata = getWorkerJobMetadata(jobClass);
+            const pattern = metadata.cronSchedule;
             if (!pattern || !this.isRegisteredJob(jobClass)) continue;
-            desiredSchedules.push({
+            const desiredSchedule: BullMqCronJobSchedule = {
                 queue: this.queueRegistry.getQueueName(jobClass),
                 name: jobClass.name,
                 pattern
-            });
+            };
+            if (metadata.cronTz !== null) desiredSchedule.tz = metadata.cronTz;
+            desiredSchedules.push(desiredSchedule);
         }
 
         const removed = await this.queueRegistry.removeStaleBullMqJobSchedulers(desiredSchedules);
@@ -207,21 +212,23 @@ export class WorkerRunnerService {
 
     private scheduleCronJobs(): void {
         for (const jobClass of getRegisteredWorkerJobs()) {
-            const schedule = jobClass.CRON_SCHEDULE;
+            const metadata = getWorkerJobMetadata(jobClass);
+            const schedule = metadata.cronSchedule;
             if (!schedule || !this.isRegisteredJob(jobClass)) continue;
             const repeatKey = `${jobClass.name}:${schedule}`;
             if (this.hasQueuedRepeatJob(repeatKey)) continue;
-            const job = this.queueRegistry.add(jobClass, {}, { delay: getCronDelayMs(schedule), repeatKey });
+            const job = this.queueRegistry.add(jobClass, {}, { delay: getCronDelayMs(schedule, metadata.cronTz), repeatKey });
             this.schedule(job);
         }
     }
 
     private rescheduleCronJob(job: QueuedWorkerJob): void {
         const repeatKey = job.options.repeatKey;
-        const schedule = job.jobClass.CRON_SCHEDULE;
+        const metadata = getWorkerJobMetadata(job.jobClass);
+        const schedule = metadata.cronSchedule;
         if (!this.running || !repeatKey || !schedule) return;
         if (this.hasQueuedRepeatJob(repeatKey)) return;
-        const next = this.queueRegistry.add(job.jobClass, {}, { delay: getCronDelayMs(schedule), repeatKey });
+        const next = this.queueRegistry.add(job.jobClass, {}, { delay: getCronDelayMs(schedule, metadata.cronTz), repeatKey });
         this.schedule(next);
     }
 
@@ -324,25 +331,22 @@ export class WorkerRunnerService {
 
     private async scheduleBullMqCronJobs(): Promise<void> {
         for (const jobClass of getRegisteredWorkerJobs()) {
-            const schedule = jobClass.CRON_SCHEDULE;
+            const metadata = getWorkerJobMetadata(jobClass);
+            const schedule = metadata.cronSchedule;
             if (!schedule || !this.isRegisteredJob(jobClass)) continue;
             const repeatKey = `${jobClass.name}:${schedule}`;
             const queue = this.queueRegistry.getBullQueue(this.queueRegistry.getQueueName(jobClass));
-            await queue.upsertJobScheduler(
-                repeatKey,
-                { pattern: schedule },
-                {
-                    name: jobClass.name,
-                    data: {
-                        data: {},
-                        options: { repeatKey }
-                    },
-                    opts: {
-                        removeOnComplete: false,
-                        removeOnFail: false
-                    }
+            await queue.upsertJobScheduler(repeatKey, metadata.cronTz === null ? { pattern: schedule } : { pattern: schedule, tz: metadata.cronTz }, {
+                name: jobClass.name,
+                data: {
+                    data: {},
+                    options: { repeatKey }
+                },
+                opts: {
+                    removeOnComplete: false,
+                    removeOnFail: false
                 }
-            );
+            });
         }
     }
 
@@ -427,7 +431,7 @@ function getJobLogData(job: QueuedWorkerJob): { queue: string; id: string; name:
     };
 }
 
-function getCronDelayMs(schedule: string): number {
+function getCronDelayMs(schedule: string, timeZone: string | null): number {
     const parts = schedule.trim().split(/\s+/);
     if (parts.length !== 5 && parts.length !== 6) throw new Error(`Invalid cron schedule "${schedule}"`);
     const fields = parts.length === 5 ? ['0', ...parts] : parts;
@@ -440,7 +444,7 @@ function getCronDelayMs(schedule: string): number {
         daysOfWeek: uniqueSorted(parseCronField(fields[5], 0, 7).map(value => (value === 7 ? 0 : value)))
     };
     const now = new Date();
-    const next = nextCronDate(cron, now);
+    const next = nextCronDate(cron, now, timeZone);
     return Math.max(1, next.getTime() - now.getTime());
 }
 
@@ -453,35 +457,88 @@ interface ParsedCron {
     daysOfWeek: number[];
 }
 
-function nextCronDate(cron: ParsedCron, now: Date): Date {
+function nextCronDate(cron: ParsedCron, now: Date, timeZone: string | null): Date {
+    const getCronTime = getCronTimeGetter(timeZone);
     const candidate = new Date(now.getTime() + 1000);
     candidate.setMilliseconds(0);
     const maxMinutes = 366 * 5 * 24 * 60;
 
     for (let attempt = 0; attempt < maxMinutes; attempt++) {
-        if (matchesCronMinute(candidate, cron)) {
-            const second = cron.seconds.find(value => value >= candidate.getSeconds());
+        const cronTime = getCronTime(candidate);
+        if (matchesCronMinute(cronTime, cron)) {
+            const second = cron.seconds.find(value => value >= cronTime.seconds);
             if (second !== undefined) {
                 const next = new Date(candidate);
                 next.setSeconds(second, 0);
                 if (next > now) return next;
             }
         }
-        candidate.setMinutes(candidate.getMinutes() + 1, 0, 0);
+        candidate.setTime(candidate.getTime() + 60_000);
+        candidate.setSeconds(0, 0);
     }
 
     throw new Error('Could not calculate next cron execution within five years');
 }
 
-function matchesCronMinute(date: Date, cron: ParsedCron): boolean {
-    if (!cron.minutes.includes(date.getMinutes())) return false;
-    if (!cron.hours.includes(date.getHours())) return false;
-    if (!cron.months.includes(date.getMonth() + 1)) return false;
+interface CronTime {
+    seconds: number;
+    minutes: number;
+    hours: number;
+    dayOfMonth: number;
+    month: number;
+    dayOfWeek: number;
+}
+
+function getCronTimeGetter(timeZone: string | null): (date: Date) => CronTime {
+    if (timeZone === null) {
+        return date => ({
+            seconds: date.getSeconds(),
+            minutes: date.getMinutes(),
+            hours: date.getHours(),
+            dayOfMonth: date.getDate(),
+            month: date.getMonth() + 1,
+            dayOfWeek: date.getDay()
+        });
+    }
+
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        weekday: 'short',
+        month: 'numeric',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric',
+        second: 'numeric',
+        hourCycle: 'h23'
+    });
+    return date => {
+        const parts = new Map(formatter.formatToParts(date).map(part => [part.type, part.value]));
+        return {
+            seconds: Number(parts.get('second')),
+            minutes: Number(parts.get('minute')),
+            hours: Number(parts.get('hour')),
+            dayOfMonth: Number(parts.get('day')),
+            month: Number(parts.get('month')),
+            dayOfWeek: getDayOfWeek(parts.get('weekday') ?? '')
+        };
+    };
+}
+
+function getDayOfWeek(value: string): number {
+    const dayOfWeek = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(value);
+    if (dayOfWeek < 0) throw new Error(`Could not determine cron day of week "${value}"`);
+    return dayOfWeek;
+}
+
+function matchesCronMinute(time: CronTime, cron: ParsedCron): boolean {
+    if (!cron.minutes.includes(time.minutes)) return false;
+    if (!cron.hours.includes(time.hours)) return false;
+    if (!cron.months.includes(time.month)) return false;
 
     const dayOfMonthWildcard = cron.daysOfMonth.length === 31;
     const dayOfWeekWildcard = cron.daysOfWeek.length === 7;
-    const dayOfMonthMatches = cron.daysOfMonth.includes(date.getDate());
-    const dayOfWeekMatches = cron.daysOfWeek.includes(date.getDay());
+    const dayOfMonthMatches = cron.daysOfMonth.includes(time.dayOfMonth);
+    const dayOfWeekMatches = cron.daysOfWeek.includes(time.dayOfWeek);
 
     if (dayOfMonthWildcard && dayOfWeekWildcard) return true;
     if (dayOfMonthWildcard) return dayOfWeekMatches;

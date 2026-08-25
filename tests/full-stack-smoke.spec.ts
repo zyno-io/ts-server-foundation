@@ -54,8 +54,6 @@ class FullStackSmokeConfig extends BaseAppConfig {
 
 @WorkerJob()
 class FullStackSmokeJob extends BaseJob<{ id: number; name: string }, { output: string }> {
-    static override QUEUE_NAME = activeQueueName;
-
     constructor(private readonly db: FullStackSmokeDatabase) {
         super();
     }
@@ -142,7 +140,6 @@ describe('full-stack smoke parity', () => {
 
             activeMySQLConfig = mysqlConfig;
             activeQueueName = `full-stack-smoke-${process.pid}-${Date.now()}`;
-            FullStackSmokeJob.QUEUE_NAME = activeQueueName;
             process.env.APP_ENV = 'development';
 
             const setupDb = new FullStackSmokeDatabase();

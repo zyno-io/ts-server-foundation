@@ -11,6 +11,7 @@ import {
     ExecuteResult,
     getContextProp,
     getRegisteredWorkerJobs,
+    getWorkerJobMetadata,
     type LogEntry,
     QueryResult,
     QueuedWorkerJob,
@@ -111,6 +112,13 @@ class DailyCronJob extends BaseJob<void, string> {
     }
 }
 
+@WorkerJob({ queueName: 'daily-new-york', cronSchedule: '0 12 * * *', cronTz: 'America/New_York' })
+class NewYorkCronJob extends BaseJob<void, string> {
+    handle(): string {
+        return 'new york';
+    }
+}
+
 @WorkerJob({ cronSchedule: '0 5 * * *' })
 class DefaultLegacyCronJob extends BaseJob<void, string> {
     handle(): string {
@@ -147,8 +155,11 @@ class BullMqExampleJob extends BaseJob<{ name: string }, string> {
 
 describe('worker services', () => {
     it('registers worker job metadata', () => {
-        assert.equal(ExampleJob.QUEUE_NAME, 'critical');
-        assert.equal(ExampleJob.CRON_SCHEDULE, '* * * * *');
+        assert.deepEqual(getWorkerJobMetadata(ExampleJob), {
+            queueName: 'critical',
+            cronSchedule: '* * * * *',
+            cronTz: null
+        });
         assert.ok(getRegisteredWorkerJobs().includes(ExampleJob));
     });
 
@@ -336,6 +347,70 @@ describe('worker services', () => {
         assert.equal(jobs[0].shouldExecuteAt.getSeconds(), 0);
 
         await app.stop();
+    });
+
+    it('evaluates cron jobs in their configured time zone', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            enableWorker: true,
+            providers: [NewYorkCronJob],
+            defaultConfig: { ENABLE_JOB_RUNNER: true }
+        });
+
+        await app.start();
+        const jobs = app.get(WorkerQueueRegistry).getQueuedJobs('daily-new-york');
+        assert.equal(jobs.length, 1);
+        const job = jobs[0];
+        const parts = new Map(
+            new Intl.DateTimeFormat('en-US', {
+                timeZone: 'America/New_York',
+                hour: 'numeric',
+                minute: 'numeric',
+                second: 'numeric',
+                hourCycle: 'h23'
+            })
+                .formatToParts(job.shouldExecuteAt)
+                .map(part => [part.type, part.value])
+        );
+
+        assert.equal(parts.get('hour'), '12');
+        assert.equal(parts.get('minute'), '00');
+        assert.equal(parts.get('second'), '00');
+
+        await app.stop();
+    });
+
+    it('passes cronTz to BullMQ job schedulers', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({
+            enableWorker: true,
+            providers: [NewYorkCronJob]
+        });
+        let schedulerArgs: unknown;
+        const registry = app.get(WorkerQueueRegistry);
+        registry.getBullQueue = (() => ({
+            upsertJobScheduler: async (...args: unknown[]) => {
+                schedulerArgs = args;
+            }
+        })) as never;
+
+        await (app.get(WorkerRunnerService) as unknown as { scheduleBullMqCronJobs(): Promise<void> }).scheduleBullMqCronJobs();
+
+        assert.deepEqual(schedulerArgs, [
+            'NewYorkCronJob:0 12 * * *',
+            { pattern: '0 12 * * *', tz: 'America/New_York' },
+            {
+                name: 'NewYorkCronJob',
+                data: {
+                    data: {},
+                    options: { repeatKey: 'NewYorkCronJob:0 12 * * *' }
+                },
+                opts: {
+                    removeOnComplete: false,
+                    removeOnFail: false
+                }
+            }
+        ]);
     });
 
     it('reschedules overdue repeat jobs drained by the runner', async () => {
@@ -613,10 +688,11 @@ describe('worker services', () => {
                 fakeBullQueue(
                     'critical',
                     [
-                        fakeTsfScheduler('ExampleJob', '* * * * *'),
+                        fakeTsfScheduler('ExampleJob', '* * * * *', undefined, 'America/Chicago'),
                         fakeTsfScheduler('ExampleJob', '*/5 * * * *'),
                         fakeTsfScheduler('DeletedJob', '0 2 * * *'),
                         fakeTsfScheduler('ExampleJob', '* * * * *', 'ExampleJob:wrong-key'),
+                        fakeTsfScheduler('NewYorkJob', '0 2 * * *', undefined, 'America/New_York'),
                         {
                             key: 'ExternalJob:0 3 * * *',
                             name: 'ExternalJob',
@@ -637,7 +713,8 @@ describe('worker services', () => {
         registry.getBullQueue = ((queueName: string) => queues.get(queueName)) as never;
 
         const removed = await registry.removeStaleBullMqJobSchedulers([
-            { queue: 'critical', name: 'ExampleJob', pattern: '* * * * *' },
+            { queue: 'critical', name: 'ExampleJob', pattern: '* * * * *', tz: 'America/New_York' },
+            { queue: 'critical', name: 'NewYorkJob', pattern: '0 2 * * *', tz: 'America/New_York' },
             { queue: 'new-queue', name: 'MovedJob', pattern: '0 4 * * *' }
         ]);
 
@@ -646,14 +723,15 @@ describe('worker services', () => {
             removedByQueue,
             new Map([
                 ['abandoned', ['MovedJob:0 4 * * *']],
-                ['critical', ['ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']]
+                ['critical', ['ExampleJob:* * * * *', 'ExampleJob:*/5 * * * *', 'DeletedJob:0 2 * * *', 'ExampleJob:wrong-key']]
             ])
         );
-        assert.deepEqual(removedJobsByQueue, new Map([['critical', ['deleted-job']]]));
+        assert.deepEqual(removedJobsByQueue, new Map([['critical', ['deleted-job', 'desired-job']]]));
         assert.deepEqual(
             removed.map(scheduler => ({ queue: scheduler.queue, key: scheduler.key })),
             [
                 { queue: 'abandoned', key: 'MovedJob:0 4 * * *' },
+                { queue: 'critical', key: 'ExampleJob:* * * * *' },
                 { queue: 'critical', key: 'ExampleJob:*/5 * * * *' },
                 { queue: 'critical', key: 'DeletedJob:0 2 * * *' },
                 { queue: 'critical', key: 'ExampleJob:wrong-key' }
@@ -984,11 +1062,12 @@ async function waitFor(fn: () => boolean, timeoutMs = 5000): Promise<void> {
     assert.fail('Timed out waiting for condition');
 }
 
-function fakeTsfScheduler(name: string, pattern: string, key = `${name}:${pattern}`): object {
+function fakeTsfScheduler(name: string, pattern: string, key = `${name}:${pattern}`, tz?: string): object {
     return {
         key,
         name,
         pattern,
+        ...(tz === undefined ? {} : { tz }),
         template: {
             data: {
                 data: {},

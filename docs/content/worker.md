@@ -45,23 +45,9 @@ class SendEmailJob extends BaseJob<SendEmailInput, { sent: boolean }> {
 
 The job class must also be registered as a provider so the runner can resolve it through DI.
 
-`BaseJob<I, O>` contains one required method, `handle(data: I): O | Promise<O>`. `@WorkerJob()` sets the job class's queue and cron metadata and adds it to the process registry; it does not add the class to the app's DI container. The decorator accepts `queueName` (`queue` is an alias) and `cronSchedule` (`cron` is an alias).
+`BaseJob<I, O>` contains one required method, `handle(data: I): O | Promise<O>`. `@WorkerJob()` is the sole source of job queue and cron metadata, and adds the class to the process registry; it does not add the class to the app's DI container. It accepts `queueName`, `cronSchedule`, and `cronTz`.
 
-The equivalent static metadata remains available for jobs that cannot use decorator arguments:
-
-```typescript
-@WorkerJob()
-class DailyCleanupJob extends BaseJob<void, void> {
-    static QUEUE_NAME = 'maintenance';
-    static CRON_SCHEDULE = '0 2 * * *';
-
-    async handle() {
-        await cleanup();
-    }
-}
-```
-
-Decorator values override the inherited `QUEUE_NAME = 'default'` and `CRON_SCHEDULE = null` defaults on that job class.
+Jobs using the former `queue`/`cron` aliases or static `QUEUE_NAME`/`CRON_SCHEDULE` metadata should move those values into `@WorkerJob()`.
 
 ## Queueing Jobs
 
@@ -111,10 +97,10 @@ The runner suppresses Redis availability logs for BullMQ reconnects shorter than
 
 ## Cron Jobs
 
-Use `cronSchedule` or `cron` on `@WorkerJob()`.
+Use `cronSchedule` on `@WorkerJob()`. Set `cronTz` to an IANA time-zone name when the schedule should be evaluated outside the worker process's local time zone.
 
 ```typescript
-@WorkerJob({ queueName: 'daily', cronSchedule: '0 2 * * *' })
+@WorkerJob({ queueName: 'daily', cronSchedule: '0 2 * * *', cronTz: 'America/New_York' })
 class DailyCleanupJob extends BaseJob<void, void> {
     async handle() {
         await cleanup();
@@ -124,7 +110,7 @@ class DailyCleanupJob extends BaseJob<void, void> {
 
 When the runner starts, it registers BullMQ job schedulers for registered cron jobs. In test-mode in-process queues, the runner schedules one pending repeat job per registered job class and repeat key.
 
-After a successful `migrate` or `migrate:run`, the migration command removes framework-managed BullMQ schedulers whose job was deleted, no longer has a cron schedule, moved queues, or changed schedules. Matching schedulers remain registered and the worker runner creates the replacement for changed schedules when the application starts. Legacy repeatable cron jobs on the default queue are also removed so migrations from `dk-server-foundation` replace them with Job Schedulers instead of running both registrations.
+After a successful `migrate` or `migrate:run`, the migration command removes framework-managed BullMQ schedulers whose job was deleted, no longer has a cron schedule, moved queues, or changed cron schedule or time zone. Matching schedulers remain registered and the worker runner creates the replacement for changed cron schedules or time zones when the application starts. Legacy repeatable cron jobs on the default queue are also removed so migrations from `dk-server-foundation` replace them with Job Schedulers instead of running both registrations.
 
 ## Queue Registry
 

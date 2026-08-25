@@ -6,9 +6,14 @@ export const OutputDataSymbol = Symbol('OutputData');
 
 export interface WorkerJobOptions {
     queueName?: string;
-    queue?: string;
     cronSchedule?: string | null;
-    cron?: string | null;
+    cronTz?: string | null;
+}
+
+export interface WorkerJobMetadata {
+    readonly queueName?: string;
+    readonly cronSchedule: string | null;
+    readonly cronTz: string | null;
 }
 
 export abstract class BaseJob<I = void, O = void> {
@@ -16,34 +21,35 @@ export abstract class BaseJob<I = void, O = void> {
     [InputDataSymbol]!: I;
     [OutputDataSymbol]!: O;
 
-    static QUEUE_NAME = 'default';
-    static CRON_SCHEDULE: string | null = null;
-
     abstract handle(data: I): Promise<O> | O;
 }
 
-export interface BaseJobClass {
-    QUEUE_NAME: string;
-    CRON_SCHEDULE: string | null;
-}
+export type JobClass<I = any, O = any> = ClassType<BaseJob<I, O>>;
 
-export type JobClass<I = any, O = any> = ClassType<BaseJob<I, O>> & BaseJobClass;
-
-const workerJobs = new Set<JobClass>();
+const workerJobs = new Map<JobClass, WorkerJobMetadata>();
 
 export function WorkerJob(options: WorkerJobOptions = {}): ClassDecorator {
     return target => {
         const jobClass = target as unknown as JobClass;
-        const queueName = options.queueName ?? options.queue;
-        const cronSchedule = options.cronSchedule ?? options.cron;
-        if (queueName !== undefined) jobClass.QUEUE_NAME = queueName;
-        if (cronSchedule !== undefined) jobClass.CRON_SCHEDULE = cronSchedule;
-        workerJobs.add(jobClass);
+        workerJobs.set(
+            jobClass,
+            Object.freeze({
+                queueName: options.queueName,
+                cronSchedule: options.cronSchedule ?? null,
+                cronTz: options.cronTz ?? null
+            })
+        );
     };
 }
 
 export function getRegisteredWorkerJobs(): JobClass[] {
-    return [...workerJobs];
+    return [...workerJobs.keys()];
+}
+
+export function getWorkerJobMetadata(jobClass: JobClass): WorkerJobMetadata {
+    const metadata = workerJobs.get(jobClass);
+    if (!metadata) throw new Error(`Worker job is not registered: ${jobClass.name}`);
+    return metadata;
 }
 
 export interface IJobOptions {

@@ -1,6 +1,6 @@
 import { BaseAppConfig } from '../../app';
 import { createRedisOptions } from '../../helpers/redis/redis';
-import type { JobClass, QueuedWorkerJob, IJobOptions } from './types';
+import { getWorkerJobMetadata, type JobClass, type QueuedWorkerJob, type IJobOptions } from './types';
 import { notifyWorkerObservers } from './observer';
 import { Queue, type ConnectionOptions, type Job as BullJob, type QueueOptions, type WorkerOptions } from 'bullmq';
 
@@ -13,6 +13,7 @@ export interface BullMqCronJobSchedule {
     queue: string;
     name: string;
     pattern: string;
+    tz?: string;
 }
 
 export interface RemovedBullMqJobScheduler {
@@ -40,7 +41,7 @@ export class WorkerQueueRegistry {
     }
 
     getQueueName(jobClass: JobClass, options: IJobOptions = {}): string {
-        return options.queueName ?? getOwnQueueName(jobClass) ?? this.getDefaultQueueName();
+        return options.queueName ?? getWorkerJobMetadata(jobClass).queueName ?? this.getDefaultQueueName();
     }
 
     async enqueue<I>(jobClass: JobClass<I>, data: I, options: IJobOptions = {}): Promise<QueuedWorkerJob<I>> {
@@ -162,7 +163,10 @@ export class WorkerQueueRegistry {
                 if (!isTsfScheduler) continue;
                 const desired = desiredQueueSchedules?.get(scheduler.name);
                 const matchesDesiredSchedule =
-                    desired !== undefined && desired.pattern === scheduler.pattern && scheduler.key === `${desired.name}:${desired.pattern}`;
+                    desired !== undefined &&
+                    desired.pattern === scheduler.pattern &&
+                    desired.tz === scheduler.tz &&
+                    scheduler.key === `${desired.name}:${desired.pattern}`;
                 if (matchesDesiredSchedule) continue;
 
                 staleRepeatKeys.add(scheduler.key);
@@ -336,10 +340,6 @@ async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> 
     }
 }
 
-function getOwnQueueName(jobClass: JobClass): string | undefined {
-    return Object.prototype.hasOwnProperty.call(jobClass, 'QUEUE_NAME') ? jobClass.QUEUE_NAME : undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null;
 }
@@ -354,6 +354,7 @@ function isTsfBullMqJobScheduler(scheduler: unknown): scheduler is {
     key: string;
     name: string;
     pattern?: string;
+    tz?: string;
     template?: { data?: unknown };
 } {
     if (!isRecord(scheduler) || typeof scheduler.key !== 'string' || typeof scheduler.name !== 'string') return false;
