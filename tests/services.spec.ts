@@ -745,7 +745,7 @@ describe('services', () => {
         const firstCaptureContext = capture.mock.calls[0].arguments[1] as Record<string, unknown>;
         const secondCaptureContext = capture.mock.calls[1].arguments[1] as Record<string, unknown>;
         assert.equal(capture.mock.callCount(), 2);
-        assert.equal(firstCaptureError.message, 'reported');
+        assert.equal(firstCaptureError.message, 'reported (cause: cause)');
         assert.deepStrictEqual(firstCaptureContext, {
             tags: {},
             extra: {

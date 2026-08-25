@@ -74,7 +74,7 @@ export function reportError(level: number, err: Error, context: IErrorContext): 
             ...context,
             loggerContext: omitKeys(loggerContext, SentryLiftKeysToTagsFromLoggerContext)
         };
-        captureException(err, {
+        captureException(withCauseInSentryMessage(err as DecoratedError), {
             tags,
             extra: { Details },
             level: level === 1 ? 'fatal' : level === 3 ? 'warning' : 'error'
@@ -160,6 +160,22 @@ function getCauseMessage(cause: unknown): string | undefined {
     if (isError(cause)) return cause.message;
     if (typeof cause === 'object' && 'message' in cause) return String((cause as { message?: unknown }).message);
     return String(cause);
+}
+
+function withCauseInSentryMessage(err: DecoratedError): Error {
+    const causeMessage = getCauseMessage(err.cause);
+    if (!causeMessage) return err;
+
+    const { message: _message, ...descriptors } = Object.getOwnPropertyDescriptors(err);
+    return Object.create(Object.getPrototypeOf(err), {
+        ...descriptors,
+        message: {
+            configurable: true,
+            enumerable: false,
+            value: `${err.message} (cause: ${causeMessage})`,
+            writable: true
+        }
+    }) as Error;
 }
 
 function compact<T>(values: (T | undefined | null | false | '')[]): T[] {
