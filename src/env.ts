@@ -49,6 +49,7 @@ export interface EnvObject {
     REDIS_SENTINEL_NAME?: string;
     REDIS_HOST?: string;
     REDIS_PORT?: string;
+    REDIS_PASSWORD_SECRET?: string;
     REDIS_PREFIX?: string;
 
     CACHE_REDIS_SENTINEL_HOST?: string;
@@ -56,6 +57,7 @@ export interface EnvObject {
     CACHE_REDIS_SENTINEL_NAME?: string;
     CACHE_REDIS_HOST?: string;
     CACHE_REDIS_PORT?: string;
+    CACHE_REDIS_PASSWORD_SECRET?: string;
     CACHE_REDIS_PREFIX?: string;
 
     MUTEX_REDIS_SENTINEL_HOST?: string;
@@ -63,6 +65,7 @@ export interface EnvObject {
     MUTEX_REDIS_SENTINEL_NAME?: string;
     MUTEX_REDIS_HOST?: string;
     MUTEX_REDIS_PORT?: string;
+    MUTEX_REDIS_PASSWORD_SECRET?: string;
     MUTEX_REDIS_PREFIX?: string;
 
     BROADCAST_REDIS_SENTINEL_HOST?: string;
@@ -70,6 +73,7 @@ export interface EnvObject {
     BROADCAST_REDIS_SENTINEL_NAME?: string;
     BROADCAST_REDIS_HOST?: string;
     BROADCAST_REDIS_PORT?: string;
+    BROADCAST_REDIS_PASSWORD_SECRET?: string;
     BROADCAST_REDIS_PREFIX?: string;
 
     MESH_REDIS_SENTINEL_HOST?: string;
@@ -77,6 +81,7 @@ export interface EnvObject {
     MESH_REDIS_SENTINEL_NAME?: string;
     MESH_REDIS_HOST?: string;
     MESH_REDIS_PORT?: string;
+    MESH_REDIS_PASSWORD_SECRET?: string;
     MESH_REDIS_PREFIX?: string;
 
     BULL_REDIS_SENTINEL_HOST?: string;
@@ -84,6 +89,7 @@ export interface EnvObject {
     BULL_REDIS_SENTINEL_NAME?: string;
     BULL_REDIS_HOST?: string;
     BULL_REDIS_PORT?: string;
+    BULL_REDIS_PASSWORD_SECRET?: string;
     BULL_REDIS_PREFIX?: string;
 
     BULL_QUEUE?: string;

@@ -182,15 +182,16 @@ All Redis utilities support independent connection configuration via environment
 
 Common variables for each prefix:
 
-| Variable                | Description                | Default      |
-| ----------------------- | -------------------------- | ------------ |
-| `*_REDIS_HOST`          | Redis host                 | unset        |
-| `*_REDIS_PORT`          | Redis port                 | `6379`       |
-| `*_REDIS_PREFIX`        | Key prefix                 | package name |
-| `*_REDIS_SENTINEL_HOST` | Redis Sentinel host        | unset        |
-| `*_REDIS_SENTINEL_PORT` | Redis Sentinel port        | `26379`      |
-| `*_REDIS_SENTINEL_NAME` | Redis Sentinel master name | unset        |
+| Variable                  | Description                   | Default      |
+| ------------------------- | ----------------------------- | ------------ |
+| `*_REDIS_HOST`            | Redis host                    | unset        |
+| `*_REDIS_PORT`            | Redis port                    | `6379`       |
+| `*_REDIS_PASSWORD_SECRET` | Redis authentication password | unset        |
+| `*_REDIS_PREFIX`          | Key prefix                    | package name |
+| `*_REDIS_SENTINEL_HOST`   | Redis Sentinel host           | unset        |
+| `*_REDIS_SENTINEL_PORT`   | Redis Sentinel port           | `26379`      |
+| `*_REDIS_SENTINEL_NAME`   | Redis Sentinel master name    | unset        |
 
-For the default shared connection, omit the utility prefix and use `REDIS_HOST`, `REDIS_PORT`, `REDIS_PREFIX`, and `REDIS_SENTINEL_*`.
+For the default shared connection, omit the utility prefix and use `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD_SECRET`, `REDIS_PREFIX`, and `REDIS_SENTINEL_*`.
 
 `REDIS_UNAVAILABLE_ALERT_AFTER_MS` controls the default outage grace period used with `monitorRedisAvailability()`. Its default is `60000`.

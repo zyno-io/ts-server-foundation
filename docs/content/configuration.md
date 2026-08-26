@@ -134,6 +134,7 @@ const app = createApp({
 | `REDIS_SENTINEL_NAME`              | `string`             | unset                   |
 | `REDIS_HOST`                       | `string`             | unset                   |
 | `REDIS_PORT`                       | `number`             | unset                   |
+| `REDIS_PASSWORD_SECRET`            | `string`             | unset                   |
 | `REDIS_PREFIX`                     | `string`             | package name            |
 | `REDIS_UNAVAILABLE_ALERT_AFTER_MS` | `number`             | `60000`                 |
 | `CACHE_REDIS_*`                    | `string`/`number`    | falls back to `REDIS_*` |
