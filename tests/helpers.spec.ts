@@ -289,7 +289,10 @@ describe('helper utilities', () => {
         process.env.APP_ENV = 'test';
         process.env.REDIS_HOST = 'redis-default';
         process.env.REDIS_PORT = '6379';
+        process.env.REDIS_USERNAME = 'default-user';
         process.env.REDIS_PASSWORD_SECRET = 'default-password';
+        process.env.REDIS_SENTINEL_USERNAME = 'default-sentinel-user';
+        process.env.REDIS_SENTINEL_PASSWORD_SECRET = 'default-sentinel-password';
         process.env.REDIS_PREFIX = 'default-prefix';
         process.env.CACHE_REDIS_HOST = 'redis-cache';
         process.env.CACHE_REDIS_PORT = '6380';
@@ -313,11 +316,13 @@ describe('helper utilities', () => {
         const bullRedis = createRedisOptions('BULL');
 
         assert.equal(defaultRedis.options.host, 'redis-default');
+        assert.equal(defaultRedis.options.username, 'default-user');
         assert.equal(defaultRedis.options.password, 'default-password');
         assert.equal(defaultRedis.prefix, 'default-prefix');
         assert.equal(cacheRedis.options.host, 'redis-cache');
         assert.equal(cacheRedis.options.port, 6380);
         assert.equal(cacheRedis.options.password, 'cache-password');
+        assert.equal(cacheRedis.options.username, 'default-user');
         assert.equal(cacheRedis.prefix, 'cache-prefix');
         assert.equal(mutexRedis.options.host, 'redis-mutex');
         assert.equal(mutexRedis.options.password, 'default-password');
@@ -325,6 +330,9 @@ describe('helper utilities', () => {
         assert.deepStrictEqual(broadcastRedis.options.sentinels, [{ host: 'redis-broadcast-sentinel', port: 26380 }]);
         assert.equal(broadcastRedis.options.name, 'broadcast-master');
         assert.equal(broadcastRedis.options.password, 'default-password');
+        assert.equal(broadcastRedis.options.username, 'default-user');
+        assert.equal(broadcastRedis.options.sentinelUsername, 'default-sentinel-user');
+        assert.equal(broadcastRedis.options.sentinelPassword, 'default-sentinel-password');
         assert.equal(broadcastRedis.options.failoverDetector, true);
         assert.equal(broadcastRedis.options.sentinelMaxConnections, 1);
         assert.equal(broadcastRedis.options.reconnectOnError?.(new Error('READONLY replica')), 2);
@@ -689,6 +697,9 @@ describe('helper utilities', () => {
         delete process.env.REDIS_SENTINEL_HOST;
         delete process.env.REDIS_SENTINEL_PORT;
         delete process.env.REDIS_SENTINEL_NAME;
+        delete process.env.REDIS_SENTINEL_USERNAME;
+        delete process.env.REDIS_SENTINEL_PASSWORD_SECRET;
+        delete process.env.REDIS_USERNAME;
         delete process.env.CACHE_REDIS_HOST;
         delete process.env.CACHE_REDIS_PORT;
         delete process.env.CACHE_REDIS_PASSWORD_SECRET;

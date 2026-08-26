@@ -24,7 +24,10 @@ export function createRedisOptions(configPrefix?: string): {
     }
 
     const prefix = String(config.REDIS_PREFIX ?? getPackageName() ?? 'app');
+    const username = config.REDIS_USERNAME === undefined ? undefined : String(config.REDIS_USERNAME);
     const password = config.REDIS_PASSWORD_SECRET === undefined ? undefined : String(config.REDIS_PASSWORD_SECRET);
+    const sentinelUsername = config.REDIS_SENTINEL_USERNAME === undefined ? username : String(config.REDIS_SENTINEL_USERNAME);
+    const sentinelPassword = config.REDIS_SENTINEL_PASSWORD_SECRET === undefined ? password : String(config.REDIS_SENTINEL_PASSWORD_SECRET);
 
     if (config.REDIS_SENTINEL_HOST) {
         return {
@@ -37,7 +40,10 @@ export function createRedisOptions(configPrefix?: string): {
                     }
                 ],
                 name: config.REDIS_SENTINEL_NAME ? String(config.REDIS_SENTINEL_NAME) : undefined,
+                ...(username === undefined ? {} : { username }),
                 ...(password === undefined ? {} : { password }),
+                ...(sentinelUsername === undefined ? {} : { sentinelUsername }),
+                ...(sentinelPassword === undefined ? {} : { sentinelPassword }),
                 failoverDetector: true,
                 sentinelMaxConnections: 1,
                 reconnectOnError: error => (error.message.startsWith('READONLY') ? 2 : false)
@@ -51,6 +57,7 @@ export function createRedisOptions(configPrefix?: string): {
             options: {
                 host: String(config.REDIS_HOST),
                 port: Number(config.REDIS_PORT ?? 6379),
+                ...(username === undefined ? {} : { username }),
                 ...(password === undefined ? {} : { password })
             }
         };

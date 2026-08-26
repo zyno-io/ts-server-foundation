@@ -47,8 +47,11 @@ export class BaseAppConfig {
     REDIS_SENTINEL_HOST?: string;
     REDIS_SENTINEL_PORT?: number;
     REDIS_SENTINEL_NAME?: string;
+    REDIS_SENTINEL_USERNAME?: string;
+    REDIS_SENTINEL_PASSWORD_SECRET?: string;
     REDIS_HOST?: string;
     REDIS_PORT?: number;
+    REDIS_USERNAME?: string;
     REDIS_PASSWORD_SECRET?: string;
     REDIS_PREFIX?: string;
     REDIS_UNAVAILABLE_ALERT_AFTER_MS: number = DEFAULT_AVAILABILITY_ALERT_AFTER_MS;
@@ -56,32 +59,44 @@ export class BaseAppConfig {
     CACHE_REDIS_SENTINEL_HOST?: string;
     CACHE_REDIS_SENTINEL_PORT?: number;
     CACHE_REDIS_SENTINEL_NAME?: string;
+    CACHE_REDIS_SENTINEL_USERNAME?: string;
+    CACHE_REDIS_SENTINEL_PASSWORD_SECRET?: string;
     CACHE_REDIS_HOST?: string;
     CACHE_REDIS_PORT?: number;
+    CACHE_REDIS_USERNAME?: string;
     CACHE_REDIS_PASSWORD_SECRET?: string;
     CACHE_REDIS_PREFIX?: string;
 
     MUTEX_REDIS_SENTINEL_HOST?: string;
     MUTEX_REDIS_SENTINEL_PORT?: number;
     MUTEX_REDIS_SENTINEL_NAME?: string;
+    MUTEX_REDIS_SENTINEL_USERNAME?: string;
+    MUTEX_REDIS_SENTINEL_PASSWORD_SECRET?: string;
     MUTEX_REDIS_HOST?: string;
     MUTEX_REDIS_PORT?: number;
+    MUTEX_REDIS_USERNAME?: string;
     MUTEX_REDIS_PASSWORD_SECRET?: string;
     MUTEX_REDIS_PREFIX?: string;
 
     BROADCAST_REDIS_SENTINEL_HOST?: string;
     BROADCAST_REDIS_SENTINEL_PORT?: number;
     BROADCAST_REDIS_SENTINEL_NAME?: string;
+    BROADCAST_REDIS_SENTINEL_USERNAME?: string;
+    BROADCAST_REDIS_SENTINEL_PASSWORD_SECRET?: string;
     BROADCAST_REDIS_HOST?: string;
     BROADCAST_REDIS_PORT?: number;
+    BROADCAST_REDIS_USERNAME?: string;
     BROADCAST_REDIS_PASSWORD_SECRET?: string;
     BROADCAST_REDIS_PREFIX?: string;
 
     MESH_REDIS_SENTINEL_HOST?: string;
     MESH_REDIS_SENTINEL_PORT?: number;
     MESH_REDIS_SENTINEL_NAME?: string;
+    MESH_REDIS_SENTINEL_USERNAME?: string;
+    MESH_REDIS_SENTINEL_PASSWORD_SECRET?: string;
     MESH_REDIS_HOST?: string;
     MESH_REDIS_PORT?: number;
+    MESH_REDIS_USERNAME?: string;
     MESH_REDIS_PASSWORD_SECRET?: string;
     MESH_REDIS_PREFIX?: string;
     /** Namespace shared by replicas that belong to one sRPC mesh deployment. */
@@ -98,8 +113,11 @@ export class BaseAppConfig {
     BULL_REDIS_SENTINEL_HOST?: string;
     BULL_REDIS_SENTINEL_PORT?: number;
     BULL_REDIS_SENTINEL_NAME?: string;
+    BULL_REDIS_SENTINEL_USERNAME?: string;
+    BULL_REDIS_SENTINEL_PASSWORD_SECRET?: string;
     BULL_REDIS_HOST?: string;
     BULL_REDIS_PORT?: number;
+    BULL_REDIS_USERNAME?: string;
     BULL_REDIS_PASSWORD_SECRET?: string;
     BULL_REDIS_PREFIX?: string;
 
