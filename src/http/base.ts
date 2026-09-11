@@ -146,6 +146,7 @@ export class HttpServerRuntime<C extends BaseAppConfig = BaseAppConfig> {
             });
         };
         const server = tlsOptions ? (createSecureServer(tlsOptions, requestListener) as unknown as Server) : createServer(requestListener);
+        server.keepAliveTimeout = this.options.config.HTTP_KEEP_ALIVE_TIMEOUT_MS;
         this.server = server;
         installUpgradeClaimHandling(server);
         for (const handler of this.upgradeHandlers) server.prependListener('upgrade', handler);

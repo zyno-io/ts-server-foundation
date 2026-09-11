@@ -3908,6 +3908,28 @@ describe('http router', () => {
         }
     });
 
+    it('keeps upstream connections alive beyond the common 60-second proxy timeout', async () => {
+        process.env.APP_ENV = 'test';
+        const defaultApp = createApp({});
+        const defaultServer = await defaultApp.http.listen(0, '127.0.0.1');
+
+        try {
+            assert.equal(defaultServer.keepAliveTimeout, 65_000);
+        } finally {
+            await defaultApp.stop();
+        }
+
+        process.env.APP_ENV = 'test';
+        const configuredApp = createApp({ defaultConfig: { HTTP_KEEP_ALIVE_TIMEOUT_MS: 90_000 } });
+        const configuredServer = await configuredApp.http.listen(0, '127.0.0.1');
+
+        try {
+            assert.equal(configuredServer.keepAliveTimeout, 90_000);
+        } finally {
+            await configuredApp.stop();
+        }
+    });
+
     it('cleans up lifecycle state when HTTP listen fails', async () => {
         process.env.APP_ENV = 'test';
         const firstApp = createApp({});

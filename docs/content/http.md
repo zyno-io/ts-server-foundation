@@ -74,6 +74,8 @@ HTTP_TLS_KEY_PATH=/run/secrets/service.key
 
 The runtime watches both paths, including replacement-based secret rotations, and reloads the HTTPS secure context after a change. New TLS connections use the replacement certificate; connections already established continue with their existing TLS session. If a rotation briefly exposes an invalid or mismatched pair, the active certificate remains in use and the runtime logs the reload failure until a later file change supplies a valid pair.
 
+The server keeps an idle HTTP connection open for 65 seconds by default. Override this with `HTTP_KEEP_ALIVE_TIMEOUT_MS` when necessary. When a reverse proxy pools upstream connections, configure its idle timeout below the application timeout so the proxy retires a connection before Node does. This avoids a race where the proxy selects a connection while the application is closing it, which can surface as a `502` before the request reaches the application.
+
 `app.http.request(request, response?)` sends an in-memory `HttpRequest` through the same router/CORS/static-file flow without creating a Node server.
 
 Observers run once after every in-memory or Node request, including CORS, static-file, `404`, and error results. The observation contains `request`, `response`, `startedAt`, `durationMs`, and the processing `error` when one was recorded. An observer exception is isolated from request handling, and the function returned by `registerObserver()` unregisters it.

@@ -137,6 +137,7 @@ export class BaseAppConfig {
 
     HTTP_REQUEST_LOGGING_MODE: 'none' | 'e2e' | 'finish' | 'errors' = isTestEnvironment() ? 'errors' : 'e2e';
     HEALTHZ_ENABLE_REQUEST_LOGGING: boolean = false;
+    HTTP_KEEP_ALIVE_TIMEOUT_MS: number = 65_000;
     HTTP_MAX_REQUEST_BODY_BYTES: number = 100 * 1024 * 1024;
     HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES: number = 25 * 1024 * 1024;
     HTTP_MAX_FORM_FIELDS: number = 10_000;

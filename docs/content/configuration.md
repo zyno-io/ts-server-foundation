@@ -63,6 +63,7 @@ const app = createApp({
 | `USE_REAL_IP_HEADER`                     | `boolean` | unset                                             | Trust proxy remote-address headers.                                                                           |
 | `HTTP_TLS_CERT_PATH`                     | `string`  | unset                                             | PEM certificate (and optional chain) path. Must be set with `HTTP_TLS_KEY_PATH` to enable HTTPS.              |
 | `HTTP_TLS_KEY_PATH`                      | `string`  | unset                                             | PEM private-key path. Must be set with `HTTP_TLS_CERT_PATH` to enable HTTPS.                                  |
+| `HTTP_KEEP_ALIVE_TIMEOUT_MS`             | `number`  | `65000`                                           | Idle keep-alive timeout. Keep this above the upstream proxy's idle timeout.                                   |
 | `HTTP_MAX_REQUEST_BODY_BYTES`            | `number`  | `104857600`                                       | Maximum decoded request body bytes.                                                                           |
 | `HTTP_MAX_REQUEST_COMPRESSED_BODY_BYTES` | `number`  | `26214400`                                        | Maximum compressed request body bytes before gzip decoding.                                                   |
 | `HTTP_MAX_FORM_FIELDS`                   | `number`  | `10000`                                           | Maximum URL-encoded or multipart text fields and imported form structure nodes.                               |
