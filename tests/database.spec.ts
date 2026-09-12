@@ -2644,6 +2644,20 @@ describe('database query builder and persistence', () => {
         ]);
     });
 
+    it('deserializes nullable MySQL coordinates in unsafe raw rows', async () => {
+        interface TypedCoordinateRawRow {
+            zipGeo: NullableMySQLCoordinate;
+        }
+
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ zipGeo: { x: -84.388, y: 33.749 } }, { zipGeo: null }];
+        const db = new BaseDatabase(driver, [User]);
+
+        const rows = await db.rawFindUnsafe<TypedCoordinateRawRow>('SELECT zipGeo FROM users');
+
+        assert.deepStrictEqual(rows, [{ zipGeo: { x: -84.388, y: 33.749 } }, { zipGeo: null }]);
+    });
+
     it('deserializes unsafe session raw rows when a receive type is provided', async () => {
         interface TypedSessionRawRow {
             id: number;

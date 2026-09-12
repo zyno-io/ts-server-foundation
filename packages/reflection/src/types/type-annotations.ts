@@ -1,5 +1,6 @@
-import { deserializer, typeAnnotation, validationRegistry, ValidatorError } from '../reflection/index.js';
+import { deserializer, ReflectionKind, registerClassMetadata, typeAnnotation, validationRegistry, ValidatorError } from '../reflection/index.js';
 import type {
+    ClassMetadata,
     MaxLength,
     MinLength,
     Minimum,
@@ -25,6 +26,20 @@ export class Coordinate {
     x!: number;
     y!: number;
 }
+
+registerClassMetadata(Coordinate, {
+    kind: ReflectionKind.class,
+    classType: Coordinate,
+    name: 'Coordinate',
+    typeName: 'Coordinate',
+    properties: [
+        { name: 'x', type: { kind: ReflectionKind.number } },
+        { name: 'y', type: { kind: ReflectionKind.number } }
+    ],
+    methods: [],
+    constructorParameters: [],
+    hasConstructor: false
+} satisfies ClassMetadata);
 
 export type MySQLCoordinate = Coordinate & MySQL<{ type: 'point' }>;
 export type NullableMySQLCoordinate = (Coordinate & MySQL<{ type: 'point' }>) | null;
