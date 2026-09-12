@@ -134,6 +134,11 @@ describe('srpc', () => {
         }
         assert.throws(() => createClient({ lateReplyTombstoneTtlMs: 0x80000000 }), /lateReplyTombstoneTtlMs/);
         assert.throws(() => createClient({ connectTimeoutMs: 0x80000000 }), /connectTimeoutMs/);
+
+        const directTlsClient = createClient({ maxMessageBytes: 4_096, tlsServerName: '  nexus.service.test  ' }) as any;
+        assert.deepEqual(directTlsClient.webSocketOptions, { maxPayload: 4_096, servername: 'nexus.service.test' });
+        const defaultTlsClient = createClient({}) as any;
+        assert.deepEqual(defaultTlsClient.webSocketOptions, { maxPayload: 8 * 1024 * 1024 });
     });
 
     it('logs sRPC traffic types by default and bodies when requested', () => {

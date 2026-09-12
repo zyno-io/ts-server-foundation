@@ -42,6 +42,8 @@ export interface SrpcClientOptions {
     logTraffic?: SrpcTrafficLogging;
     /** Audience signed into canonical credentials. Defaults to the WebSocket path. */
     authAudience?: string;
+    /** TLS server identity used for SNI and certificate verification when the URI host is only a transport address. */
+    tlsServerName?: string;
     /** Advertise support for associating byte-stream senders with a handler request. */
     senderAnnouncements?: boolean;
     maxPendingRequests?: number;
@@ -168,7 +170,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         SrpcByteStream.init({ byteStream: this.currentByteStream }, { startId: 1, step: 2 });
 
         this.logger.info('Connecting SRPC client', { srpc: { ...this.logData(), supersede: this.supersede } });
-        const ws = new WebSocket(this.generateWsUrl(), { maxPayload: this.maxMessageBytes });
+        const ws = new WebSocket(this.generateWsUrl(), this.webSocketOptions);
         ws.binaryType = 'nodebuffer';
         this.ws = ws;
 
@@ -940,6 +942,13 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     }
     private get maxMessageBytes(): number {
         return configuredPositiveInteger(this.clientOptions?.maxMessageBytes, DefaultMaxMessageBytes);
+    }
+    private get webSocketOptions(): WebSocket.ClientOptions {
+        const tlsServerName = this.clientOptions?.tlsServerName?.trim();
+        return {
+            maxPayload: this.maxMessageBytes,
+            ...(tlsServerName ? { servername: tlsServerName } : {})
+        };
     }
     private get connectTimeoutMs(): number {
         const value = this.clientOptions?.connectTimeoutMs;
