@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { ReflectionKind, typeOf } from '@zyno-io/ts-reflection';
@@ -59,8 +60,15 @@ describe('@zyno-io/ts-reflection', () => {
     });
 
     it('type-checks from a NodeNext consumer', () => {
-        const directory = mkdtempSync(join(process.cwd(), '.tmp-reflection-api-'));
+        const directory = mkdtempSync(join(tmpdir(), 'tsf-reflection-api-'));
         const fixture = join(directory, 'imports.mts');
+        const packageScope = join(directory, 'node_modules', '@zyno-io');
+        mkdirSync(packageScope, { recursive: true });
+        symlinkSync(
+            join(process.cwd(), 'packages', 'reflection'),
+            join(packageScope, 'ts-reflection'),
+            process.platform === 'win32' ? 'junction' : 'dir'
+        );
         writeFileSync(
             fixture,
             `

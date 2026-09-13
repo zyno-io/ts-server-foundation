@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
@@ -95,8 +96,11 @@ describe('package exports', () => {
     });
 
     it('type-checks representative imports from the root and OTel entrypoints', () => {
-        const directory = mkdtempSync(join(process.cwd(), '.tmp-public-api-'));
+        const directory = mkdtempSync(join(tmpdir(), 'tsf-public-api-'));
         const fixture = join(directory, 'imports.ts');
+        const packageScope = join(directory, 'node_modules', '@zyno-io');
+        mkdirSync(packageScope, { recursive: true });
+        symlinkSync(process.cwd(), join(packageScope, 'ts-server-foundation'), process.platform === 'win32' ? 'junction' : 'dir');
         writeFileSync(
             fixture,
             `
