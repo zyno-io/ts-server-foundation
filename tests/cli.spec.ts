@@ -366,9 +366,10 @@ describe('CLI', () => {
         assert.equal(existsSync(join(target, 'src', 'controllers', 'Example.controller.ts')), true);
         assert.match(readFileSync(join(target, '.env.development'), 'utf8'), /MYSQL_DATABASE=example_api/);
         const tsconfig = JSON.parse(readFileSync(join(target, 'tsconfig.json'), 'utf8')) as {
-            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+            compilerOptions?: { plugins?: Array<{ transform?: string }>; preserveSymlinks?: boolean };
         };
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
+        assert.equal(tsconfig.compilerOptions?.preserveSymlinks, false);
     });
 
     it('installs baseline compiler setup for Yarn projects', () => {
@@ -397,6 +398,7 @@ describe('CLI', () => {
                 {
                     compilerOptions: {
                         target: 'ES2022',
+                        preserveSymlinks: true,
                         plugins: []
                     }
                 },
@@ -421,10 +423,11 @@ describe('CLI', () => {
         assert.equal(existsSync(join(dir, '.yarn', 'patches')), false);
         const tsconfig = JSON.parse(readFileSync(join(dir, 'tsconfig.json'), 'utf8')) as {
             reflection?: boolean;
-            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+            compilerOptions?: { plugins?: Array<{ transform?: string }>; preserveSymlinks?: boolean };
         };
         assert.equal(tsconfig.reflection, true);
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-server-foundation/type-compiler');
+        assert.equal(tsconfig.compilerOptions?.preserveSymlinks, false);
     });
 
     it("configures the TSF launcher for Yarn Plug'n'Play ESM dependencies", () => {
@@ -953,6 +956,7 @@ describe('CLI', () => {
                 {
                     compilerOptions: {
                         target: 'ES2022',
+                        preserveSymlinks: true,
                         plugins: [{ transform: './node_modules/@zyno-io/ts-server-foundation/dist/src/type-compiler/index.cjs' }]
                     }
                 },
@@ -963,7 +967,10 @@ describe('CLI', () => {
         writeFileSync(join(dir, 'tsconfig.test.json'), JSON.stringify({ extends: './tsconfig.json' }, null, 4));
 
         mkdirSync(join(dir, 'aaa-child'), { recursive: true });
-        writeFileSync(join(dir, 'aaa-child', 'tsconfig.json'), JSON.stringify({ extends: '../tsconfig.json' }, null, 4));
+        writeFileSync(
+            join(dir, 'aaa-child', 'tsconfig.json'),
+            JSON.stringify({ extends: '../tsconfig.json', compilerOptions: { preserveSymlinks: true } }, null, 4)
+        );
 
         mkdirSync(join(dir, 'packages', 'standalone', 'deep'), { recursive: true });
         writeFileSync(join(dir, 'packages', 'standalone', 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
@@ -976,13 +983,15 @@ describe('CLI', () => {
         const hasCompilerPlugin = (path: string) => {
             const tsconfig = JSON.parse(readFileSync(path, 'utf8')) as {
                 reflection?: boolean;
-                compilerOptions?: { plugins?: Array<{ transform?: string }> };
+                compilerOptions?: { plugins?: Array<{ transform?: string }>; preserveSymlinks?: boolean };
             };
             return (
                 tsconfig.reflection === true &&
                 tsconfig.compilerOptions?.plugins?.some(plugin => plugin.transform === '@zyno-io/ts-server-foundation/type-compiler') === true
             );
         };
+        const preserveSymlinks = (path: string) =>
+            (JSON.parse(readFileSync(path, 'utf8')) as { compilerOptions?: { preserveSymlinks?: boolean } }).compilerOptions?.preserveSymlinks;
 
         assert.equal(hasCompilerPlugin(join(dir, 'tsconfig.json')), true);
         assert.equal(hasCompilerPlugin(join(dir, 'tsconfig.test.json')), false);
@@ -990,6 +999,10 @@ describe('CLI', () => {
         assert.equal(hasCompilerPlugin(join(dir, 'packages', 'standalone', 'tsconfig.json')), true);
         assert.equal(hasCompilerPlugin(join(dir, 'packages', 'standalone', 'tsconfig.test.json')), false);
         assert.equal(hasCompilerPlugin(join(dir, 'packages', 'standalone', 'deep', 'tsconfig.json')), false);
+        assert.equal(preserveSymlinks(join(dir, 'tsconfig.json')), false);
+        assert.equal(preserveSymlinks(join(dir, 'tsconfig.test.json')), undefined);
+        assert.equal(preserveSymlinks(join(dir, 'aaa-child', 'tsconfig.json')), false);
+        assert.equal(preserveSymlinks(join(dir, 'packages', 'standalone', 'tsconfig.json')), false);
     });
 
     it('preserves an explicitly configured standalone reflection compiler', () => {

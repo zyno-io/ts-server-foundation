@@ -3,6 +3,7 @@
         "target": "ES2022",
         "lib": ["ES2022"],
         "module": "commonjs",
+        "preserveSymlinks": false,
         "rootDir": ".",
         "outDir": "dist",
         "declaration": false,

@@ -358,7 +358,13 @@ function ensureTsconfigCompilerPlugins(projectDir: string): boolean {
 
     for (const tsconfigPath of findTsconfigPaths(projectDir)) {
         const tsconfig = readTsconfigJson(tsconfigPath);
-        if (extendsPatchedTsconfig(tsconfigPath, tsconfig, patchedTsconfigs)) continue;
+        if (extendsPatchedTsconfig(tsconfigPath, tsconfig, patchedTsconfigs)) {
+            if (disableExplicitPreserveSymlinks(tsconfig)) {
+                writeTsconfigJson(tsconfigPath, tsconfig);
+                changed = true;
+            }
+            continue;
+        }
 
         const result = ensureTsconfigCompilerPlugin(tsconfigPath, tsconfig);
         if (result.hasCompilerSetup) patchedTsconfigs.add(tsconfigPath);
@@ -371,6 +377,10 @@ function ensureTsconfigCompilerPlugins(projectDir: string): boolean {
 function ensureTsconfigCompilerPlugin(tsconfigPath: string, tsconfig: TsconfigJson): { changed: boolean; hasCompilerSetup: boolean } {
     let changed = false;
     tsconfig.compilerOptions ??= {};
+    if (tsconfig.compilerOptions.preserveSymlinks !== false) {
+        tsconfig.compilerOptions.preserveSymlinks = false;
+        changed = true;
+    }
     const plugins = Array.isArray(tsconfig.compilerOptions.plugins) ? tsconfig.compilerOptions.plugins : [];
     if (plugins !== tsconfig.compilerOptions.plugins) {
         tsconfig.compilerOptions.plugins = plugins;
@@ -391,8 +401,18 @@ function ensureTsconfigCompilerPlugin(tsconfigPath: string, tsconfig: TsconfigJs
         changed = true;
     }
 
-    if (changed) writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 4)}\n`);
+    if (changed) writeTsconfigJson(tsconfigPath, tsconfig);
     return { changed, hasCompilerSetup: hasTsconfigCompilerSetup(tsconfig) };
+}
+
+function disableExplicitPreserveSymlinks(tsconfig: TsconfigJson): boolean {
+    if (tsconfig.compilerOptions?.preserveSymlinks !== true) return false;
+    tsconfig.compilerOptions.preserveSymlinks = false;
+    return true;
+}
+
+function writeTsconfigJson(tsconfigPath: string, tsconfig: TsconfigJson): void {
+    writeFileSync(tsconfigPath, `${JSON.stringify(tsconfig, null, 4)}\n`);
 }
 
 function findTsconfigPaths(projectDir: string): string[] {
