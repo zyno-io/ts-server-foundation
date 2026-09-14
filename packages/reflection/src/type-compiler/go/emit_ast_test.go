@@ -233,6 +233,10 @@ func TestMetadataRuntimeRequirementAllowsPureJSONAliases(t *testing.T) {
 	if got := metadataRuntimeRequirement(plan); got != "" {
 		t.Fatalf("pure JSON aliases require metadata runtime: %s", got)
 	}
+	plan.decodePureJSONAliases = true
+	if got := metadataRuntimeRequirement(plan); got != "reflected alias metadata" {
+		t.Fatalf("lazy pure JSON alias requirement = %q", got)
+	}
 }
 
 func TestMetadataRuntimeRequirementRejectsRuntimeAliasValues(t *testing.T) {
@@ -348,6 +352,7 @@ func TestCompactMetadataEncoderEscapesReferenceMarkerCollision(t *testing.T) {
 		`{"$tsfImport": [0, "Model"]}`,
 		`{"$tsfAlias": [0, "Alias", "Alias"]}`,
 		`{"$tsfType": 0}`,
+		`{"$tsfNode": 0}`,
 	} {
 		template, err := parseExpressionTemplate(source)
 		if err != nil {
@@ -414,6 +419,113 @@ func TestCompactMetadataEncoderDeduplicatesGeneratedRuntimeThunks(t *testing.T) 
 	}
 	if strings.Count(encoding.serialized, `{"$tsf":0}`) != 2 {
 		t.Fatalf("repeated thunk did not reuse one reference index: %s", encoding.serialized)
+	}
+}
+
+func TestCompactMetadataV2InternsRepeatedGraphsWithRuntimeReferences(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/model.ts", `class Model {}`)
+	template, err := parseExpressionTemplate(`{
+		first: {kind: 16, classType: () => Model, properties: [{name: "value", type: {kind: 6}}]},
+		second: {kind: 16, classType: () => Model, properties: [{name: "value", type: {kind: 6}}]}
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec := shimprinter.NewEmitContext()
+	interner := newCompactMetadataRuntimeInterner(ec, file)
+	encoding := encodeCompactMetadataV2WithRuntimeRecipes(template.parsed, interner.deduplicationKey, nil, "", false)
+	if !strings.HasPrefix(encoding.serialized, `[2,`) {
+		t.Fatalf("V2 compact payload = %s", encoding.serialized)
+	}
+	if strings.Count(encoding.serialized, `{"$tsfNode":0}`) != 2 {
+		t.Fatalf("repeated graph was not interned: %s", encoding.serialized)
+	}
+	if len(encoding.references) != 1 {
+		t.Fatalf("runtime references = %d, want 1", len(encoding.references))
+	}
+}
+
+func TestAliasMetadataUsesOwnerRecipesForReexports(t *testing.T) {
+	originFile := parseTestSourceFile(t, "/project/origin/index.ts", `export type Shared = { value: string }`)
+	barrelFile := parseTestSourceFile(t, "/project/barrel.ts", `export * from "./origin"`)
+	origin := &fileInfo{
+		file:       originFile,
+		moduleKey:  moduleKey(originFile.FileName()),
+		aliases:    map[string]aliasInfo{"Shared": {body: `{ value: string }`, exported: true}},
+		interfaces: map[string][]interfaceInfo{},
+		reexports:  map[string]importRef{},
+	}
+	barrel := &fileInfo{
+		file:       barrelFile,
+		moduleKey:  moduleKey(barrelFile.FileName()),
+		aliases:    map[string]aliasInfo{},
+		interfaces: map[string][]interfaceInfo{},
+		reexports:  map[string]importRef{},
+		exportStar: []importRef{{source: origin.moduleKey, spec: "./origin"}},
+	}
+	reg := &registry{byPath: map[string]*fileInfo{origin.moduleKey: origin, barrel.moduleKey: barrel}}
+
+	got := aliasMetadataExpression(barrel, reg)
+	assertContainsAll(t, got, `"Shared": __tsf_runtime_alias__("./origin/index.js", "Shared", "Shared")`)
+	assertNotContains(t, got, `name: "value"`)
+}
+
+func TestAliasMetadataExpandsDeclarationOnlyReexportBoundary(t *testing.T) {
+	originFile := parseTestSourceFile(t, "/dependencies/origin.d.ts", `export type Shared = { value: string }`)
+	barrelFile := parseTestSourceFile(t, "/project/barrel.ts", `export * from "external-package"`)
+	origin := &fileInfo{
+		file:       originFile,
+		moduleKey:  moduleKey(originFile.FileName()),
+		aliases:    map[string]aliasInfo{"Shared": {body: `{ value: string }`, exported: true}},
+		interfaces: map[string][]interfaceInfo{},
+		reexports:  map[string]importRef{},
+	}
+	barrel := &fileInfo{
+		file:       barrelFile,
+		moduleKey:  moduleKey(barrelFile.FileName()),
+		aliases:    map[string]aliasInfo{},
+		interfaces: map[string][]interfaceInfo{},
+		reexports:  map[string]importRef{},
+		exportStar: []importRef{{source: origin.moduleKey, spec: "external-package"}},
+	}
+	reg := &registry{byPath: map[string]*fileInfo{origin.moduleKey: origin, barrel.moduleKey: barrel}}
+
+	got := aliasMetadataExpression(barrel, reg)
+	assertContainsAll(t, got, `"Shared":`, `name: "value"`)
+	assertNotContains(t, got, `__tsf_runtime_alias__`)
+}
+
+func TestCompactMetadataSizeGuardRejectsOversizedPayload(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/oversized.ts", `class Oversized {}`)
+	template, err := parseExpressionTemplate(`{kind: 2, typeName: "` + strings.Repeat("x", maxCompactMetadataPayloadBytes) + `"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &fileEmissionPlan{
+		calls:    map[int]callEmissionPlan{},
+		classes:  map[int]classEmissionPlan{1: {name: "Oversized", metadata: template}},
+		commonJS: true,
+	}
+	err = validateCompactMetadataSizes(&fileInfo{file: file}, plan)
+	if err == nil || !strings.Contains(err.Error(), "limit is 1048576 bytes") {
+		t.Fatalf("size guard error = %v", err)
+	}
+}
+
+func TestCompactMetadataSizeGuardMeasuresAfterGraphInterning(t *testing.T) {
+	file := parseTestSourceFile(t, "/project/compacted.ts", `class Compacted {}`)
+	repeated := strings.Repeat("x", maxCompactMetadataPayloadBytes/2+1024)
+	template, err := parseExpressionTemplate(`{first: {value: "` + repeated + `"}, second: {value: "` + repeated + `"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := &fileEmissionPlan{
+		calls:    map[int]callEmissionPlan{},
+		classes:  map[int]classEmissionPlan{1: {name: "Compacted", metadata: template}},
+		commonJS: true,
+	}
+	if err := validateCompactMetadataSizes(&fileInfo{file: file}, plan); err != nil {
+		t.Fatalf("compacted metadata failed size guard: %v", err)
 	}
 }
 

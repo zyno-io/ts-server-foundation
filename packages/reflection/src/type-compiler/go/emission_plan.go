@@ -6,18 +6,22 @@ import (
 	"strings"
 
 	shimast "github.com/microsoft/typescript-go/shim/ast"
+	shimprinter "github.com/microsoft/typescript-go/shim/printer"
 	"github.com/samchon/ttsc/packages/ttsc/driver"
 )
+
+const maxCompactMetadataPayloadBytes = 1024 * 1024
 
 type emissionPlans map[string]*fileEmissionPlan
 
 type fileEmissionPlan struct {
-	calls                map[int]callEmissionPlan
-	classes              map[int]classEmissionPlan
-	aliases              *expressionTemplate
-	metadataTypes        []expressionTemplate
-	metadataTypeResolver string
-	commonJS             bool
+	calls                 map[int]callEmissionPlan
+	classes               map[int]classEmissionPlan
+	aliases               *expressionTemplate
+	metadataTypes         []expressionTemplate
+	metadataTypeResolver  string
+	decodePureJSONAliases bool
+	commonJS              bool
 }
 
 type callEmissionPlan struct {
@@ -95,8 +99,9 @@ func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases 
 			continue
 		}
 		plan := &fileEmissionPlan{
-			calls:   map[int]callEmissionPlan{},
-			classes: map[int]classEmissionPlan{},
+			calls:                 map[int]callEmissionPlan{},
+			classes:               map[int]classEmissionPlan{},
+			decodePureJSONAliases: emitMetadataRuntimeImport,
 		}
 		metadataTypes := newMetadataTypeInterner(info.file.Text())
 		if program != nil && program.TSProgram != nil {
@@ -145,6 +150,9 @@ func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases 
 				plan.aliases = &template
 			}
 		}
+		if err := validateCompactMetadataSizes(info, plan); err != nil {
+			return nil, err
+		}
 		if !emitMetadataRuntimeImport {
 			if requirement := metadataRuntimeRequirement(plan); requirement != "" {
 				return nil, fmt.Errorf(
@@ -162,6 +170,88 @@ func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases 
 	return plans, nil
 }
 
+func validateCompactMetadataSizes(info *fileInfo, plan *fileEmissionPlan) error {
+	if info == nil || info.file == nil || plan == nil {
+		return nil
+	}
+	ec := shimprinter.NewEmitContext()
+	imports := newAstImportRegistry(ec, info.file, plan.commonJS)
+	runtimeReferences := newCompactMetadataRuntimeInterner(ec, info.file)
+	validate := func(surface string, template expressionTemplate, preserveArrayElements bool, inlinePureJSON bool) error {
+		metadata := template.materialize(ec, imports)
+		encoding := compactMetadataEncodingForSizeGuard(
+			metadata,
+			imports,
+			runtimeReferences,
+			plan.metadataTypeResolver,
+			preserveArrayElements,
+			inlinePureJSON,
+		)
+		if len(encoding.serialized) > maxCompactMetadataPayloadBytes {
+			return fmt.Errorf(
+				"%s: compact metadata for %s is %d bytes after graph interning; limit is %d bytes",
+				info.file.FileName(),
+				surface,
+				len(encoding.serialized),
+				maxCompactMetadataPayloadBytes,
+			)
+		}
+		return nil
+	}
+
+	classPositions := make([]int, 0, len(plan.classes))
+	for position := range plan.classes {
+		classPositions = append(classPositions, position)
+	}
+	sort.Ints(classPositions)
+	for _, position := range classPositions {
+		class := plan.classes[position]
+		if err := validate("class "+class.name, class.metadata, false, false); err != nil {
+			return err
+		}
+	}
+	callPositions := make([]int, 0, len(plan.calls))
+	for position := range plan.calls {
+		callPositions = append(callPositions, position)
+	}
+	sort.Ints(callPositions)
+	for _, position := range callPositions {
+		call := plan.calls[position]
+		if err := validate("call "+call.name, call.metadata, false, false); err != nil {
+			return err
+		}
+	}
+	if plan.aliases != nil {
+		if err := validate("exported aliases", *plan.aliases, false, !plan.decodePureJSONAliases); err != nil {
+			return err
+		}
+	}
+	if len(plan.metadataTypes) != 0 {
+		elements := make([]*shimast.Node, 0, len(plan.metadataTypes))
+		for _, template := range plan.metadataTypes {
+			elements = append(elements, template.materialize(ec, imports))
+		}
+		metadata := ec.Factory.NewArrayLiteralExpression(ec.Factory.NewNodeList(elements), false)
+		encoding := compactMetadataEncodingForSizeGuard(
+			metadata,
+			imports,
+			runtimeReferences,
+			plan.metadataTypeResolver,
+			true,
+			false,
+		)
+		if len(encoding.serialized) > maxCompactMetadataPayloadBytes {
+			return fmt.Errorf(
+				"%s: compact metadata for shared type registry is %d bytes after graph interning; limit is %d bytes",
+				info.file.FileName(),
+				len(encoding.serialized),
+				maxCompactMetadataPayloadBytes,
+			)
+		}
+	}
+	return nil
+}
+
 // metadataRuntimeRequirement reports the first generated construct that cannot
 // be emitted without TSF's compact metadata runtime. Alias registries made only
 // of JSON stay self-contained; all other current metadata surfaces use runtime
@@ -170,7 +260,7 @@ func metadataRuntimeRequirement(plan *fileEmissionPlan) string {
 	if plan == nil {
 		return ""
 	}
-	if plan.aliases != nil && !compactMetadataIsPureJSON(plan.aliases.parsed) {
+	if plan.aliases != nil && (plan.decodePureJSONAliases || !compactMetadataIsPureJSON(plan.aliases.parsed)) {
 		if names := runtimeAliasMetadataNames(plan.aliases.parsed); len(names) != 0 {
 			return "reflected alias metadata for " + strings.Join(names, ", ")
 		}
@@ -236,6 +326,10 @@ func aliasMetadataExpression(info *fileInfo, reg *registry) string {
 			}
 			continue
 		}
+		if ref, ok := reexportedTypeMetadataReference(info, reg, name); ok {
+			entries = append(entries, quote(name)+": "+externalImportedTypeExpr(ref, name))
+			continue
+		}
 		if alias, owner, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok {
 			if len(alias.params) == 0 {
 				if expr := cachedAliasTypeExpr(owner, reg, alias); expr != "" && !metadataExprTooLarge(expr) {
@@ -254,6 +348,56 @@ func aliasMetadataExpression(info *fileInfo, reg *registry) string {
 		return ""
 	}
 	return "{" + strings.Join(entries, ", ") + "}"
+}
+
+// Re-exporting a type must not copy the owner's complete structural metadata
+// into every barrel. Point at the immediate owning module when this compilation
+// emits that module's alias table; it may itself contain another recipe when the
+// export crosses more than one barrel. Declaration-only dependencies do not
+// necessarily publish runtime alias metadata, so keep their structural metadata
+// at the first emitted boundary instead of producing an unresolvable recipe.
+func reexportedTypeMetadataReference(info *fileInfo, reg *registry, name string) (importRef, bool) {
+	if info == nil || reg == nil {
+		return importRef{}, false
+	}
+	if ref, ok := info.reexports[name]; ok {
+		if target := reg.byPath[ref.source]; canPublishTypeMetadata(target) && exportedTypeMetadataExists(target, reg, ref.exportName) {
+			ref.spec = emittedMetadataOwnerSpecifier(info, target, ref.spec)
+			return ref, ref.spec != "" && ref.exportName != ""
+		}
+	}
+	for _, ref := range info.exportStar {
+		target := reg.byPath[ref.source]
+		if !canPublishTypeMetadata(target) || !exportedTypeMetadataExists(target, reg, name) {
+			continue
+		}
+		ref.exportName = name
+		ref.spec = emittedMetadataOwnerSpecifier(info, target, ref.spec)
+		return ref, ref.spec != ""
+	}
+	return importRef{}, false
+}
+
+func canPublishTypeMetadata(info *fileInfo) bool {
+	return info != nil && info.file != nil && !info.file.IsDeclarationFile
+}
+
+func emittedMetadataOwnerSpecifier(info *fileInfo, target *fileInfo, spec string) string {
+	if info == nil || info.file == nil || target == nil || target.file == nil || !strings.HasPrefix(spec, ".") {
+		return spec
+	}
+	// Use an explicit runtime file rather than syntactically appending `.js` to
+	// the source specifier. The latter turns `./directory` into a nonexistent
+	// `./directory.js` instead of the emitted `./directory/index.js`.
+	return moduleSpecifierForOutput(info.file.FileName(), target.file.FileName(), true)
+}
+
+func exportedTypeMetadataExists(info *fileInfo, reg *registry, name string) bool {
+	if _, _, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok {
+		return true
+	}
+	_, _, _, ok := resolveExportedInterfaceDecl(info, reg, name, map[string]bool{})
+	return ok
 }
 
 func cachedAliasTypeExpr(info *fileInfo, reg *registry, alias aliasInfo) string {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -12,13 +14,15 @@ import (
 
 const (
 	compactMetadataRuntimeSpec       = "@zyno-io/ts-reflection/type-metadata-runtime"
-	compactMetadataDecoderName       = "decodeCompactMetadataV1"
-	compactMetadataRegistryName      = "createCompactMetadataRegistryV1"
+	compactMetadataDecoderName       = "decodeCompactMetadataV2"
+	compactMetadataRegistryName      = "createCompactMetadataRegistryV2"
 	compactMetadataAliasResolverName = "resolveCompactMetadataAliasV1"
 	compactMetadataReferenceKey      = "$tsf"
 	compactMetadataImportKey         = "$tsfImport"
 	compactMetadataAliasKey          = "$tsfAlias"
 	compactMetadataTypeKey           = "$tsfType"
+	compactMetadataNodeKey           = "$tsfNode"
+	compactMetadataGraphMinBytes     = 64
 )
 
 type compactMetadataEncoding struct {
@@ -32,6 +36,23 @@ type compactMetadataEncoder struct {
 	referenceIndexes map[string]int
 	referenceKey     func(*shimast.Node) (string, bool)
 	runtimeRecipe    func(*compactMetadataEncoder, *shimast.Node) bool
+	graph            *compactMetadataGraph
+	graphRoot        *shimast.Node
+}
+
+type compactMetadataGraphNode struct {
+	key       string
+	size      int
+	container bool
+	shareable bool
+}
+
+type compactMetadataGraph struct {
+	info    map[*shimast.Node]compactMetadataGraphNode
+	counts  map[string]int
+	indexes map[string]int
+	nodes   []*shimast.Node
+	roots   map[*shimast.Node]bool
 }
 
 type compactMetadataRuntimeInterner struct {
@@ -129,7 +150,47 @@ func encodeCompactMetadataWithRuntimeRecipes(
 	}
 }
 
+func encodeCompactMetadataV2WithRuntimeRecipes(
+	root *shimast.Node,
+	referenceKey func(*shimast.Node) (string, bool),
+	runtimeRecipe func(*compactMetadataEncoder, *shimast.Node) bool,
+	metadataTypeResolver string,
+	preserveArrayElements bool,
+) compactMetadataEncoding {
+	encoder := &compactMetadataEncoder{
+		referenceIndexes: map[string]int{},
+		referenceKey:     referenceKey,
+		runtimeRecipe:    runtimeRecipe,
+	}
+	encoder.graph = buildCompactMetadataGraph(root, referenceKey, metadataTypeResolver)
+	if preserveArrayElements && root != nil && root.Kind == shimast.KindArrayLiteralExpression {
+		for _, element := range root.AsArrayLiteralExpression().Elements.Nodes {
+			encoder.graph.roots[element] = true
+		}
+	}
+	encoder.buffer.WriteString("[2,")
+	encoder.writeValue(root)
+	encoder.buffer.WriteString(",[")
+	for index := 0; index < len(encoder.graph.nodes); index++ {
+		if index != 0 {
+			encoder.buffer.WriteByte(',')
+		}
+		node := encoder.graph.nodes[index]
+		encoder.graphRoot = node
+		encoder.writeValue(node)
+		encoder.graphRoot = nil
+	}
+	encoder.buffer.WriteString("]]")
+	return compactMetadataEncoding{
+		serialized: encoder.buffer.String(),
+		references: encoder.references,
+	}
+}
+
 func (encoder *compactMetadataEncoder) writeValue(node *shimast.Node) {
+	if encoder.writeGraphReference(node) {
+		return
+	}
 	start := encoder.buffer.Len()
 	referenceStart := len(encoder.references)
 	if encoder.writeJSONValue(node) {
@@ -138,6 +199,26 @@ func (encoder *compactMetadataEncoder) writeValue(node *shimast.Node) {
 	encoder.buffer.Truncate(start)
 	encoder.references = encoder.references[:referenceStart]
 	encoder.writeReference(node)
+}
+
+func (encoder *compactMetadataEncoder) writeGraphReference(node *shimast.Node) bool {
+	if encoder.graph == nil || node == nil || node == encoder.graphRoot || encoder.graph.roots[node] {
+		return false
+	}
+	info, ok := encoder.graph.info[node]
+	if !ok || !info.container || !info.shareable || info.size < compactMetadataGraphMinBytes || encoder.graph.counts[info.key] < 2 {
+		return false
+	}
+	index, ok := encoder.graph.indexes[info.key]
+	if !ok {
+		index = len(encoder.graph.nodes)
+		encoder.graph.indexes[info.key] = index
+		encoder.graph.nodes = append(encoder.graph.nodes, node)
+	}
+	encoder.buffer.WriteString(`{"` + compactMetadataNodeKey + `":`)
+	encoder.buffer.WriteString(strconv.Itoa(index))
+	encoder.buffer.WriteByte('}')
+	return true
 }
 
 func (encoder *compactMetadataEncoder) writeJSONValue(node *shimast.Node) bool {
@@ -215,7 +296,8 @@ func (encoder *compactMetadataEncoder) writeObject(object *shimast.ObjectLiteral
 }
 
 func isCompactMetadataReservedKey(name string) bool {
-	return name == compactMetadataReferenceKey || name == compactMetadataImportKey || name == compactMetadataAliasKey || name == compactMetadataTypeKey
+	return name == compactMetadataReferenceKey || name == compactMetadataImportKey || name == compactMetadataAliasKey ||
+		name == compactMetadataTypeKey || name == compactMetadataNodeKey
 }
 
 func compactMetadataPropertyName(property *shimast.Node) (string, bool) {
@@ -302,6 +384,164 @@ func (encoder *compactMetadataEncoder) writeReferenceMarker(index int) {
 	encoder.buffer.WriteByte('}')
 }
 
+func buildCompactMetadataGraph(
+	root *shimast.Node,
+	referenceKey func(*shimast.Node) (string, bool),
+	metadataTypeResolver string,
+) *compactMetadataGraph {
+	graph := &compactMetadataGraph{
+		info:    map[*shimast.Node]compactMetadataGraphNode{},
+		counts:  map[string]int{},
+		indexes: map[string]int{},
+		roots:   map[*shimast.Node]bool{},
+	}
+	var fingerprint func(*shimast.Node) compactMetadataGraphNode
+	fingerprint = func(node *shimast.Node) compactMetadataGraphNode {
+		if node == nil {
+			return compactMetadataGraphNode{}
+		}
+		if cached, ok := graph.info[node]; ok {
+			return cached
+		}
+		if node.Kind == shimast.KindParenthesizedExpression {
+			result := fingerprint(node.AsParenthesizedExpression().Expression)
+			graph.info[node] = result
+			return result
+		}
+		result := compactMetadataGraphNode{}
+		var signature strings.Builder
+		switch node.Kind {
+		case shimast.KindObjectLiteralExpression:
+			object := node.AsObjectLiteralExpression()
+			if object == nil || object.Properties == nil {
+				result = compactMetadataGraphNode{key: compactMetadataFingerprint("o"), size: 2, container: true, shareable: true}
+				break
+			}
+			if len(object.Properties.Nodes) == 1 {
+				if name, ok := compactMetadataPropertyName(object.Properties.Nodes[0]); ok && isCompactMetadataReservedKey(name) {
+					break
+				}
+			}
+			signature.WriteString("object:")
+			size := 2
+			shareable := true
+			for _, property := range object.Properties.Nodes {
+				name, ok := compactMetadataPropertyName(property)
+				assignment := property.AsPropertyAssignment()
+				if !ok || name == "__proto__" || assignment == nil {
+					shareable = false
+					break
+				}
+				child := fingerprint(assignment.Initializer)
+				if !child.shareable {
+					shareable = false
+					break
+				}
+				signature.WriteString(strconv.Quote(name))
+				signature.WriteByte(':')
+				signature.WriteString(child.key)
+				signature.WriteByte(';')
+				size += len(strconv.Quote(name)) + 1 + child.size + 1
+			}
+			if shareable {
+				result = compactMetadataGraphNode{key: compactMetadataFingerprint(signature.String()), size: size, container: true, shareable: true}
+			}
+		case shimast.KindArrayLiteralExpression:
+			array := node.AsArrayLiteralExpression()
+			signature.WriteString("array:")
+			size := 2
+			shareable := array != nil
+			if shareable && array.Elements != nil {
+				for _, element := range array.Elements.Nodes {
+					if element == nil || element.Kind == shimast.KindOmittedExpression || element.Kind == shimast.KindSpreadElement {
+						shareable = false
+						break
+					}
+					child := fingerprint(element)
+					if !child.shareable {
+						shareable = false
+						break
+					}
+					signature.WriteString(child.key)
+					signature.WriteByte(';')
+					size += child.size + 1
+				}
+			}
+			if shareable {
+				result = compactMetadataGraphNode{key: compactMetadataFingerprint(signature.String()), size: size, container: true, shareable: true}
+			}
+		case shimast.KindStringLiteral, shimast.KindNoSubstitutionTemplateLiteral:
+			value, _ := json.Marshal(node.Text())
+			result = compactMetadataGraphNode{key: compactMetadataFingerprint("string:" + string(value)), size: len(value), shareable: true}
+		case shimast.KindNumericLiteral:
+			if json.Valid([]byte(node.Text())) {
+				result = compactMetadataGraphNode{key: compactMetadataFingerprint("number:" + node.Text()), size: len(node.Text()), shareable: true}
+			}
+		case shimast.KindTrueKeyword:
+			result = compactMetadataGraphNode{key: compactMetadataFingerprint("true"), size: 4, shareable: true}
+		case shimast.KindFalseKeyword:
+			result = compactMetadataGraphNode{key: compactMetadataFingerprint("false"), size: 5, shareable: true}
+		case shimast.KindNullKeyword:
+			result = compactMetadataGraphNode{key: compactMetadataFingerprint("null"), size: 4, shareable: true}
+		case shimast.KindPrefixUnaryExpression:
+			unary := node.AsPrefixUnaryExpression()
+			if unary != nil && unary.Operator == shimast.KindMinusToken && unary.Operand != nil && unary.Operand.Kind == shimast.KindNumericLiteral {
+				value := "-" + unary.Operand.Text()
+				if json.Valid([]byte(value)) {
+					result = compactMetadataGraphNode{key: compactMetadataFingerprint("number:" + value), size: len(value), shareable: true}
+				}
+			}
+		default:
+			if index, ok := compactMetadataTypeRecipe(node, metadataTypeResolver); ok {
+				value := fmt.Sprintf("type:%d", index)
+				result = compactMetadataGraphNode{key: compactMetadataFingerprint(value), size: len(value) + 8, shareable: true}
+			} else if referenceKey != nil {
+				if key, ok := referenceKey(node); ok {
+					result = compactMetadataGraphNode{key: compactMetadataFingerprint("reference:" + key), size: len(key) + 8, shareable: true}
+				}
+			}
+		}
+		graph.info[node] = result
+		if result.container && result.shareable && result.size >= compactMetadataGraphMinBytes {
+			graph.counts[result.key]++
+		}
+		return result
+	}
+	fingerprint(root)
+	return graph
+}
+
+func compactMetadataFingerprint(value string) string {
+	hash := sha256.Sum256([]byte(value))
+	return string(hash[:])
+}
+
+func compactMetadataEncodingForSizeGuard(
+	metadata *shimast.Node,
+	imports *astImportRegistry,
+	runtimeReferences *compactMetadataRuntimeInterner,
+	metadataTypeResolver string,
+	preserveArrayElements bool,
+	inlinePureJSON bool,
+) compactMetadataEncoding {
+	runtimeRecipe := func(encoder *compactMetadataEncoder, expression *shimast.Node) bool {
+		return writeCompactMetadataRuntimeRecipe(encoder, expression, imports, metadataTypeResolver)
+	}
+	if inlinePureJSON {
+		encoding := encodeCompactMetadataWithRuntimeRecipes(metadata, runtimeReferences.deduplicationKey, runtimeRecipe)
+		if len(encoding.references) == 0 && !strings.Contains(encoding.serialized, `"$tsf`) {
+			return encoding
+		}
+	}
+	return encodeCompactMetadataV2WithRuntimeRecipes(
+		metadata,
+		runtimeReferences.deduplicationKey,
+		runtimeRecipe,
+		metadataTypeResolver,
+		preserveArrayElements,
+	)
+}
+
 func materializeCompactMetadataExpression(
 	ec *shimprinter.EmitContext,
 	imports *astImportRegistry,
@@ -322,9 +562,10 @@ func materializeCompactAliasMetadataExpression(
 	runtimeReferences *compactMetadataRuntimeInterner,
 	template expressionTemplate,
 	metadataTypeResolver string,
+	inlinePureJSON bool,
 ) *shimast.Node {
 	metadata := template.materialize(ec, imports)
-	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false, true)
+	return materializeCompactMetadataNode(ec, imports, runtimeReferences, metadata, metadataTypeResolver, false, inlinePureJSON)
 }
 
 func materializeCompactMetadataRegistry(
@@ -351,12 +592,46 @@ func materializeCompactMetadataNode(
 	registry bool,
 	inlinePureJSON bool,
 ) *shimast.Node {
-	encoding := encodeCompactMetadataWithRuntimeRecipes(
+	encodeV1 := func() compactMetadataEncoding {
+		return encodeCompactMetadataWithRuntimeRecipes(
+			metadata,
+			runtimeReferences.deduplicationKey,
+			func(encoder *compactMetadataEncoder, expression *shimast.Node) bool {
+				return writeCompactMetadataRuntimeRecipe(encoder, expression, imports, metadataTypeResolver)
+			},
+		)
+	}
+	if inlinePureJSON {
+		encoding := encodeV1()
+		if len(encoding.references) == 0 && !strings.Contains(encoding.serialized, `"$tsf`) {
+			parsed := ec.Factory.NewCallExpression(
+				ec.Factory.NewPropertyAccessExpression(
+					ec.Factory.NewIdentifier("JSON"),
+					nil,
+					ec.Factory.NewIdentifier("parse"),
+					shimast.NodeFlagsNone,
+				),
+				nil,
+				nil,
+				ec.Factory.NewNodeList([]*shimast.Node{ec.Factory.NewStringLiteral(encoding.serialized, shimast.TokenFlagsNone)}),
+				shimast.NodeFlagsNone,
+			)
+			return ec.Factory.NewElementAccessExpression(
+				parsed,
+				nil,
+				ec.Factory.NewNumericLiteral("1", shimast.TokenFlagsNone),
+				shimast.NodeFlagsNone,
+			)
+		}
+	}
+	encoding := encodeCompactMetadataV2WithRuntimeRecipes(
 		metadata,
 		runtimeReferences.deduplicationKey,
 		func(encoder *compactMetadataEncoder, expression *shimast.Node) bool {
 			return writeCompactMetadataRuntimeRecipe(encoder, expression, imports, metadataTypeResolver)
 		},
+		metadataTypeResolver,
+		registry,
 	)
 	references := make([]*shimast.Node, 0, len(encoding.references))
 	for _, reference := range encoding.references {
@@ -365,26 +640,6 @@ func materializeCompactMetadataNode(
 		// classes and validators, leaving the generated closure unable to resolve
 		// its original binding.
 		references = append(references, ec.Factory.DeepCloneNode(reference))
-	}
-	if inlinePureJSON && len(references) == 0 && !strings.Contains(encoding.serialized, `"$tsf`) {
-		parsed := ec.Factory.NewCallExpression(
-			ec.Factory.NewPropertyAccessExpression(
-				ec.Factory.NewIdentifier("JSON"),
-				nil,
-				ec.Factory.NewIdentifier("parse"),
-				shimast.NodeFlagsNone,
-			),
-			nil,
-			nil,
-			ec.Factory.NewNodeList([]*shimast.Node{ec.Factory.NewStringLiteral(encoding.serialized, shimast.TokenFlagsNone)}),
-			shimast.NodeFlagsNone,
-		)
-		return ec.Factory.NewElementAccessExpression(
-			parsed,
-			nil,
-			ec.Factory.NewNumericLiteral("1", shimast.TokenFlagsNone),
-			shimast.NodeFlagsNone,
-		)
 	}
 	helperName := compactMetadataDecoderName
 	if registry {

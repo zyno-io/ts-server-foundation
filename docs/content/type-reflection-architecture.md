@@ -112,9 +112,13 @@ Generic application aliases use the exported base name for OpenAPI components. F
 
 Shared packages should expose emitted alias metadata through `__tsfTypeAliases`. When an app imports a type from a package that exposes TSF metadata, the compiler should reference that package metadata by import/export identity. It must not resolve behavior by repository path, workspace layout, or application-specific package name.
 
+Re-export barrels publish lightweight alias recipes that point to their immediate source module. They must not copy the source module's resolved metadata graph into every barrel. The barrel table remains serialized until reflection first reads it, then the recipes resolve metadata from the owning alias tables.
+
 Executable applications may set `emitTypeAliases: false` when no downstream package consumes their alias registry. Applications whose runtime method reflection covers decorated methods such as controller routes may set `emitUndecoratedMethods: false`. Browser-consumable shared packages may set `emitMetadataRuntimeImport: false`; pure JSON alias metadata remains embedded, and compilation fails if any generated metadata would require the compact runtime. All three options default to `true`. Constructor and class-property metadata is emitted independently of the method option.
 
 TSF emits metadata through a versioned compact runtime format. Structural metadata is serialized as opaque JSON so TypeScript's built-in emit transforms do not traverse the generated graph. Indexed runtime slots represent values with JavaScript semantics, module recipes represent imported classes and aliases, and one lazy per-file registry decodes and caches repeated types. CommonJS and ESM output share this wire format.
+
+V2 metadata tables remain serialized until their first reflected read. Class metadata uses a lazy proxy so the compiler's post-class `classType` assignment does not trigger parsing, while decorators and reflection consumers continue to observe one stable metadata object. Repeated object and array subgraphs, including graphs containing runtime-reference slots, use shared node references and revive to shared object identity. Compiler output fails when an individual compact table still exceeds 1 MiB after graph interning; oversized metadata must be split or its reflection surface narrowed rather than silently emitted or truncated.
 
 `@zyno-io/ts-reflection` is the canonical compiler-recognized runtime package because the compiler must distinguish metadata helpers from arbitrary user imports. `@zyno-io/ts-server-foundation` remains recognized only as a compatibility re-export during the migration. Other package specs must not be special-cased.
 

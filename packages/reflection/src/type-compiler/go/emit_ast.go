@@ -317,6 +317,7 @@ func metadataTransform(plans emissionPlans) driver.PluginTransform {
 				runtimeReferences,
 				*plan.aliases,
 				plan.metadataTypeResolver,
+				!plan.decodePureJSONAliases,
 			))
 		}
 		declarations := []*shimast.Node{}

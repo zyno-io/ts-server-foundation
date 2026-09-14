@@ -79,6 +79,8 @@ function createFixture(): string {
         join(packageDirectory, 'compact-metadata.d.ts'),
         `export declare function decodeCompactMetadataV1<T>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
          export declare function createCompactMetadataRegistryV1(serialized: string, references: readonly unknown[]): (index: number) => unknown;
+         export declare function decodeCompactMetadataV2<T extends object>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
+         export declare function createCompactMetadataRegistryV2(serialized: string, references: readonly unknown[]): (index: number) => unknown;
          export declare function resolveCompactMetadataAliasV1(loadModule: () => unknown, exportName: string, typeName: string): unknown;\n`
     );
     const compactRuntime = `
@@ -132,6 +134,86 @@ function createFixture(): string {
             };
             return resolveType;
         }
+        function parseV2(serialized) {
+            const envelope = JSON.parse(serialized);
+            if (!Array.isArray(envelope) || envelope[0] !== 2 || !Array.isArray(envelope[2])) throw new Error('invalid compact metadata');
+            return [envelope[1], envelope[2]];
+        }
+        function createNodeResolver(nodes, references, resolveType) {
+            const resolved = new Array(nodes.length);
+            const initialized = new Uint8Array(nodes.length);
+            const resolveNode = index => {
+                if (!initialized[index]) {
+                    initialized[index] = 1;
+                    resolved[index] = nodes[index];
+                    resolved[index] = reviveV2(nodes[index], references, resolveType, resolveNode);
+                }
+                return resolved[index];
+            };
+            return resolveNode;
+        }
+        function reviveV2(value, references, resolveType, resolveNode) {
+            if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && '$tsfNode' in value) {
+                return resolveNode(value.$tsfNode);
+            }
+            if (!value || typeof value !== 'object') return value;
+            const keys = Array.isArray(value) ? [] : Object.keys(value);
+            if (keys.length === 1 && keys[0] === '$tsf') return references[value.$tsf];
+            if (keys.length === 1 && keys[0] === '$tsfImport') {
+                const recipe = value.$tsfImport;
+                const loader = moduleLoader(references, recipe[0], recipe.length === 3 ? recipe[1] : undefined);
+                const exportName = recipe.length === 3 ? recipe[2] : recipe[1];
+                return () => { const imported = loader(); return imported && imported[exportName]; };
+            }
+            if (keys.length === 1 && keys[0] === '$tsfAlias') {
+                const recipe = value.$tsfAlias;
+                const loader = moduleLoader(references, recipe[0], recipe.length === 4 ? recipe[1] : undefined);
+                return resolveAlias(loader, recipe.length === 4 ? recipe[2] : recipe[1], recipe.length === 4 ? recipe[3] : recipe[2]);
+            }
+            if (keys.length === 1 && keys[0] === '$tsfType') return resolveType(value.$tsfType);
+            if (Array.isArray(value)) {
+                for (let index = 0; index < value.length; index++) value[index] = reviveV2(value[index], references, resolveType, resolveNode);
+            } else {
+                for (const key of keys) value[key] = reviveV2(value[key], references, resolveType, resolveNode);
+            }
+            return value;
+        }
+        function decodeV2(serialized, references, resolveType) {
+            const target = {};
+            let initialized = false;
+            const initialize = () => {
+                if (initialized) return;
+                const [root, nodes] = parseV2(serialized);
+                const value = reviveV2(root, references, resolveType, createNodeResolver(nodes, references, resolveType));
+                for (const key of Reflect.ownKeys(value)) if (!Object.prototype.hasOwnProperty.call(target, key)) target[key] = value[key];
+                initialized = true;
+            };
+            return new Proxy(target, {
+                get(current, key, receiver) { initialize(); return Reflect.get(current, key, receiver); },
+                set(current, key, value) { return Reflect.set(current, key, value, current); },
+                ownKeys(current) { initialize(); return Reflect.ownKeys(current); },
+                getOwnPropertyDescriptor(current, key) { initialize(); return Reflect.getOwnPropertyDescriptor(current, key); }
+            });
+        }
+        function createRegistryV2(serialized, references) {
+            let encoded, resolved, initialized, resolveNode;
+            const resolveType = index => {
+                if (!encoded) {
+                    const parsed = parseV2(serialized);
+                    encoded = parsed[0];
+                    resolved = new Array(encoded.length);
+                    initialized = new Uint8Array(encoded.length);
+                    resolveNode = createNodeResolver(parsed[1], references, resolveType);
+                }
+                if (!initialized[index]) {
+                    initialized[index] = 1;
+                    resolved[index] = encoded[index];
+                    resolved[index] = reviveV2(encoded[index], references, resolveType, resolveNode);
+                }
+                return resolved[index];
+            };
+            return resolveType;
+        }
         function resolveAlias(loadModule, exportName, typeName) {
             let imported;
             try { imported = loadModule(); } catch {}
@@ -143,11 +225,11 @@ function createFixture(): string {
     `;
     writeFileSync(
         join(packageDirectory, 'compact-metadata.js'),
-        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, decode as decodeCompactMetadataV1, resolveAlias as resolveCompactMetadataAliasV1 };\n`
+        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, createRegistryV2 as createCompactMetadataRegistryV2, decode as decodeCompactMetadataV1, decodeV2 as decodeCompactMetadataV2, resolveAlias as resolveCompactMetadataAliasV1 };\n`
     );
     writeFileSync(
         join(packageDirectory, 'compact-metadata.cjs'),
-        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.decodeCompactMetadataV1 = decode; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
+        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.createCompactMetadataRegistryV2 = createRegistryV2; exports.decodeCompactMetadataV1 = decode; exports.decodeCompactMetadataV2 = decodeV2; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
     );
     writeFileSync(
         join(reflectionPackageDirectory, 'package.json'),
@@ -167,15 +249,17 @@ function createFixture(): string {
         join(reflectionPackageDirectory, 'type-metadata-runtime.d.ts'),
         `export declare function decodeCompactMetadataV1<T>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
          export declare function createCompactMetadataRegistryV1(serialized: string, references: readonly unknown[]): (index: number) => unknown;
+         export declare function decodeCompactMetadataV2<T extends object>(serialized: string, references: readonly unknown[], resolveType?: (index: number) => unknown): T;
+         export declare function createCompactMetadataRegistryV2(serialized: string, references: readonly unknown[]): (index: number) => unknown;
          export declare function resolveCompactMetadataAliasV1(loadModule: () => unknown, exportName: string, typeName: string): unknown;\n`
     );
     writeFileSync(
         join(reflectionPackageDirectory, 'type-metadata-runtime.js'),
-        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, decode as decodeCompactMetadataV1, resolveAlias as resolveCompactMetadataAliasV1 };\n`
+        `${compactRuntime}\nexport { createRegistry as createCompactMetadataRegistryV1, createRegistryV2 as createCompactMetadataRegistryV2, decode as decodeCompactMetadataV1, decodeV2 as decodeCompactMetadataV2, resolveAlias as resolveCompactMetadataAliasV1 };\n`
     );
     writeFileSync(
         join(reflectionPackageDirectory, 'type-metadata-runtime.cjs'),
-        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.decodeCompactMetadataV1 = decode; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
+        `${compactRuntime}\nexports.createCompactMetadataRegistryV1 = createRegistry; exports.createCompactMetadataRegistryV2 = createRegistryV2; exports.decodeCompactMetadataV1 = decode; exports.decodeCompactMetadataV2 = decodeV2; exports.resolveCompactMetadataAliasV1 = resolveAlias;\n`
     );
     writeFileSync(
         join(orderAliasDirectory, 'package.json'),

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { createCompactMetadataRegistryV1, decodeCompactMetadataV1, resolveCompactMetadataAliasV1 } from '../src/reflection/compact-metadata';
+import {
+    createCompactMetadataRegistryV1,
+    createCompactMetadataRegistryV2,
+    decodeCompactMetadataV1,
+    decodeCompactMetadataV2,
+    resolveCompactMetadataAliasV1
+} from '../src/reflection/compact-metadata';
 
 describe('compact metadata runtime', () => {
     it('revives runtime references without changing JSON metadata', () => {
@@ -76,6 +82,45 @@ describe('compact metadata runtime', () => {
         const recursive = resolveType(2) as { element: unknown };
         assert.strictEqual(recursive.element, recursive);
         assert.throws(() => resolveType(3), /Invalid TSF compact metadata type 3/);
+    });
+
+    it('keeps V2 metadata encoded until first inspection and retains early overrides', () => {
+        class Model {}
+        const invalid = decodeCompactMetadataV2<Record<string, unknown>>('not json', []);
+        invalid.classType = Model;
+        assert.throws(() => invalid.kind, /Unexpected token|not valid JSON/);
+
+        const metadata = decodeCompactMetadataV2<{ kind: number; classType: typeof Model }>('[2,{"kind":16,"classType":{"$tsf":0}},[]]', [
+            () => Model
+        ]);
+        metadata.classType = Model;
+        assert.equal(metadata.kind, 16);
+        assert.strictEqual(metadata.classType, Model);
+    });
+
+    it('resolves shared V2 graph nodes once, including runtime references', () => {
+        const runtime = () => 'runtime';
+        const metadata = decodeCompactMetadataV2<{
+            first: { kind: number; runtime: typeof runtime };
+            second: { kind: number; runtime: typeof runtime };
+        }>('[2,{"first":{"$tsfNode":0},"second":{"$tsfNode":0}},[{"kind":16,"runtime":{"$tsf":0}}]]', [runtime]);
+
+        assert.strictEqual(metadata.first, metadata.second);
+        assert.strictEqual(metadata.first.runtime, runtime);
+    });
+
+    it('does not parse a V2 type registry until a type is requested', () => {
+        const invalid = createCompactMetadataRegistryV2('not json', []);
+        assert.throws(() => invalid(0), /Unexpected token|not valid JSON/);
+
+        const resolveType = createCompactMetadataRegistryV2('[2,[{"$tsfNode":0},{"kind":14,"element":{"$tsfType":0}}],[{"kind":6}]]', []);
+        const primitive = resolveType(0);
+        assert.strictEqual(resolveType(0), primitive);
+        assert.strictEqual((resolveType(1) as { element: unknown }).element, primitive);
+
+        const resolveRecursiveType = createCompactMetadataRegistryV2('[2,[{"kind":14,"element":{"$tsfType":0}}],[]]', []);
+        const recursive = resolveRecursiveType(0) as { element: unknown };
+        assert.strictEqual(recursive.element, recursive);
     });
 
     it('rejects incompatible payloads and invalid references', () => {
