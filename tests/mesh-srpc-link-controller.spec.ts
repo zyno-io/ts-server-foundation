@@ -199,6 +199,34 @@ describe('MeshSrpcLinkController', () => {
         assert.equal(activations, 1);
     });
 
+    it('preserves protocol-v1 implicit supersession when reserving mesh ownership', async () => {
+        const server = Object.create(MeshSrpcServer.prototype) as any;
+        const allowSupersedeValues: boolean[] = [];
+        server.clientRegistryMetadata = new Map();
+        server.meshClientService = {
+            reserveClient: async (_clientId: string, _metadata: unknown, allowSupersede: boolean) => {
+                allowSupersedeValues.push(allowSupersede);
+                return true;
+            }
+        };
+        server.isCurrentStream = () => true;
+        server.enqueueClientRegistry = async (_clientId: string, fn: () => Promise<boolean>) => fn();
+        server.installMetaProxy = () => {};
+
+        const streams = [
+            { id: 'v1', clientId: 'client-v1', protocolVersion: 1, supersede: false, lastPingAt: 1, meta: { role: 'client' } },
+            { id: 'v2', clientId: 'client-v2', protocolVersion: 2, supersede: false, lastPingAt: 1, meta: { role: 'client' } },
+            { id: 'v2-supersede', clientId: 'client-v2-supersede', protocolVersion: 2, supersede: true, lastPingAt: 1, meta: { role: 'client' } }
+        ];
+
+        for (const stream of streams) {
+            const rejected = await server.postEstablishCheck(stream);
+            assert.equal(rejected, false);
+        }
+
+        assert.deepEqual(allowSupersedeValues, [true, false, true]);
+    });
+
     it('fences a running mesh while backfill is pending and rejects new admission', async () => {
         const server = Object.create(MeshSrpcServer.prototype) as any;
         let releaseBackfill: (() => void) | undefined;

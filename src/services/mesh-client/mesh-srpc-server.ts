@@ -451,9 +451,11 @@ export class MeshSrpcServer<
     /**
      * Defers stream activation until mesh reservation succeeds.
      * Installs meta proxy and reserves the client atomically in Redis
-     * (respecting allowSupersede for v2), all serialized in the per-client
-     * registry chain. Reserved clients remain hidden from lookup/invoke until
-     * onStreamActivated promotes them to active.
+     * using the protocol-version supersession rules, all serialized in the
+     * per-client registry chain. Protocol v1 retains its implicit replacement
+     * behavior; protocol v2+ requires the explicit supersede flag. Reserved
+     * clients remain hidden from lookup/invoke until onStreamActivated promotes
+     * them to active.
      *
      * If registration returns a conflict, cleanupStream is called
      * (which fires onStreamDisconnected and drains the queue) so
@@ -467,7 +469,7 @@ export class MeshSrpcServer<
         const registryMetadata = snapshotMetadata(this.extractRegistryMetadata(stream));
         this.clientRegistryMetadata.set(stream.clientId, registryMetadata);
 
-        const allowSupersede = stream.supersede;
+        const allowSupersede = this.shouldAllowSupersede(stream);
 
         return this.enqueueClientRegistry(stream.clientId, async () => {
             // Stream cleaned up during queue wait (disconnect / reconnect)
@@ -494,6 +496,10 @@ export class MeshSrpcServer<
 
     private extractRegistryMetadata(stream: SrpcStream<TMeta>): TRegistryMeta {
         return this.extractRegistryMetadataFn ? this.extractRegistryMetadataFn(stream) : (stream.meta as unknown as TRegistryMeta);
+    }
+
+    private shouldAllowSupersede(stream: SrpcStream<TMeta>): boolean {
+        return stream.protocolVersion === 1 || stream.supersede;
     }
 
     private static readonly PROXIED = Symbol('proxied');
@@ -1147,7 +1153,7 @@ export class MeshSrpcServer<
             // populated the cache. The live stream is authoritative.
             const registryMetadata = snapshotMetadata(this.extractRegistryMetadata(stream));
             this.clientRegistryMetadata.set(clientId, registryMetadata);
-            const allowSupersede = stream.supersede;
+            const allowSupersede = this.shouldAllowSupersede(stream);
             const backfill = this.enqueueClientRegistry(clientId, async () => {
                 this.assertMeshStartCurrent(generation);
                 // Only backfill the current stream (active or pending).
