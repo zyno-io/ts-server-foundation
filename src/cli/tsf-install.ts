@@ -22,10 +22,11 @@ import { parseDocument } from 'yaml';
 import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from './common';
 
 const PACKAGE_NAME = '@zyno-io/ts-server-foundation';
+const REFLECTION_PACKAGE_NAME = '@zyno-io/ts-reflection';
 const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
-const REFLECTION_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-reflection/type-compiler';
+const REFLECTION_TYPE_COMPILER_PLUGIN = `${REFLECTION_PACKAGE_NAME}/type-compiler`;
 const TTSC_NODE_24_PATCH_VERSION = '0.30.1';
 const TTSC_NODE_24_PATCH_FILE = `ttsc+${TTSC_NODE_24_PATCH_VERSION}.patch`;
 
@@ -315,7 +316,7 @@ function findCompilerWorkspaces(
         });
     }
 
-    return [...packages.values()].filter(workspace => usesTsfCompiler(workspace.pkg));
+    return [...packages.values()].filter(usesTsfCompiler);
 }
 
 function findWorkspaceRoot(projectDir: string): string | undefined {
@@ -527,8 +528,21 @@ function hasFoundationPackageDependency(pkg: PackageJson): boolean {
     );
 }
 
-function usesTsfCompiler(pkg: PackageJson): boolean {
-    return pkg.tsf?.compiler ?? hasFoundationPackageDependency(pkg);
+function usesTsfCompiler(workspace: WorkspacePackage): boolean {
+    return workspace.pkg.tsf?.compiler ?? (hasFoundationPackageDependency(workspace.pkg) || hasConfiguredTypeCompiler(workspace.dir));
+}
+
+function hasConfiguredTypeCompiler(projectDir: string): boolean {
+    return findTsconfigPaths(projectDir).some(path => {
+        const contents = readFileSync(path, 'utf8');
+        if (!contents.includes('type-compiler')) return false;
+        try {
+            const tsconfig = parseJsonC(contents) as TsconfigJson;
+            return Array.isArray(tsconfig.compilerOptions?.plugins) && tsconfig.compilerOptions.plugins.some(isTypeCompilerPlugin);
+        } catch {
+            return false;
+        }
+    });
 }
 
 function parseJsonC(contents: string): unknown {

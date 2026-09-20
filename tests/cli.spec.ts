@@ -799,15 +799,17 @@ describe('CLI', () => {
         assert.equal(existsSync(packageJsonAtInstallPath), false);
     });
 
-    it('updates TSF compiler workspaces without changing frontend or CLI compiler versions', () => {
+    it('updates TSF and reflection compiler workspaces without changing frontend or CLI compiler versions', () => {
         const root = tempDir();
         const ttscWorkspace = join(root, 'packages', 'ttsc');
         const typescriptWorkspace = join(root, 'packages', 'typescript');
         const frameworkWorkspace = join(root, 'packages', 'framework');
+        const reflectionWorkspace = join(root, 'packages', 'reflection');
         const unrelatedWorkspace = join(root, 'packages', 'unrelated');
         mkdirSync(ttscWorkspace, { recursive: true });
         mkdirSync(typescriptWorkspace, { recursive: true });
         mkdirSync(frameworkWorkspace, { recursive: true });
+        mkdirSync(reflectionWorkspace, { recursive: true });
         mkdirSync(unrelatedWorkspace, { recursive: true });
         writeFileSync(
             join(root, 'package.json'),
@@ -831,19 +833,51 @@ describe('CLI', () => {
         );
         writeFileSync(
             join(typescriptWorkspace, 'package.json'),
-            JSON.stringify({ name: '@fixture/ui', dependencies: { typescript: '~6.0.3' } }, null, 4)
+            JSON.stringify(
+                {
+                    name: '@fixture/ui',
+                    dependencies: { '@zyno-io/ts-reflection': '*', typescript: '~6.0.3' }
+                },
+                null,
+                4
+            )
         );
         writeFileSync(
             join(frameworkWorkspace, 'package.json'),
             JSON.stringify({ name: '@fixture/framework', devDependencies: { '@zyno-io/ts-server-foundation': '*' } }, null, 4)
         );
         writeFileSync(
+            join(reflectionWorkspace, 'package.json'),
+            JSON.stringify(
+                {
+                    name: '@fixture/reflection',
+                    dependencies: { '@zyno-io/ts-reflection': '*' },
+                    devDependencies: { ttsc: '^0.1', typescript: '~5.9' }
+                },
+                null,
+                4
+            )
+        );
+        writeFileSync(
             join(unrelatedWorkspace, 'package.json'),
             JSON.stringify({ name: '@fixture/unrelated', devDependencies: { eslint: '*' } }, null, 4)
         );
-        for (const workspace of [ttscWorkspace, typescriptWorkspace, frameworkWorkspace, unrelatedWorkspace]) {
+        for (const workspace of [ttscWorkspace, typescriptWorkspace, frameworkWorkspace, reflectionWorkspace, unrelatedWorkspace]) {
             writeFileSync(join(workspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
         }
+        writeFileSync(
+            join(reflectionWorkspace, 'tsconfig.json'),
+            JSON.stringify(
+                {
+                    compilerOptions: {
+                        target: 'ES2022',
+                        plugins: [{ transform: '@zyno-io/ts-reflection/type-compiler' }]
+                    }
+                },
+                null,
+                4
+            )
+        );
 
         const result = runCli('tsf-install.js', ['--no-install'], root);
 
@@ -854,8 +888,13 @@ describe('CLI', () => {
         };
         const typescriptPkg = JSON.parse(readFileSync(join(typescriptWorkspace, 'package.json'), 'utf8')) as {
             dependencies?: Record<string, string>;
+            devDependencies?: Record<string, string>;
         };
         const frameworkPkg = JSON.parse(readFileSync(join(frameworkWorkspace, 'package.json'), 'utf8')) as {
+            devDependencies?: Record<string, string>;
+        };
+        const reflectionPkg = JSON.parse(readFileSync(join(reflectionWorkspace, 'package.json'), 'utf8')) as {
+            dependencies?: Record<string, string>;
             devDependencies?: Record<string, string>;
         };
         const unrelatedPkg = JSON.parse(readFileSync(join(unrelatedWorkspace, 'package.json'), 'utf8')) as {
@@ -867,15 +906,27 @@ describe('CLI', () => {
         assert.equal(ttscPkg.devDependencies?.ttsc, '^0.1');
         assert.equal(ttscPkg.devDependencies?.typescript, '7.0.2');
         assert.equal(typescriptPkg.dependencies?.typescript, '~6.0.3');
+        assert.equal(typescriptPkg.dependencies?.['@zyno-io/ts-reflection'], '*');
+        assert.equal(typescriptPkg.devDependencies?.ttsc, undefined);
         assert.equal(typescriptPkg.dependencies?.ttsc, undefined);
         assert.equal(frameworkPkg.devDependencies?.['@zyno-io/ts-server-foundation'], '*');
         assert.equal(frameworkPkg.devDependencies?.ttsc, expectedTtscVersion);
         assert.equal(frameworkPkg.devDependencies?.typescript, expectedTypescriptVersion);
+        assert.equal(reflectionPkg.dependencies?.['@zyno-io/ts-reflection'], '*');
+        assert.equal(reflectionPkg.devDependencies?.['@zyno-io/ts-server-foundation'], undefined);
+        assert.equal(reflectionPkg.devDependencies?.ttsc, expectedTtscVersion);
+        assert.equal(reflectionPkg.devDependencies?.typescript, expectedTypescriptVersion);
         assert.equal(unrelatedPkg.devDependencies?.ttsc, undefined);
         assert.equal(unrelatedPkg.devDependencies?.typescript, undefined);
         assert.equal(unrelatedPkg.devDependencies?.['@zyno-io/ts-server-foundation'], undefined);
         assert.equal(JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8')).reflection, undefined);
         assert.equal(JSON.parse(readFileSync(join(frameworkWorkspace, 'tsconfig.json'), 'utf8')).reflection, true);
+        const reflectionTsconfig = JSON.parse(readFileSync(join(reflectionWorkspace, 'tsconfig.json'), 'utf8')) as {
+            reflection?: boolean;
+            compilerOptions?: { plugins?: Array<{ transform?: string }> };
+        };
+        assert.equal(reflectionTsconfig.reflection, true);
+        assert.equal(reflectionTsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-reflection/type-compiler');
         assert.equal(JSON.parse(readFileSync(join(ttscWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
         assert.equal(JSON.parse(readFileSync(join(typescriptWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
         assert.equal(JSON.parse(readFileSync(join(unrelatedWorkspace, 'tsconfig.json'), 'utf8')).reflection, undefined);
