@@ -655,6 +655,7 @@ describe('TestingHelpers', () => {
         assert.equal(selected.name, 'Updated');
         assert.equal(selected.visits, 5);
         assert.equal(selected.id, undefined);
+        assert.deepStrictEqual(Object.keys(selected), ['name', 'visits']);
 
         await assert.rejects(
             () => TestingSqlUser.query().filter({ tenantId: 't1' }).deleteOne(),

@@ -337,7 +337,12 @@ export class QueryBuilder<T extends object> {
     private hydrate(row: Record<string, unknown>): T {
         const entity = new this.Entity();
         const metadata = getEntityMetadata(this.Entity);
+        const selectedColumns = this.selected?.length ? new Set(this.selected.map(field => this.resolveColumnName(field))) : undefined;
         for (const column of metadata.columns) {
+            if (selectedColumns && !selectedColumns.has(column.columnName)) {
+                delete (entity as Record<string, unknown>)[column.propertyName];
+                continue;
+            }
             (entity as Record<string, unknown>)[column.propertyName] = coerceColumnValue(
                 getRowValue(row, column.columnName, column.propertyName),
                 column,

@@ -480,6 +480,19 @@ describe('database query builder and persistence', () => {
         });
     });
 
+    it('omits unselected fields from hydrated entities', async () => {
+        const driver = new FakeDriver();
+        driver.rows = [{ name: 'Alice' }];
+        const db = new BaseDatabase(driver, [User]);
+
+        const user = await db.query(User).select('name').findOne();
+
+        assert.deepStrictEqual(Object.keys(user), ['name']);
+        assert.equal(user.name, 'Alice');
+        assert.equal(Object.hasOwn(user, 'id'), false);
+        assert.equal(Object.hasOwn(user, 'email'), false);
+    });
+
     it('supports sort and skip aliases', async () => {
         const driver = new FakeDriver();
         const db = new BaseDatabase(driver, [User]);

@@ -205,8 +205,24 @@ class InMemoryQueryBuilder<T extends object> {
     }
 
     private hydrate(row: Record<string, unknown>): T {
-        const source = this.selected?.length ? Object.fromEntries(this.selected.map(field => [field, row[field]])) : row;
-        const entity = createEntity(this.entityClass, cloneRecord(source) as Partial<T>);
+        if (!this.selected?.length) {
+            const entity = createEntity(this.entityClass, cloneRecord(row) as Partial<T>);
+            markEntityClean(entity);
+            return entity;
+        }
+
+        const entity = new this.entityClass();
+        const metadata = getEntityMetadata(this.entityClass);
+        const selectedColumns = new Set(this.selected.map(field => resolveColumnName(metadata, field)));
+        for (const column of metadata.columns) {
+            if (!selectedColumns.has(column.columnName)) {
+                delete (entity as Record<string, unknown>)[column.propertyName];
+                continue;
+            }
+            (entity as Record<string, unknown>)[column.propertyName] = Object.hasOwn(row, column.propertyName)
+                ? row[column.propertyName]
+                : row[column.columnName];
+        }
         markEntityClean(entity);
         return entity;
     }
@@ -318,6 +334,10 @@ function cloneRows<T extends object>(entityClass: ClassType<T>, rows: readonly P
 
 function cloneRecord(row: Record<string, unknown>): Record<string, unknown> {
     return { ...row };
+}
+
+function resolveColumnName(metadata: ReturnType<typeof getEntityMetadata>, field: string): string {
+    return metadata.columns.find(column => column.propertyName === field || column.columnName === field)?.columnName ?? field;
 }
 
 function escapeRegExp(value: string): string {
