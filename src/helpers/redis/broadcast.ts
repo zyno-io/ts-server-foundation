@@ -1,7 +1,7 @@
 import type { ReceiveType } from '../../reflection';
 import { hostname } from 'node:os';
 
-import { r } from '../../app/resolver';
+import { r, registerAppCleanup } from '../../app/resolver';
 import { Logger } from '../../services/logger';
 import { registerRedisStateReset } from './lifecycle';
 import { createRedis } from './redis';
@@ -9,6 +9,8 @@ import { createRedis } from './redis';
 interface BroadcastLogger {
     error(...messages: unknown[]): void;
 }
+
+const RECONNECT_DELAY_MS = 1_000;
 
 let sharedBroadcastChannel: ReturnType<typeof createSharedBroadcastChannel> | undefined;
 
@@ -19,21 +21,17 @@ function getSharedBroadcastChannel(): ReturnType<typeof createSharedBroadcastCha
 
 function createSharedBroadcastChannel() {
     const logger = r(Logger).scoped('Broadcast');
-    const { prefix, client: publishClient } = createRedis('BROADCAST');
-    const { client: subscribeClient } = createRedis('BROADCAST');
-
-    const channel = `${prefix}:broadcast`;
     const localInstanceKey = `${hostname()}/${process.pid}`;
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const listeners = new Map<string, Set<(message: any) => void>>();
+    let activeRuntime:
+        | { publishClient: ReturnType<typeof createRedis>['client']; subscribeClient: ReturnType<typeof createRedis>['client']; channel: string }
+        | undefined;
+    let reconnectTimer: NodeJS.Timeout | undefined;
+    let disposed = false;
+    let unregisterDispose = () => {};
 
-    void subscribeClient.subscribe(channel).catch(err => {
-        // A shutdown can close the client while its initial subscription is still connecting.
-        // The channel state reset owns that normal lifecycle case; report only real startup failures.
-        if (subscribeClient.status !== 'end') logger.error('Failed to subscribe to broadcast channel', err, { channel });
-    });
-    subscribeClient.on('message', (_, message) => {
+    const onMessage = (_channel: string, message: string) => {
         try {
             const { instanceKey, eventName, data } = JSON.parse(message);
             if (instanceKey === localInstanceKey) return;
@@ -49,9 +47,66 @@ function createSharedBroadcastChannel() {
         } catch (err) {
             logger.error('Failed to parse broadcast message', err, message);
         }
-    });
+    };
 
-    const runtime = {
+    const scheduleReconnect = () => {
+        if (disposed || reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = undefined;
+            if (disposed || activeRuntime) return;
+            try {
+                connect();
+            } catch (err) {
+                logger.error('Failed to reconnect broadcast channel', err);
+                scheduleReconnect();
+            }
+        }, RECONNECT_DELAY_MS);
+        reconnectTimer.unref();
+    };
+
+    const connect = () => {
+        if (disposed) throw new Error('Broadcast channel is closed');
+        if (activeRuntime) return activeRuntime;
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = undefined;
+        }
+
+        const { prefix, client: publishClient } = createRedis('BROADCAST');
+        const { client: subscribeClient } = createRedis('BROADCAST');
+        const channel = `${prefix}:broadcast`;
+        const runtime = { publishClient, subscribeClient, channel };
+        activeRuntime = runtime;
+
+        void subscribeClient.subscribe(channel).catch(err => {
+            if (subscribeClient.status !== 'end') logger.error('Failed to subscribe to broadcast channel', err, { channel });
+        });
+        subscribeClient.on('message', onMessage);
+
+        registerRedisStateReset([publishClient, subscribeClient], () => {
+            if (activeRuntime !== runtime) return;
+            activeRuntime = undefined;
+            subscribeClient.off('message', onMessage);
+            if (publishClient.status !== 'end') publishClient.disconnect();
+            if (subscribeClient.status !== 'end') subscribeClient.disconnect();
+            scheduleReconnect();
+        });
+
+        // Register after the clients so this runs before their cleanup on app shutdown.
+        unregisterDispose();
+        unregisterDispose = registerAppCleanup(() => {
+            disposed = true;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = undefined;
+            activeRuntime = undefined;
+            listeners.clear();
+            if (sharedBroadcastChannel === state) sharedBroadcastChannel = undefined;
+        });
+
+        return runtime;
+    };
+
+    const state = {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         subscribe: (eventName: string, fn: (data: any) => void) => {
             const listenersForEvent = listeners.get(eventName) ?? new Set();
@@ -61,15 +116,13 @@ function createSharedBroadcastChannel() {
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         publish: async (eventName: string, data: any): Promise<void> => {
+            const { publishClient, channel } = connect();
             await publishClient.publish(channel, JSON.stringify({ instanceKey: localInstanceKey, eventName, data }));
         }
     };
 
-    registerRedisStateReset([publishClient, subscribeClient], () => {
-        if (sharedBroadcastChannel === runtime) sharedBroadcastChannel = undefined;
-    });
-
-    return runtime;
+    connect();
+    return state;
 }
 
 export function createBroadcastChannel<T>(eventName: string, _type?: ReceiveType<T>) {
