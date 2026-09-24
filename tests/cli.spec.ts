@@ -26,6 +26,7 @@ import { genProto } from '../src/cli/tsf-gen-proto';
 import { removeYarnPnpEsmLoader } from '../src/cli/tsf-dev';
 import { normalizeReplUrl, parseReplCliArgs, resolveExistingReplTarget } from '../src/cli/tsf-repl';
 import { resolveTestWorkerConcurrency } from '../src/cli/tsf-test';
+import { parseUpdateArgs, update, type UpdatePackageInfo } from '../src/cli/tsf-update';
 import { resetLogSink, setLogSink, type LogEntry } from '../src/services/logger';
 import { waitForTestDatabaseReady } from '../src/testing/database-readiness';
 
@@ -461,7 +462,7 @@ describe('CLI', () => {
         assert.equal(pkg.scripts?.tsf, "NODE_OPTIONS='--require=./.pnp.cjs --experimental-loader=./.pnp.loader.mjs' tsf-dev");
         const yarnrc = readFileSync(join(dir, '.yarnrc.yml'), 'utf8');
         assert.match(yarnrc, /pnpEnableEsmLoader: true/);
-        assert.match(yarnrc, /[\"']@sentry\/node@\*[\"']:[\s\S]+[\"']@opentelemetry\/core[\"']:/);
+        assert.match(yarnrc, /["']@sentry\/node@\*["']:[\s\S]+["']@opentelemetry\/core["']:/);
     });
 
     it('removes only Yarn’s asynchronous PnP loader from compiler processes', () => {
@@ -1085,6 +1086,160 @@ describe('CLI', () => {
         };
         assert.equal(tsconfig.reflection, true);
         assert.equal(tsconfig.compilerOptions?.plugins?.[0]?.transform, '@zyno-io/ts-reflection/type-compiler');
+    });
+
+    it('updates TSF and its aligned dependencies across the workspace, leaving packages without a TSF dependency untouched', () => {
+        const root = tempDir();
+        const apiDir = join(root, 'packages', 'api');
+        const plainDir = join(root, 'packages', 'plain');
+        mkdirSync(apiDir, { recursive: true });
+        mkdirSync(plainDir, { recursive: true });
+        writeFileSync(
+            join(root, 'package.json'),
+            `${JSON.stringify(
+                {
+                    name: 'fixture-root',
+                    private: true,
+                    workspaces: ['packages/*'],
+                    devDependencies: { '@zyno-io/ts-server-foundation': '1.0.0', 'aligned-dep': '^1.0.0' }
+                },
+                null,
+                4
+            )}\n`
+        );
+        writeFileSync(
+            join(apiDir, 'package.json'),
+            `${JSON.stringify(
+                {
+                    name: '@fixture/api',
+                    dependencies: {
+                        '@zyno-io/ts-server-foundation': '1.0.0',
+                        'aligned-dep': '^1.0.0',
+                        'unlisted-dep': '^3.0.0'
+                    }
+                },
+                null,
+                4
+            )}\n`
+        );
+        writeFileSync(
+            join(plainDir, 'package.json'),
+            `${JSON.stringify({ name: '@fixture/plain', dependencies: { 'aligned-dep': '^1.0.0' } }, null, 4)}\n`
+        );
+
+        const packageInfo: UpdatePackageInfo = { version: '2.0.0', dependencies: { 'aligned-dep': '^2.5.0' } };
+        const status = update({ projectDir: root, packageInfo, install: false });
+
+        assert.equal(status, 0);
+        const rootPkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { devDependencies: Record<string, string> };
+        assert.equal(rootPkg.devDependencies['@zyno-io/ts-server-foundation'], '2.0.0');
+        assert.equal(rootPkg.devDependencies['aligned-dep'], '^2.5.0');
+        const apiPkg = JSON.parse(readFileSync(join(apiDir, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+        assert.equal(apiPkg.dependencies['@zyno-io/ts-server-foundation'], '2.0.0');
+        assert.equal(apiPkg.dependencies['aligned-dep'], '^2.5.0');
+        assert.equal(apiPkg.dependencies['unlisted-dep'], '^3.0.0');
+        const plainPkg = JSON.parse(readFileSync(join(plainDir, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+        assert.equal(plainPkg.dependencies['aligned-dep'], '^1.0.0');
+    });
+
+    it('preserves wildcard and protocol-specifier TSF versions in devDependencies and leaves the files unwritten', () => {
+        const root = tempDir();
+        const apiDir = join(root, 'packages', 'api');
+        mkdirSync(apiDir, { recursive: true });
+        const rootPackageJson = `${JSON.stringify(
+            { name: 'fixture-root', private: true, workspaces: ['packages/*'], devDependencies: { '@zyno-io/ts-server-foundation': 'workspace:*' } },
+            null,
+            4
+        )}\n`;
+        const apiPackageJson = `${JSON.stringify(
+            { name: '@fixture/api', devDependencies: { '@zyno-io/ts-server-foundation': '*', 'aligned-dep': '*' } },
+            null,
+            4
+        )}\n`;
+        writeFileSync(join(root, 'package.json'), rootPackageJson);
+        writeFileSync(join(apiDir, 'package.json'), apiPackageJson);
+
+        const packageInfo: UpdatePackageInfo = { version: '2.0.0', dependencies: { 'aligned-dep': '^2.5.0' } };
+        const status = update({ projectDir: root, packageInfo, install: false });
+
+        assert.equal(status, 0);
+        assert.equal(readFileSync(join(root, 'package.json'), 'utf8'), rootPackageJson);
+        assert.equal(readFileSync(join(apiDir, 'package.json'), 'utf8'), apiPackageJson);
+    });
+
+    it('reports packages already up to date and writes nothing when nothing changes', () => {
+        const dir = tempDir();
+        const original = `${JSON.stringify(
+            { name: 'fixture', devDependencies: { '@zyno-io/ts-server-foundation': '2.0.0', 'aligned-dep': '^2.5.0' } },
+            null,
+            4
+        )}\n`;
+        writeFileSync(join(dir, 'package.json'), original);
+
+        const logMock = mock.method(console, 'log', () => {});
+        const packageInfo: UpdatePackageInfo = { version: '2.0.0', dependencies: { 'aligned-dep': '^2.5.0' } };
+        const status = update({ projectDir: dir, packageInfo, install: false });
+
+        assert.equal(status, 0);
+        assert.equal(readFileSync(join(dir, 'package.json'), 'utf8'), original);
+        const messages = logMock.mock.calls.map(call => call.arguments[0]);
+        assert.ok(messages.some(message => typeof message === 'string' && message.endsWith('already up to date.')));
+        assert.ok(!messages.some(message => typeof message === 'string' && message.includes('Updating')));
+    });
+
+    it("preserves a package.json's existing indentation, key order, and trailing newline", () => {
+        const dir = tempDir();
+        const pkg = {
+            name: 'fixture',
+            version: '1.0.0',
+            devDependencies: { '@zyno-io/ts-server-foundation': '1.0.0' }
+        };
+        writeFileSync(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`);
+
+        const packageInfo: UpdatePackageInfo = { version: '2.0.0' };
+        const status = update({ projectDir: dir, packageInfo, install: false });
+
+        assert.equal(status, 0);
+        const raw = readFileSync(join(dir, 'package.json'), 'utf8');
+        assert.match(raw, /\n {2}"name": "fixture"/);
+        assert.doesNotMatch(raw, /\n {4}"name": "fixture"/);
+        assert.equal(raw.endsWith('\n'), true);
+        assert.deepEqual(Object.keys(JSON.parse(raw)), Object.keys(pkg));
+        assert.equal((JSON.parse(raw) as { devDependencies: Record<string, string> }).devDependencies['@zyno-io/ts-server-foundation'], '2.0.0');
+    });
+
+    it('operates on the whole workspace when the current directory is a workspace member', () => {
+        const root = tempDir();
+        const apiDir = join(root, 'packages', 'api');
+        mkdirSync(apiDir, { recursive: true });
+        writeFileSync(
+            join(root, 'package.json'),
+            JSON.stringify(
+                { name: 'fixture-root', private: true, workspaces: ['packages/*'], devDependencies: { '@zyno-io/ts-server-foundation': '1.0.0' } },
+                null,
+                4
+            )
+        );
+        writeFileSync(
+            join(apiDir, 'package.json'),
+            JSON.stringify({ name: '@fixture/api', dependencies: { '@zyno-io/ts-server-foundation': '1.0.0' } }, null, 4)
+        );
+
+        const packageInfo: UpdatePackageInfo = { version: '2.0.0' };
+        const status = update({ projectDir: apiDir, packageInfo, install: false });
+
+        assert.equal(status, 0);
+        const rootPkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { devDependencies: Record<string, string> };
+        assert.equal(rootPkg.devDependencies['@zyno-io/ts-server-foundation'], '2.0.0');
+        const apiPkg = JSON.parse(readFileSync(join(apiDir, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+        assert.equal(apiPkg.dependencies['@zyno-io/ts-server-foundation'], '2.0.0');
+    });
+
+    it('parses a positional version and --no-install for the tsf-update CLI', () => {
+        assert.deepEqual(parseUpdateArgs(['2.3.4', '--no-install']), { spec: '2.3.4', install: false, unknownArgs: [] });
+        assert.deepEqual(parseUpdateArgs(['--no-install']), { spec: undefined, install: false, unknownArgs: [] });
+        assert.deepEqual(parseUpdateArgs(['next']), { spec: 'next', install: true, unknownArgs: [] });
+        assert.deepEqual(parseUpdateArgs([]), { spec: undefined, install: true, unknownArgs: [] });
     });
 
     it('compiles and tests a scaffolded template app against the local package', () => {

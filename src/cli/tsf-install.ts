@@ -1,30 +1,27 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import {
-    copyFileSync,
-    existsSync,
-    globSync,
-    mkdirSync,
-    mkdtempSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    symlinkSync,
-    writeFileSync
-} from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 
-import { findPackageRoot, findProjectRoot, readPackageDependencyVersion } from './common';
+import {
+    detectPackageManager,
+    findPackageRoot,
+    findProjectRoot,
+    findWorkspaceRoot,
+    getWorkspacePatterns,
+    globWorkspacePackageJsonPaths,
+    PACKAGE_MANAGER_RERUN_ENV,
+    readPackageDependencyVersion,
+    runPackageManagerInstall
+} from './common';
 
 const PACKAGE_NAME = '@zyno-io/ts-server-foundation';
 const REFLECTION_PACKAGE_NAME = '@zyno-io/ts-reflection';
 const INSTALL_COMMAND = 'tsf-install';
-const PACKAGE_MANAGER_RERUN_ENV = 'TSF_INSTALL_PACKAGE_MANAGER_RERUN';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
 const REFLECTION_TYPE_COMPILER_PLUGIN = `${REFLECTION_PACKAGE_NAME}/type-compiler`;
 const TTSC_NODE_24_PATCH_VERSION = '0.30.1';
@@ -49,13 +46,6 @@ interface PackageJson {
 interface InstallOptions {
     projectDir?: string;
     runPackageManager?: boolean;
-}
-
-type PackageManager = 'yarn' | 'npm' | 'pnpm' | 'bun';
-
-interface PackageManagerInfo {
-    installDir: string;
-    manager: PackageManager;
 }
 
 interface YarnPnpCompatibilityResult {
@@ -319,30 +309,6 @@ function findCompilerWorkspaces(
     return [...packages.values()].filter(usesTsfCompiler);
 }
 
-function findWorkspaceRoot(projectDir: string): string | undefined {
-    let dir = resolve(projectDir);
-    while (true) {
-        const pkg = readPackageJsonIfExists(join(dir, 'package.json'));
-        if (pkg && getWorkspacePatterns(pkg)?.length) return dir;
-
-        const parent = dirname(dir);
-        if (parent === dir) return undefined;
-        dir = parent;
-    }
-}
-
-function getWorkspacePatterns(pkg: PackageJson): string[] | undefined {
-    return Array.isArray(pkg.workspaces) ? pkg.workspaces : pkg.workspaces?.packages;
-}
-
-function globWorkspacePackageJsonPaths(workspaceRoot: string, workspacePattern: string): string[] {
-    const pattern = workspacePattern.replace(/\/$/, '');
-    return globSync(`${pattern}/package.json`, {
-        cwd: workspaceRoot,
-        exclude: ['**/node_modules/**']
-    }).map(path => resolve(workspaceRoot, path));
-}
-
 function setDependencyVersionIfPresent(pkg: PackageJson, name: string, version: string): boolean {
     let changed = false;
     for (const dependencies of [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies, pkg.peerDependencies]) {
@@ -592,59 +558,6 @@ function parseJsonC(contents: string): unknown {
     }
 
     return JSON.parse(output);
-}
-
-function detectPackageManager(projectDir: string, pkg: PackageJson): PackageManagerInfo {
-    let dir = projectDir;
-    while (true) {
-        const lockfile = detectLockfilePackageManager(dir);
-        if (lockfile) return { installDir: dir, manager: lockfile };
-
-        const packageJson = dir === projectDir ? pkg : readPackageJsonIfExists(join(dir, 'package.json'));
-        if (packageJson) {
-            const declared = getDeclaredPackageManager(packageJson);
-            if (declared) return { installDir: dir, manager: declared };
-        }
-
-        const parent = dirname(dir);
-        if (parent === dir) return { installDir: projectDir, manager: 'npm' };
-        dir = parent;
-    }
-}
-
-function readPackageJsonIfExists(path: string): PackageJson | undefined {
-    if (!existsSync(path)) return undefined;
-    return readPackageJson(path);
-}
-
-function getDeclaredPackageManager(pkg: PackageJson): PackageManager | undefined {
-    const declared = pkg.packageManager?.split('@')[0];
-    if (declared === 'yarn' || declared === 'npm' || declared === 'pnpm' || declared === 'bun') return declared;
-}
-
-function detectLockfilePackageManager(dir: string): PackageManager | undefined {
-    if (existsSync(join(dir, 'yarn.lock'))) return 'yarn';
-    if (existsSync(join(dir, 'package-lock.json')) || existsSync(join(dir, 'npm-shrinkwrap.json'))) return 'npm';
-    if (existsSync(join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
-    if (existsSync(join(dir, 'bun.lockb')) || existsSync(join(dir, 'bun.lock'))) return 'bun';
-    if (existsSync(join(dir, '.yarnrc.yml'))) return 'yarn';
-}
-
-function runPackageManagerInstall(projectDir: string, packageManager: PackageManager): number {
-    console.log(`tsf-install: running ${packageManager} install`);
-    const result = spawnSync(packageManager, ['install'], {
-        cwd: projectDir,
-        stdio: 'inherit',
-        env: {
-            ...process.env,
-            [PACKAGE_MANAGER_RERUN_ENV]: '1'
-        }
-    });
-    if (result.error) {
-        console.error(result.error.message);
-        return 1;
-    }
-    return result.status ?? 1;
 }
 
 function prepareCompilerWorkspaces(workspaces: WorkspacePackage[]): number {

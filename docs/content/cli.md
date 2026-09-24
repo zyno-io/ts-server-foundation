@@ -4,18 +4,18 @@ TSF ships application scaffolding, compiler setup, development orchestration, te
 
 ## Package Binaries
 
-| Binary                 | Description                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------- |
-| `tsf`                  | Umbrella CLI for `create-app`, `test`, `gen-proto`, and `repl`.                    |
-| `ts-server-foundation` | Alias for the umbrella CLI.                                                        |
-| `tsf-create-app`       | Scaffold a new app from `template-app`.                                            |
-| `tsf-dev`              | Build/watch/run/test and application development workflows.                        |
-| `tsf-test`             | Compile-output-aware Node test runner.                                             |
-| `tsf-migrate`          | Create, run, reset, and charset migration commands.                                |
-| `tsf-repl`             | Connect to a running app REPL or start a fresh application REPL.                   |
-| `tsf-gen-proto`        | Generate TypeScript protobuf codecs through `ts-proto`.                            |
-| `tsf-install`          | Configure the supported TypeScript 7/`ttsc` compiler and TSF transform.            |
-| `tsf-update`           | Reserved update command; currently reports that no automatic updater is available. |
+| Binary                 | Description                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| `tsf`                  | Umbrella CLI for `create-app`, `test`, `gen-proto`, and `repl`.                      |
+| `ts-server-foundation` | Alias for the umbrella CLI.                                                          |
+| `tsf-create-app`       | Scaffold a new app from `template-app`.                                              |
+| `tsf-dev`              | Build/watch/run/test and application development workflows.                          |
+| `tsf-test`             | Compile-output-aware Node test runner.                                               |
+| `tsf-migrate`          | Create, run, reset, and charset migration commands.                                  |
+| `tsf-repl`             | Connect to a running app REPL or start a fresh application REPL.                     |
+| `tsf-gen-proto`        | Generate TypeScript protobuf codecs through `ts-proto`.                              |
+| `tsf-install`          | Configure the supported TypeScript 7/`ttsc` compiler and TSF transform.              |
+| `tsf-update`           | Updates the TSF dependency (and the versions it publishes) to a version or dist-tag. |
 
 ## Umbrella Command
 
@@ -26,6 +26,7 @@ tsf create-app <package-name> [path]
 tsf test [node-test-options] [test-files-or-dirs...]
 tsf gen-proto <proto-file-or-dir> <output-dir> [options]
 tsf repl [options]
+tsf update [version-or-dist-tag] [--no-install]
 ```
 
 The standalone names remain useful in package scripts and when a command needs to be invoked directly.
@@ -250,4 +251,17 @@ Published versions try to populate `ttsc`'s cache from a verified GitHub release
 
 ## Update Command
 
-`tsf-update` is included as a reserved compatibility binary but does not currently modify the project. Dependency updates should be performed through the package manager, followed by `tsf-install` when compiler configuration must be refreshed.
+```bash
+tsf-update [version-or-dist-tag] [--no-install]
+tsf update [version-or-dist-tag] [--no-install]
+```
+
+`tsf-update` fetches the published `@zyno-io/ts-server-foundation` metadata for the given version or dist-tag (`latest` by default) and applies it to the resolved workspace root, like `tsf-install`: a project run from a workspace member operates on the whole workspace.
+
+For the root `package.json` and every workspace package, when the package declares `@zyno-io/ts-server-foundation` in `dependencies` or `devDependencies`, it:
+
+- sets that entry to the exact fetched version, unless the current value is `*` or uses a protocol specifier (`workspace:`, `link:`, `file:`, `portal:`, `patch:`, or an `npm:` alias), which are left unchanged
+- aligns each dependency listed in TSF's own published `dependencies` that the package already declares in `dependencies` or `devDependencies` to TSF's published spec, with the same `*`/protocol exceptions
+- never adds a dependency the package didn't already declare, and never touches `peerDependencies` or `optionalDependencies`
+
+Each changed `package.json` is rewritten with only the affected versions updated, preserving its existing indentation, key order, and trailing newline. If any file changed, `tsf-update` runs the detected package manager's install at the workspace root afterward (skip with `--no-install`); that install re-triggers the project's `postinstall` (`tsf-install`), which keeps compiler setup aligned. Dependency updates outside TSF's own dependency tree should still be performed through the package manager.

@@ -15,6 +15,8 @@ async function main(): Promise<number> {
             return require('./tsf-gen-proto').genProto(rest);
         case 'repl':
             return await require('./tsf-repl').runReplCli(rest);
+        case 'update':
+            return require('./tsf-update').runUpdateCli(rest);
         default:
             console.error('Usage: tsf <command>');
             console.error();
@@ -23,6 +25,7 @@ async function main(): Promise<number> {
             console.error('  test [node-test-options] [test-files-or-dirs...]');
             console.error('  gen-proto <proto-file-or-dir> <output-dir> [options]');
             console.error('  repl [--existing|--new|--pid <pid>|--url <url>] [options]');
+            console.error('  update [version-or-dist-tag] [--no-install]');
             return 1;
     }
 }
