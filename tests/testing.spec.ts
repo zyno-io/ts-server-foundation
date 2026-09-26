@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { afterEach, describe, it, mock } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { after, afterEach, describe, it, mock } from 'node:test';
 
 import { entity, type OnUpdate, PrimaryKey } from '../src';
 import { createTestDatabasePrefix, formatTestDatabaseName } from '../src/testing/database-name';
@@ -44,6 +45,70 @@ describe('TestingHelpers', () => {
         process.env = { ...originalEnv };
         resetLogSink();
         mock.restoreAll();
+    });
+
+    it('waits for MySQL pool cleanup before flushing modules across repeated reloads', () => {
+        const result = spawnSync(
+            process.execPath,
+            [
+                '-e',
+                `
+                const assert = require('node:assert/strict');
+                const testingPath = ${JSON.stringify(require.resolve('../src/testing'))};
+                const driverPath = ${JSON.stringify(require.resolve('../src/database/drivers/mysql'))};
+                const { resetSrcModuleCache } = require(testingPath);
+
+                async function main() {
+                    let startedClose;
+                    const closeStarted = new Promise(resolve => { startedClose = resolve; });
+                    let finishClose;
+                    const { MySQLDriver } = require(driverPath);
+                    new MySQLDriver({
+                        getConnection: async () => { throw new Error('unused'); },
+                        end: () => {
+                            startedClose();
+                            return new Promise(resolve => { finishClose = resolve; });
+                        }
+                    });
+
+                    const resetting = resetSrcModuleCache();
+                    await closeStarted;
+                    assert.ok(require.cache[driverPath]);
+                    finishClose();
+                    await resetting;
+                    assert.equal(require.cache[driverPath], undefined);
+
+                    const reloaded = require(driverPath);
+                    let endCalls = 0;
+                    new reloaded.MySQLDriver({
+                        getConnection: async () => { throw new Error('unused'); },
+                        end: async () => { endCalls++; }
+                    });
+                    await resetSrcModuleCache();
+                    assert.equal(endCalls, 1);
+                    assert.equal(require.cache[driverPath], undefined);
+
+                    const failingReload = require(driverPath);
+                    let attempted = 0;
+                    for (const fail of [true, false]) {
+                        new failingReload.MySQLDriver({
+                            getConnection: async () => { throw new Error('unused'); },
+                            end: async () => {
+                                attempted++;
+                                if (fail) throw new Error('close failed');
+                            }
+                        });
+                    }
+                    await assert.rejects(() => resetSrcModuleCache(), /close failed/);
+                    assert.equal(attempted, 2);
+                    assert.ok(require.cache[driverPath]);
+                }
+                main().catch(error => { console.error(error); process.exitCode = 1; });
+                `
+            ],
+            { encoding: 'utf8', timeout: 30_000 }
+        );
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     });
 
     it('scopes generated test database prefixes to the worktree directory', () => {
@@ -235,6 +300,46 @@ describe('TestingHelpers', () => {
         } finally {
             await tf.stop();
         }
+    });
+
+    describe('builder facade suite cleanup', () => {
+        let endCalls = 0;
+        let stopCalls = 0;
+        let driver: MySQLDriver | undefined;
+        const createFacade = TestingHelpers.createTestingFacadeBuilder(
+            { enableHealthcheck: false },
+            {
+                onStart: () => {
+                    driver = new MySQLDriver({
+                        getConnection: async () => {
+                            throw new Error('unused');
+                        },
+                        end: async () => {
+                            endCalls++;
+                        }
+                    });
+                },
+                onStop: () => {
+                    stopCalls++;
+                }
+            }
+        );
+        const tf = createFacade();
+        TestingHelpers.installStandardHooks(tf);
+
+        it('keeps app-owned MySQL pools open while the suite is running', () => {
+            assert.ok(driver);
+            assert.equal(endCalls, 0);
+            assert.equal(stopCalls, 0);
+        });
+
+        after(async () => {
+            assert.equal(endCalls, 1);
+            assert.equal(stopCalls, 1);
+            const closedDriver = driver;
+            assert.ok(closedDriver);
+            await assert.rejects(() => closedDriver.acquire(), /MySQL pool is closed/);
+        });
     });
 
     it('creates a database-safe unit facade with provider exclusions and overrides', async () => {

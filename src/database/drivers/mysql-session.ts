@@ -100,6 +100,10 @@ function callManager<T = unknown>(peer: RpcPeer, method: string, params: Record<
 }
 
 class SharedMySQLSessionPool implements MySQLPoolLike {
+    private readonly pendingPeers = new Set<RpcPeer>();
+    private readonly connections = new Set<SharedMySQLSessionConnection>();
+    private ending?: Promise<void>;
+
     constructor(
         private readonly manager: SharedMySQLSessionManagerConfig,
         private readonly key: string,
@@ -108,12 +112,42 @@ class SharedMySQLSessionPool implements MySQLPoolLike {
     ) {}
 
     async getConnection(): Promise<MySQLConnectionLike> {
+        if (this.ending) throw new Error('Shared MySQL session pool is closed');
         const peer = await connectRpc(this.manager.port);
-        await this.call(peer, 'acquire', { key: this.key, leaseId: this.leaseId, clientId: this.clientId });
-        return new SharedMySQLSessionConnection(peer, this);
+        if (this.ending) {
+            peer.close();
+            throw new Error('Shared MySQL session pool is closed');
+        }
+        this.pendingPeers.add(peer);
+        try {
+            await this.call(peer, 'acquire', { key: this.key, leaseId: this.leaseId, clientId: this.clientId });
+            if (this.ending) throw new Error('Shared MySQL session pool is closed');
+            const connection = new SharedMySQLSessionConnection(peer, this);
+            this.connections.add(connection);
+            peer.once('close', () => this.connections.delete(connection));
+            return connection;
+        } catch (error) {
+            peer.close();
+            throw error;
+        } finally {
+            this.pendingPeers.delete(peer);
+        }
     }
 
-    async end(): Promise<void> {}
+    async end(): Promise<void> {
+        this.ending ??= Promise.resolve().then(() => this.closeConnections());
+        await this.ending;
+    }
+
+    private async closeConnections(): Promise<void> {
+        for (const peer of this.pendingPeers) peer.close();
+        this.pendingPeers.clear();
+        const results = await Promise.allSettled([...this.connections].map(connection => connection.release()));
+        this.connections.clear();
+        const errors = results.flatMap(result => (result.status === 'rejected' ? [result.reason] : []));
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'Shared MySQL session pool cleanup failed');
+    }
 
     call<T = unknown>(peer: RpcPeer, method: string, params: Record<string, unknown> = {}): Promise<T> {
         return peer.call<T>(method, { ...params, token: this.manager.token });

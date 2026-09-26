@@ -2,6 +2,7 @@ import { createPool, PoolOptions } from 'mysql2/promise';
 
 import type { RenderedSql } from '../sql';
 import type { DatabaseDriver, DriverConnection, ExecuteResult, QueryResult } from '../driver';
+import { registerMySQLCleanup } from './mysql-lifecycle';
 
 export interface MySQLPoolLike {
     getConnection(): Promise<MySQLConnectionLike>;
@@ -17,6 +18,8 @@ export interface MySQLConnectionLike {
 export class MySQLDriver implements DatabaseDriver {
     readonly dialect = 'mysql' as const;
     private pool: MySQLPoolLike;
+    private readonly unregisterCleanup: () => void;
+    private closing?: Promise<void>;
 
     constructor(configOrPool: PoolOptions | MySQLPoolLike) {
         this.pool = isMySQLPoolLike(configOrPool)
@@ -26,6 +29,7 @@ export class MySQLDriver implements DatabaseDriver {
                   ...configOrPool,
                   timezone: configOrPool.timezone ?? 'Z'
               }) as unknown as MySQLPoolLike);
+        this.unregisterCleanup = registerMySQLCleanup(() => this.close());
     }
 
     async connect(): Promise<void> {
@@ -34,11 +38,16 @@ export class MySQLDriver implements DatabaseDriver {
     }
 
     async close(): Promise<void> {
-        await this.pool.end();
+        this.closing ??= Promise.resolve()
+            .then(() => this.pool.end())
+            .finally(() => this.unregisterCleanup());
+        await this.closing;
     }
 
     async acquire(): Promise<DriverConnection> {
-        return new MySQLConnection(await this.pool.getConnection());
+        if (this.closing) throw new Error('MySQL pool is closed');
+        const connection = await this.pool.getConnection();
+        return new MySQLConnection(connection);
     }
 }
 

@@ -179,7 +179,7 @@ export class MySQLSessionManager {
         this.debugSlot('Shared MySQL database lease releasing', slot, { reason: 'release-database', leaseId: databaseLeaseId });
         for (const waiter of slot.waiters.splice(0)) waiter.reject(new Error('MySQL session database lease released'));
         try {
-            if (slot.connection) await this.enqueueSlot(slot, () => this.resetConnectionAfterLease(slot));
+            await this.enqueueSlot(slot, () => this.closeBackendConnection(slot, 'release-database'));
         } finally {
             for (const waiter of slot.waiters.splice(0)) waiter.reject(new Error('MySQL session database lease released'));
             slot.lease = undefined;

@@ -73,6 +73,45 @@ describe('MySQL shared session manager', () => {
         }
     });
 
+    it('closes active shared pool connections and cancels pending acquisitions', async () => {
+        let acquisitions = 0;
+        let releases = 0;
+        let finishAcquire!: () => void;
+        let pendingAcquireStarted!: () => void;
+        const pendingAcquire = new Promise<void>(resolve => {
+            pendingAcquireStarted = resolve;
+        });
+        const server = await listenRpc(0, async method => {
+            if (method === 'release') releases++;
+            if (method === 'acquire' && ++acquisitions === 2) {
+                pendingAcquireStarted();
+                await new Promise<void>(resolve => {
+                    finishAcquire = resolve;
+                });
+            }
+            return {};
+        });
+        process.env.TSF_TEST_MYSQL_SESSION_MANAGER_PORT = String(server.port);
+        process.env.TSF_TEST_MYSQL_SESSION_MANAGER_TOKEN = 'pool-cleanup-test';
+        const pool = createSharedMySQLSessionPool('pool-cleanup');
+        try {
+            const connection = await pool.getConnection();
+            const pending = pool.getConnection();
+            const pendingRejected = assert.rejects(() => pending, /closed/);
+            await pendingAcquire;
+
+            await Promise.all([pool.end(), pool.end()]);
+            await pendingRejected;
+            await connection.release();
+            assert.equal(releases, 1);
+            await assert.rejects(() => pool.getConnection(), /pool is closed/);
+        } finally {
+            finishAcquire?.();
+            await pool.end();
+            await server.close();
+        }
+    });
+
     it('logs manager process lifecycle', async () => {
         const entries: LogEntry[] = [];
         setLogSink(entry => entries.push(entry));
@@ -318,7 +357,7 @@ describe('MySQL shared session manager', () => {
     );
 
     it(
-        'wires TestingFacade MySQL savepoint databases through the manager',
+        'closes builder-created MySQL savepoint facade connections while reusing the migrated database',
         {
             skip: mysqlConfig ? false : 'set MYSQL_HOST, MYSQL_USER, and MYSQL_DATABASE to run MySQL shared session facade integration'
         },
@@ -348,33 +387,35 @@ describe('MySQL shared session manager', () => {
                 })
             ];
 
+            const buildFacade = TestingHelpers.createTestingFacadeBuilder(
+                {
+                    db: DB,
+                    enableWorker: true,
+                    defaultConfig: { ENABLE_JOB_RUNNER: false },
+                    providers: [
+                        {
+                            provide: DB,
+                            useFactory: () => new DB()
+                        }
+                    ]
+                },
+                {
+                    enableDatabase: true,
+                    dbAdapter: 'mysql',
+                    databasePrefix: prefix,
+                    migrations,
+                    autoSeedData: true,
+                    seedData: async facade => {
+                        const db = facade.get<BaseDatabase>(BaseDatabase);
+                        await db.rawExecute(
+                            sql`INSERT INTO ${sql.identifier('tsf_session_facade_rows')} (${sql.identifier('label')}) VALUES (${'seed'})`
+                        );
+                    }
+                }
+            );
             const createFacade = () => {
                 applyMySQLEnv(mysqlConfig);
-                return TestingHelpers.createTestingFacadeWithDatabase(
-                    {
-                        db: DB,
-                        enableWorker: true,
-                        defaultConfig: { ENABLE_JOB_RUNNER: false },
-                        providers: [
-                            {
-                                provide: DB,
-                                useFactory: () => new DB()
-                            }
-                        ]
-                    },
-                    {
-                        dbAdapter: 'mysql',
-                        databasePrefix: prefix,
-                        migrations,
-                        autoSeedData: true,
-                        seedData: async facade => {
-                            const db = facade.get<BaseDatabase>(BaseDatabase);
-                            await db.rawExecute(
-                                sql`INSERT INTO ${sql.identifier('tsf_session_facade_rows')} (${sql.identifier('label')}) VALUES (${'seed'})`
-                            );
-                        }
-                    }
-                );
+                return buildFacade();
             };
 
             try {
@@ -386,6 +427,8 @@ describe('MySQL shared session manager', () => {
                 await first.resetToSeed();
 
                 const firstDb = first.get<BaseDatabase>(BaseDatabase);
+                const firstConnections = await firstDb.rawFind<{ id: number }>(sql`SELECT CONNECTION_ID() AS id`);
+                await firstDb.rawExecuteUnsafe('UPDATE tsf_session_facade_rows SET label = ? WHERE label = ?', ['seed', 'seed']);
                 assert.equal(await firstDb.schema.hasTable('_jobs'), true);
                 assert.deepStrictEqual(await readLabels(firstDb, 'tsf_session_facade_rows'), ['seed']);
                 await firstDb.rawExecute(
@@ -399,12 +442,19 @@ describe('MySQL shared session manager', () => {
                 assert.deepStrictEqual(await readLabels(firstDb, 'tsf_session_facade_rows'), ['seed']);
                 await first.stop();
                 first = undefined;
+                const groups = Reflect.get(manager, 'databases') as Map<string, { slots: { connection?: unknown }[] }>;
+                assert.ok(groups.size > 0);
+                for (const group of groups.values()) {
+                    for (const slot of group.slots) assert.equal(slot.connection, undefined);
+                }
 
                 await second.start();
                 assert.equal(second.databaseName, databaseName);
                 await second.resetToSeed();
 
                 const secondDb = second.get<BaseDatabase>(BaseDatabase);
+                const secondConnections = await secondDb.rawFind<{ id: number }>(sql`SELECT CONNECTION_ID() AS id`);
+                assert.notEqual(secondConnections[0]?.id, firstConnections[0]?.id);
                 assert.deepStrictEqual(second.migrationExecutions, []);
                 assert.deepStrictEqual(await readMigrationNames(secondDb), ['001_session_facade_schema']);
                 assert.deepStrictEqual(await readLabels(secondDb, 'tsf_session_facade_rows'), ['seed']);

@@ -26,6 +26,7 @@ import {
 import { Env } from '../env';
 import { HttpRequest, MemoryHttpResponse } from '../http';
 import { sql } from '../database/sql';
+import { closeMySQLPools } from '../database/drivers/mysql-lifecycle';
 import { createLogger } from '../services/logger';
 import { JobEntity } from '../services/worker/entity';
 import { waitForTestDatabaseReady } from './database-readiness';
@@ -966,7 +967,8 @@ export function installStandardHooks<C extends BaseAppConfig = BaseAppConfig>(tf
     });
 }
 
-export function resetSrcModuleCache(): void {
+export async function resetSrcModuleCache(): Promise<void> {
+    await closeMySQLPools();
     for (const key of Object.keys(require.cache)) {
         if (key.includes('/dist/') || key.includes('/src/')) delete require.cache[key];
     }

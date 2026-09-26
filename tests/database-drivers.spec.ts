@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { MySQLConnectionLike, MySQLDriver, MySQLPoolLike, PgClientLike, PgPoolLike, PostgresDriver } from '../src';
+import { createApp, MySQLConnectionLike, MySQLDriver, MySQLPoolLike, PgClientLike, PgPoolLike, PostgresDriver } from '../src';
 
 class FakePgClient implements PgClientLike {
     released = false;
@@ -103,6 +103,49 @@ describe('PostgresDriver', () => {
 });
 
 describe('MySQLDriver', () => {
+    it('closes app-owned pools once, including pools outside the database provider', async () => {
+        const app = createApp({ enableHealthcheck: false });
+        const pool = new FakeMySQLPool();
+        let endCalls = 0;
+        pool.end = async () => {
+            endCalls++;
+            pool.ended = true;
+        };
+        const driver = new MySQLDriver(pool);
+
+        await driver.connect();
+        await app.stop();
+        await driver.close();
+        await app.stop();
+
+        assert.equal(pool.ended, true);
+        assert.equal(endCalls, 1);
+        await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
+    });
+
+    it('joins concurrent pool shutdowns and unregisters pools closed before app shutdown', async () => {
+        const app = createApp({ enableHealthcheck: false });
+        const pool = new FakeMySQLPool();
+        let endCalls = 0;
+        let finishClose!: () => void;
+        pool.end = () => {
+            endCalls++;
+            return new Promise<void>(resolve => {
+                finishClose = resolve;
+            });
+        };
+        const driver = new MySQLDriver(pool);
+
+        const firstClose = driver.close();
+        const secondClose = driver.close();
+        await Promise.resolve();
+        assert.equal(endCalls, 1);
+        finishClose();
+        await Promise.all([firstClose, secondClose]);
+        await app.stop();
+        assert.equal(endCalls, 1);
+    });
+
     it('uses UTC when an internal pool timezone is omitted or undefined', async () => {
         for (const config of [{}, { timezone: undefined }]) {
             const driver = new MySQLDriver(config);

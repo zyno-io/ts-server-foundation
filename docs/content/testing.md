@@ -111,7 +111,8 @@ const tf = TestingHelpers.createTestingFacadeWithDatabase(
 ```
 
 Use `createTestingFacadeBuilder()` to define app-level testing defaults once, then let individual suites append controllers,
-providers, imports, and testing hooks:
+providers, imports, and testing hooks. Builder-created facades use the same shutdown and MySQL cleanup as
+`createTestingFacade()`. Call `installStandardHooks(tf)` for each suite, or pair manual `tf.start()` and `tf.stop()` calls:
 
 ```typescript
 export const createTestingFacade = TestingHelpers.createTestingFacadeBuilder(
@@ -128,6 +129,8 @@ export const createTestingFacade = TestingHelpers.createTestingFacadeBuilder(
 const tf = createTestingFacade({
     controllers: [UserController]
 });
+
+TestingHelpers.installStandardHooks(tf);
 ```
 
 Builder inputs can also be resolver functions. The returned factory passes each suite's selections to the resolvers, so
@@ -164,13 +167,15 @@ export const createTestingFacade = TestingHelpers.createTestingFacadeBuilder(
 | `seed()` / `resetToSeed()`                         | Applies seed data or restores the per-test baseline.                                                                                              |
 | `createSeedSavepoint()` / `resetToSeedSavepoint()` | Manages named seed baselines when savepoint isolation is active.                                                                                  |
 
+MySQL drivers constructed while an app is current register pool cleanup with that app. App shutdown closes these pools, including additional pools outside the configured database provider. Explicit `driver.close()` calls can be repeated safely.
+
 `start()` and `stop()` should still be paired. Direct database lifecycle calls are intended for custom setup and debugging; they do not replace app shutdown or the facade hooks.
 
 ## Database Tests
 
 The facade creates a database named from `databasePrefix`, a four-character hash of the current project directory, timestamp, process id, and a counter. The directory hash keeps concurrent test runs in separate worktrees from sharing database names. It updates the app config and `Env` for the chosen adapter, then restores the previous database env when stopped.
 
-Database facades use savepoints by default. In savepoint mode, compatible facades reuse migrated test databases, so migrations run once per compatible database slot instead of once per suite. Each facade still gets seed-data isolation and rolls seed/runtime changes back on stop. When `tsf-dev test` has MySQL env available, it starts a shared MySQL session manager with a slot pool sized to the Node test worker concurrency so compatible MySQL facades can run in parallel across worker processes. Each manager slot owns one database and one long-lived backend connection; after schema preparation, the manager keeps a backend transaction open, allows only one frontend connection at a time for that slot, maps frontend transaction commands to savepoints, and rolls back to the slot baseline when the frontend disconnects. Leave `TSF_TEST_MYSQL_SESSION_MANAGER` unset to start the manager when MySQL test config is present and savepoints are allowed, set it to `0` to disable the manager, or set it to `1` to force it on. Set `TSF_TEST_ALLOW_SAVEPOINTS=0` to force all facades out of savepoint mode even when `useSavepoints: true`, or set `useSavepoints: false` for a fully isolated create/migrate/drop database lifecycle. Database readiness waits run only when a facade has `enableDatabase` and are cached once per process.
+Database facades use savepoints by default. In savepoint mode, compatible facades reuse migrated test databases, so migrations run once per compatible database slot instead of once per suite. Each facade still gets seed-data isolation and rolls seed/runtime changes back on stop. When `tsf-dev test` has MySQL env available, it starts a shared MySQL session manager with a slot pool sized to the Node test worker concurrency so compatible MySQL facades can run in parallel across worker processes. Each manager slot owns one database and opens a backend connection on demand. After schema preparation, the manager keeps a backend transaction open for the suite, allows only one frontend connection at a time for that slot, maps frontend transaction commands to savepoints, and rolls back to the slot baseline when the frontend disconnects. When the facade stops and releases its database lease, the manager rolls back and closes the backend connection, freeing its prepared statements. The next compatible suite reuses the migrated database with a fresh connection and transaction. Leave `TSF_TEST_MYSQL_SESSION_MANAGER` unset to start the manager when MySQL test config is present and savepoints are allowed, set it to `0` to disable the manager, or set it to `1` to force it on. Set `TSF_TEST_ALLOW_SAVEPOINTS=0` to force all facades out of savepoint mode even when `useSavepoints: true`, or set `useSavepoints: false` for a fully isolated create/migrate/drop database lifecycle. Database readiness waits run only when a facade has `enableDatabase` and are cached once per process.
 
 `TestingFacade.start()` logs `Starting test facade` before database creation, app startup, migrations, and seeding. This gives long-running database tests immediate startup feedback while routine HTTP request/response logs remain suppressed by default in test mode.
 
@@ -327,7 +332,7 @@ export async function teardown() {
 
 Environment changes performed while the global-setup module is loaded are retained for the test subprocess. Prefer suite hooks for state that can be isolated per file or facade.
 
-`TestingHelpers.resetSrcModuleCache()` removes CommonJS cache entries whose paths contain `/dist/` or `/src/`. It is useful when a test must re-evaluate application modules after changing environment or module-level state. It does not reset third-party packages, ESM module caches, process globals, registered decorators, or other singleton registries.
+`await TestingHelpers.resetSrcModuleCache()` first closes tracked MySQL pools, including pools created by previously reloaded modules, then removes CommonJS cache entries whose paths contain `/dist/` or `/src/`. Always await it before loading fresh modules. If pool cleanup fails, it attempts every pool and reports the error without flushing the cache. It is useful when a test must re-evaluate application modules after changing environment or module-level state. It does not reset third-party packages, ESM module caches, process globals, registered decorators, or other singleton registries. Continue to stop active facades to release their test database leases.
 
 ## Exported Helpers
 
