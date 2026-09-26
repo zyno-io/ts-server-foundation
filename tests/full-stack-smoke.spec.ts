@@ -233,8 +233,13 @@ describe('full-stack smoke parity', () => {
                 assert.equal(await app.get(WorkerQueueRegistry).getBullQueue(activeQueueName).getJob(body.job.id), undefined);
             } finally {
                 await app.stop();
-                await resetSchema(db);
-                await db.driver.close();
+                // App shutdown closes its MySQL pool, so clean the schema through a separate driver.
+                const cleanupDb = new BaseDatabase(new MySQLDriver(mysqlConfig));
+                try {
+                    await resetSchema(cleanupDb);
+                } finally {
+                    await cleanupDb.driver.close();
+                }
             }
         }
     );
