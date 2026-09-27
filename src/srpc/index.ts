@@ -10,6 +10,8 @@ export type {
     InvokePrefixes,
     ISrpcMessageHandler,
     ISrpcServerOptions,
+    NotificationData,
+    NotificationPrefixes,
     RequestData,
     ResponseData,
     SrpcDisconnectCause,

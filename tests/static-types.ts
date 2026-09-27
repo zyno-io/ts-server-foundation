@@ -1,12 +1,19 @@
 import type {
+    BaseMessage,
     DatabaseField,
+    InvokePrefixes,
     MethodKeys,
     MethodsOf,
+    NotificationData,
+    NotificationPrefixes,
     ObjectKeysMatching,
     OptionalNulls,
     Overwrite,
     RequireFields,
     Serializable,
+    SrpcClient,
+    SrpcServer,
+    SrpcStream,
     StringKeyOf,
     UuidString
 } from '../src';
@@ -18,6 +25,47 @@ type Equal<A, B> =
             : false
         : false;
 type Expect<T extends true> = T;
+
+interface SrpcClientFixture extends BaseMessage {
+    uChangedNotification?: { value: number };
+    uEchoRequest?: { message: string };
+}
+interface SrpcServerFixture extends BaseMessage {
+    dChangedNotification?: { label: string };
+    uEchoResponse?: { message: string };
+}
+type _NotificationPrefixesRequireNoResponse = Expect<Equal<NotificationPrefixes<SrpcClientFixture>, 'uChanged'>>;
+type _NotificationDataIsRequired = Expect<Equal<NotificationData<SrpcClientFixture, 'uChanged'>, { value: number }>>;
+type _NotificationPrefixesExcludeEnvelopeFields = Expect<Equal<NotificationPrefixes<BaseMessage>, never>>;
+type _InvokePrefixesExcludeNotifications = Expect<Equal<InvokePrefixes<SrpcClientFixture, SrpcServerFixture>, 'uEcho'>>;
+
+function checkSrpcNotificationTypes(
+    client: SrpcClient<SrpcClientFixture, SrpcServerFixture>,
+    server: SrpcServer<object, SrpcClientFixture, SrpcServerFixture>,
+    stream: SrpcStream
+) {
+    const upstream: Promise<void> = client.notify('uChanged', { value: 42 });
+    const downstream: Promise<void> = server.notify(stream, 'dChanged', { label: 'changed' });
+    client.registerNotificationHandler('dChanged', data => {
+        const label: string = data.label;
+        void label;
+    });
+    server.registerNotificationHandler('uChanged', (_stream, data) => {
+        const value: number = data.value;
+        void value;
+    });
+    // @ts-expect-error Requests cannot be sent through notify().
+    client.notify('uEcho', { message: 'request' });
+    // @ts-expect-error Notifications cannot be invoked as request/response RPCs.
+    client.invoke('uChanged', { value: 42 });
+    // @ts-expect-error Notification payloads must match the declared field.
+    server.notify(stream, 'dChanged', { label: 42 });
+    // @ts-expect-error Handler registration must match the receiving envelope.
+    client.registerNotificationHandler('uChanged', () => {});
+    void upstream;
+    void downstream;
+}
+void checkSrpcNotificationTypes;
 
 declare const symbolKey: unique symbol;
 

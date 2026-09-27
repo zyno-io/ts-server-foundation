@@ -14,6 +14,9 @@ import {
     InvokePrefixes,
     IQueuedRequest,
     ISrpcLogger,
+    NotificationData,
+    NotificationKeys,
+    NotificationPrefixes,
     RequestData,
     RequestKeys,
     ResponseData,
@@ -25,6 +28,7 @@ import {
     SrpcMeta,
     SrpcTrafficLogging,
     encodeSrpcMessage,
+    isSrpcNotification,
     isValidSrpcTrace,
     serializeSrpcError,
     srpcMessageTypes
@@ -78,7 +82,7 @@ interface ByteStreamPressureState {
 }
 
 export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerOutput extends BaseMessage = BaseMessage> {
-    private readonly handlerRequestId = new AsyncLocalStorage<{ requestId: string; generation: number }>();
+    private readonly handlerRequestId = new AsyncLocalStorage<{ requestId?: string; generation: number }>();
     private ws?: WebSocket;
     private readonly streamConnectionHandlers = new Set<() => void>();
     private readonly streamDisconnectionHandlers = new Set<(cause: SrpcDisconnectCause) => void>();
@@ -86,6 +90,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         RequestKeys<TServerOutput>,
         { resultType: string; handler: (data: unknown) => Promise<unknown> | unknown }
     >();
+    private readonly streamNotificationHandlers = new Map<NotificationKeys<TServerOutput>, (data: unknown) => void | Promise<void>>();
     private readonly requestQueue = new Map<string, IQueuedRequest>();
     private readonly requestBytes = new Map<string, number>();
     private readonly lateReplyTombstones = new Map<string, number>();
@@ -393,13 +398,14 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             return;
         }
 
-        if (!message.requestId) {
+        const notification = isSrpcNotification(message);
+        if (!message.requestId && !notification) {
             this.logger.warn('SRPC client received a message without a request ID', { srpc: this.logData() });
             this.closeGenerationWithError(ws, generation, 'badArg', 'Invalid request ID');
             return;
         }
 
-        if (message.reply) {
+        if (message.reply && message.requestId) {
             this.handleReply(ws, generation, message.requestId, message);
             return;
         }
@@ -422,7 +428,8 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         pressure.bytes += bytes;
         this.handlerPressureByGeneration.set(generation, pressure);
         try {
-            await this.handleServerRequest(generation, message.requestId, message);
+            if (notification) await this.handleServerNotification(generation, message);
+            else await this.handleServerRequest(generation, message.requestId!, message);
         } finally {
             if (this.handlerPressureByGeneration.get(generation) === pressure) {
                 pressure.requests = Math.max(0, pressure.requests - 1);
@@ -526,6 +533,29 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
         this.logger?.error('Unhandled SRPC server message type', { srpc: { ...this.logData(), requestId: logSafeText(requestId) } });
         this.writeMessage({ requestId, reply: true, error: 'Unhandled message type' } as TClientInput, generation);
+    }
+
+    private async handleServerNotification(generation: number, message: TServerOutput): Promise<void> {
+        const notificationType = srpcMessageTypes(message)[0];
+        const handler = this.streamNotificationHandlers.get(notificationType as NotificationKeys<TServerOutput>);
+        const trace = isValidSrpcTrace(message.trace) ? message.trace : undefined;
+        const logMeta = { ...this.logData(), notificationType, traceId: trace?.traceId };
+        if (!handler) {
+            this.logger.warn('Unhandled SRPC server notification type', { srpc: logMeta });
+            return;
+        }
+        const data = (message as Record<string, unknown>)[notificationType];
+        try {
+            await withRemoteSpan('srpc:handleServerNotification', trace, logMeta, () =>
+                withLoggerContext({ srpc: logMeta }, async () => {
+                    this.logger.info('SRPC server notification received');
+                    await this.handlerRequestId.run({ generation }, () => handler(data));
+                    this.logger.info('SRPC server notification processed');
+                })
+            );
+        } catch (error) {
+            this.logger.warn('SRPC server notification failed', error, { srpc: logMeta });
+        }
     }
 
     private generateWsUrl(): string {
@@ -695,7 +725,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                 ),
             announceSender: streamId => {
                 const context = this.handlerRequestId.getStore();
-                if (!this.senderAnnouncements || !context || context.generation !== generation) return;
+                if (!this.senderAnnouncements || !context?.requestId || context.generation !== generation) return;
                 this.writeMessage(
                     { requestId: context.requestId, byteStreamOperation: { streamId, write: { chunk: new Uint8Array() } } } as TClientInput,
                     generation
@@ -758,8 +788,32 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         });
     }
 
+    registerNotificationHandler<P extends NotificationPrefixes<TServerOutput>>(
+        prefix: P,
+        handler: (data: NotificationData<TServerOutput, P>) => void | Promise<void>
+    ): void {
+        this.streamNotificationHandlers.set(
+            `${prefix}Notification` as NotificationKeys<TServerOutput>,
+            handler as (data: unknown) => void | Promise<void>
+        );
+    }
+
     registerDisconnectHandler(handler: (cause: SrpcDisconnectCause) => void): void {
         this.streamDisconnectionHandlers.add(handler);
+    }
+
+    /** Resolves after the local WebSocket send; no response or remote acknowledgement is requested. */
+    notify<P extends NotificationPrefixes<TClientInput>>(prefix: P, data: NotificationData<TClientInput, P>): Promise<void> {
+        const generation = this.handlerRequestId.getStore()?.generation ?? this.generation;
+        const notificationType = `${prefix}Notification`;
+        const spanMeta = { ...this.logData(), notificationType };
+        return withSpan('srpc:notifyServer', spanMeta, () => {
+            const trace = toWireTrace(getTraceContext());
+            const logMeta = { ...spanMeta, traceId: trace?.traceId };
+            return withLoggerContext({ srpc: logMeta }, async () => {
+                await this.writeMessageAsync({ trace, [notificationType]: data } as unknown as TClientInput, generation);
+            });
+        });
     }
 
     invoke<P extends InvokePrefixes<TClientInput, TServerOutput>>(

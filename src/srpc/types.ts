@@ -13,6 +13,9 @@ export type InvokePrefixes<TReq, TRes> = ExtractPrefix<keyof TReq, TRes>;
 export type RequestData<TReq, P extends string> = `${P}Request` extends keyof TReq ? NonNullable<TReq[`${P}Request`]> : never;
 export type ResponseData<TRes, P extends string> = `${P}Response` extends keyof TRes ? NonNullable<TRes[`${P}Response`]> : never;
 export type HandlerRequestData<TReq, P extends string> = `${P}Request` extends keyof TReq ? NonNullable<TReq[`${P}Request`]> : never;
+export type NotificationKeys<T> = keyof T & `${string}Notification`;
+export type NotificationPrefixes<T> = NotificationKeys<T> extends infer K ? (K extends `${infer P}Notification` ? P : never) : never;
+export type NotificationData<T, P extends string> = `${P}Notification` extends keyof T ? NonNullable<T[`${P}Notification`]> : never;
 
 export type SrpcMeta = object;
 
@@ -117,6 +120,21 @@ export function srpcMessageTypes(message: BaseMessage): string[] {
         .filter(([key, value]) => !SrpcEnvelopeFields.has(key) && value !== undefined)
         .map(([key]) => key);
     return types.length ? types : [message.reply ? 'reply' : 'unknown'];
+}
+
+/** One-way application envelopes contain exactly one notification payload and no reply fields. */
+export function isSrpcNotification(message: BaseMessage): boolean {
+    if (
+        message.requestId ||
+        message.reply ||
+        message.error !== undefined ||
+        message.userError !== undefined ||
+        message.pingPong ||
+        message.byteStreamOperation
+    )
+        return false;
+    const types = srpcMessageTypes(message);
+    return types.length === 1 && types[0].endsWith('Notification') && (message as Record<string, unknown>)[types[0]] != null;
 }
 
 export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOutput extends BaseMessage> {

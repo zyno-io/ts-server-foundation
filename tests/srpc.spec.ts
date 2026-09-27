@@ -29,11 +29,14 @@ import {
 } from '../src';
 import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
 import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
+import { isSrpcNotification } from '../src/srpc/types';
 
 const originalEnv = { ...process.env };
 const secret = 'srpc-test-secret';
 
 interface ClientMessage extends BaseMessage {
+    uChangedNotification?: { message: string };
+    uUnhandledNotification?: { message: string };
     uEchoRequest?: { message: string };
     uComplexRequest?: {
         stringField: string;
@@ -51,6 +54,8 @@ interface ClientMessage extends BaseMessage {
 }
 
 interface ServerMessage extends BaseMessage {
+    dChangedNotification?: { message: string };
+    dUnhandledNotification?: { message: string };
     uEchoResponse?: { message: string };
     uComplexResponse?: { result: string; count: number };
     uSlowResponse?: { ok: boolean };
@@ -84,6 +89,23 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    it('distinguishes notifications from malformed requests and replies, including protobuf envelope defaults', () => {
+        assert.equal(isSrpcNotification({ requestId: '', reply: false, uChangedNotification: {} } as ClientMessage), true);
+        for (const message of [
+            {},
+            { uEchoRequest: { message: 'missing id' } },
+            { reply: true, uChangedNotification: {} },
+            { error: 'failed', uChangedNotification: {} },
+            { userError: false, uChangedNotification: {} },
+            { requestId: 'unexpected', uChangedNotification: {} },
+            { uChangedNotification: {}, uEchoRequest: {} },
+            { uChangedNotification: {}, uUnhandledNotification: {} },
+            { uChangedNotification: null }
+        ]) {
+            assert.equal(isSrpcNotification(message as ClientMessage), false);
+        }
+    });
+
     it('rejects invalid configured sRPC resource and timer limits', () => {
         const serverOptions = {
             logger: createLogger('SrpcResourceOptionsTest'),
@@ -1099,6 +1121,392 @@ describe('srpc', () => {
             assert.deepEqual(computed, { result: 25 });
         } finally {
             await harness.close();
+        }
+    });
+
+    it('sends notifications in both directions without replies or pending requests', async () => {
+        const harness = await createHarness();
+        const serverReceived = deferred<string>();
+        const clientReceived = deferred<string>();
+        const release = deferred<void>();
+        const messages: SrpcObservation[] = [];
+        const unregister = registerSrpcObserver(entry => {
+            if (entry.type === 'message' && entry.stream.clientId === 'notification-client' && !entry.data.pingPong) messages.push(entry);
+        });
+        let instances = 0;
+        class ChangedHandler {
+            constructor() {
+                instances++;
+            }
+            async handle(_stream: SrpcStream, data: { message: string }): Promise<void> {
+                serverReceived.resolve(data.message);
+                await release.promise;
+            }
+        }
+        harness.server.registerNotificationHandler('uChanged', ChangedHandler);
+        const client = harness.createClient('notification-client');
+        client.registerNotificationHandler('dChanged', async data => {
+            clientReceived.resolve(data.message);
+            await release.promise;
+        });
+
+        try {
+            await client.connect();
+            const stream = harness.server.streamsByClientId.get('notification-client');
+            assert.ok(stream);
+            await withTimeout(client.notify('uChanged', { message: 'upstream' }), 1_000, 'Client notify waited for a handler');
+            await withTimeout(harness.server.notify(stream, 'dChanged', { message: 'downstream' }), 1_000, 'Server notify waited for a handler');
+            const upstreamMessage = await withTimeout(serverReceived.promise, 1_000, 'Server did not receive notification');
+            const downstreamMessage = await withTimeout(clientReceived.promise, 1_000, 'Client did not receive notification');
+            assert.equal(upstreamMessage, 'upstream');
+            assert.equal(downstreamMessage, 'downstream');
+            assert.equal((client as any).requestQueue.size, 0);
+            assert.equal((client as any).requestBytes.size, 0);
+            assert.equal(stream.$queue.size, 0);
+            assert.equal(instances, 1);
+            release.resolve();
+            await waitForCondition(
+                () => !(harness.server as any).inFlightClientRequests.has(stream) && !(client as any).handlerPressureByGeneration.size,
+                1_000,
+                'Notification handlers did not release pressure'
+            );
+            await client.notify('uChanged', { message: 'second' });
+            await waitForCondition(
+                () => instances === 2 && !(harness.server as any).inFlightClientRequests.has(stream),
+                1_000,
+                'Second notification not handled'
+            );
+            assert.equal(messages.length, 3);
+            for (const entry of messages) {
+                assert.equal(entry.type, 'message');
+                if (entry.type !== 'message') continue;
+                assert.equal(entry.data.requestId, undefined);
+                assert.equal(entry.data.reply, undefined);
+                assert.equal(entry.data.error, undefined);
+            }
+            assert.equal((client as any).lateReplyTombstones.size, 0);
+            assert.equal((harness.server as any).lateReplyTombstonesByStream.has(stream), false);
+        } finally {
+            release.resolve();
+            unregister();
+            await harness.close();
+        }
+    });
+
+    it('logs failed and unhandled notifications without replies or disconnecting either peer', async () => {
+        const warnings: string[] = [];
+        const logger = { info() {}, debug() {}, error() {}, warn: (message: string) => warnings.push(message) };
+        const harness = await createHarness({ logger });
+        const client = harness.createClient('notification-errors');
+        (client as any).logger = logger;
+        harness.server.registerNotificationHandler('uChanged', () => {
+            throw new SrpcError('server failure', true);
+        });
+        client.registerNotificationHandler('dChanged', async () => {
+            throw new Error('client failure');
+        });
+        harness.server.registerMessageHandler('uEcho', (_stream, data) => ({ message: data.message }));
+        const messages: BaseMessage[] = [];
+        const unregister = registerSrpcObserver(entry => {
+            if (entry.type === 'message' && entry.stream.clientId === 'notification-errors' && !entry.data.pingPong) messages.push(entry.data);
+        });
+        try {
+            await client.connect();
+            const stream = harness.server.streamsByClientId.get('notification-errors');
+            assert.ok(stream);
+            await client.notify('uChanged', { message: 'fail' });
+            await client.notify('uUnhandled', { message: 'no handler' });
+            await harness.server.notify(stream, 'dChanged', { message: 'fail' });
+            await harness.server.notify(stream, 'dUnhandled', { message: 'no handler' });
+            await waitForCondition(() => warnings.length === 4, 1_000, 'Notification diagnostics were not logged');
+            assert.deepEqual(warnings.sort(), [
+                'SRPC client notification failed',
+                'SRPC server notification failed',
+                'Unhandled SRPC client notification type',
+                'Unhandled SRPC server notification type'
+            ]);
+            assert.equal(messages.length, 4);
+            assert.equal(
+                messages.some(message => message.reply || message.error),
+                false
+            );
+            assert.equal(client.isConnected, true);
+            assert.equal(stream.connected, true);
+            const echo = await client.invoke('uEcho', { message: 'still connected' });
+            assert.deepEqual(echo, { message: 'still connected' });
+        } finally {
+            unregister();
+            await harness.close();
+        }
+    });
+
+    it('queues notifications until server activation completes', async () => {
+        const harness = await createHarness();
+        const activationGate = deferred<void>();
+        const handlerEntered = deferred<void>();
+        const notificationReceived = deferred<void>();
+        const handled = deferred<string>();
+        let handlerCalls = 0;
+        const unregister = registerSrpcObserver(entry => {
+            if (entry.type === 'message' && entry.stream.clientId === 'notification-activation' && (entry.data as ClientMessage).uChangedNotification)
+                notificationReceived.resolve();
+        });
+        harness.server.registerConnectionHandler(() => {
+            handlerEntered.resolve();
+            return activationGate.promise;
+        });
+        harness.server.registerNotificationHandler('uChanged', (_stream, data) => {
+            handlerCalls++;
+            handled.resolve(data.message);
+        });
+        const socket = new WebSocket(createSignedRawWebSocketUrl(harness.port, 'notification-activation'));
+        try {
+            await waitForWebSocketOpen(socket);
+            await handlerEntered.promise;
+            socket.send(encodeRawSrpcMessage<ClientMessage>({ requestId: '', reply: false, uChangedNotification: { message: 'queued' } }));
+            await withTimeout(notificationReceived.promise, 1_000, 'Notification was not queued');
+            assert.equal(handlerCalls, 0);
+            activationGate.resolve();
+            const handledMessage = await withTimeout(handled.promise, 1_000, 'Notification was not dispatched after activation');
+            assert.equal(handledMessage, 'queued');
+            assert.equal(handlerCalls, 1);
+        } finally {
+            activationGate.resolve();
+            socket.close();
+            unregister();
+            await harness.close();
+        }
+    });
+
+    it('applies request count and byte limits to notification handlers in both directions', async () => {
+        for (const limit of ['count', 'bytes'] as const) {
+            for (const direction of ['upstream', 'downstream'] as const) {
+                const harness = await createHarness({
+                    maxInFlightClientRequests: limit === 'count' ? 1 : 8,
+                    maxInFlightClientRequestBytes: limit === 'bytes' ? 64 : 1_024
+                });
+                const client = harness.createClient(`notification-pressure-${limit}-${direction}`, {}, secret, {
+                    maxInFlightServerRequests: limit === 'count' ? 1 : 8,
+                    maxInFlightServerRequestBytes: limit === 'bytes' ? 64 : 1_024
+                });
+                const entered = deferred<void>();
+                const release = deferred<void>();
+                harness.server.registerNotificationHandler('uChanged', () => {
+                    entered.resolve();
+                    return release.promise;
+                });
+                client.registerNotificationHandler('dChanged', () => {
+                    entered.resolve();
+                    return release.promise;
+                });
+                try {
+                    await client.connect();
+                    const stream = harness.server.streamsByClientId.get(`notification-pressure-${limit}-${direction}`);
+                    assert.ok(stream);
+                    const send = () =>
+                        direction === 'upstream'
+                            ? client.notify('uChanged', { message: 'held' })
+                            : harness.server.notify(stream, 'dChanged', { message: 'held' });
+                    await send();
+                    await withTimeout(entered.promise, 1_000, 'Notification handler did not start');
+                    await send();
+                    await waitForCondition(() => !client.isConnected && !stream.connected, 1_000, 'Notification pressure did not close the stream');
+                    assert.equal(stream.$queue.size, 0);
+                    assert.equal((client as any).requestQueue.size, 0);
+                } finally {
+                    release.resolve();
+                    await harness.close();
+                }
+            }
+        }
+    });
+
+    it('bounds notification count and bytes while server activation is pending', async () => {
+        for (const limit of ['count', 'bytes'] as const) {
+            const harness = await createHarness({
+                maxPendingClientRequests: limit === 'count' ? 1 : 8,
+                maxPendingClientRequestBytes: limit === 'bytes' ? 64 : 1_024
+            });
+            const activationGate = deferred<void>();
+            const handlerEntered = deferred<void>();
+            const queued = deferred<void>();
+            harness.server.registerConnectionHandler(() => {
+                handlerEntered.resolve();
+                return activationGate.promise;
+            });
+            const clientId = `notification-pending-${limit}`;
+            const unregister = registerSrpcObserver(entry => {
+                if (entry.type === 'message' && entry.stream.clientId === clientId && (entry.data as ClientMessage).uChangedNotification)
+                    queued.resolve();
+            });
+            const socket = new WebSocket(createSignedRawWebSocketUrl(harness.port, clientId));
+            const closed = new Promise<[number, string]>(resolve => socket.once('close', (code, reason) => resolve([code, reason.toString()])));
+            try {
+                await waitForWebSocketOpen(socket);
+                await handlerEntered.promise;
+                const message = encodeRawSrpcMessage<ClientMessage>({ uChangedNotification: { message: 'queued' } });
+                socket.send(message);
+                await withTimeout(queued.promise, 1_000, 'Notification did not reach the pending queue');
+                socket.send(message);
+                const closeResult = await withTimeout(closed, 1_000, 'Pending notifications exceeded their limits without closing');
+                assert.deepEqual(closeResult, [
+                    4000,
+                    limit === 'count' ? 'Too many pending client requests' : 'Too many pending client request bytes'
+                ]);
+            } finally {
+                activationGate.resolve();
+                socket.close();
+                unregister();
+                await harness.close();
+            }
+        }
+    });
+
+    it('reports local notification send failures without retaining pending RPCs', async () => {
+        const harness = await createHarness();
+        const server = harness.server as any;
+        try {
+            for (const failure of ['disconnected', 'encode', 'throw', 'callback', 'buffer'] as const) {
+                const client = harness.createClient(`notification-send-${failure}`) as any;
+                const ws = {
+                    readyState: failure === 'disconnected' ? WebSocket.CLOSED : WebSocket.OPEN,
+                    bufferedAmount: failure === 'buffer' ? 16 * 1024 * 1024 : 0,
+                    send(_bytes: Buffer, callback: (error?: Error) => void) {
+                        if (failure === 'throw') throw new Error('notification send throw');
+                        callback(new Error('notification send callback'));
+                    },
+                    close() {},
+                    on() {},
+                    off() {}
+                };
+                client.ws = ws;
+                client.generation = 1;
+                client.isConnected = true;
+                const stream = server.createStream(ws, {
+                    clientStreamId: `transport-${failure}`,
+                    clientId: `notification-send-${failure}`,
+                    appVersion: 'test',
+                    configureTs: Date.now(),
+                    protocolVersion: 2,
+                    capabilities: new Set(),
+                    supersede: false,
+                    address: '127.0.0.1',
+                    meta: {}
+                });
+                server.streamsById.set(stream.id, stream);
+                server.pendingStreamsByClientId.set(stream.clientId, stream);
+                if (failure === 'encode') {
+                    const failingCodec = {
+                        ...JsonMessage,
+                        encode() {
+                            throw new Error('notification encode failure');
+                        }
+                    };
+                    client.clientMessage = failingCodec;
+                    server.options.serverMessage = failingCodec;
+                } else server.options.serverMessage = JsonMessage;
+                const pattern = {
+                    disconnected: /not connected/,
+                    encode: /notification encode failure/,
+                    throw: /notification send throw/,
+                    callback: /notification send callback/,
+                    buffer: /outgoing buffer limit/
+                }[failure];
+                await assert.rejects(client.notify('uChanged', { message: 'fail' }), pattern);
+                await assert.rejects(harness.server.notify(stream, 'dChanged', { message: 'fail' }), pattern);
+                assert.equal(client.requestQueue.size, 0);
+                assert.equal(client.requestBytes.size, 0);
+                assert.equal(stream.$queue.size, 0);
+            }
+        } finally {
+            await harness.close();
+        }
+    });
+
+    it('keeps asynchronous notification handlers pinned to their client generation', async () => {
+        const harness = await createHarness();
+        const client = harness.createClient('notification-generation') as any;
+        const release = deferred<void>();
+        const outcome = deferred<{ byteStreamError: unknown; sendError: unknown }>();
+        let writes = 0;
+        const ws = {
+            readyState: WebSocket.OPEN,
+            bufferedAmount: 0,
+            send() {
+                writes++;
+            },
+            close() {}
+        };
+        client.ws = ws;
+        client.generation = 1;
+        client.isConnected = true;
+        client.registerNotificationHandler('dChanged', async () => {
+            await release.promise;
+            let byteStreamError: unknown;
+            let sendError: unknown;
+            try {
+                client.resolveByteStream();
+            } catch (error) {
+                byteStreamError = error;
+            }
+            try {
+                await client.notify('uChanged', { message: 'stale handler' });
+            } catch (error) {
+                sendError = error;
+            }
+            outcome.resolve({ byteStreamError, sendError });
+        });
+        try {
+            const handling = client.handleMessage(ws, 1, encodeRawSrpcMessage<ServerMessage>({ dChangedNotification: { message: 'held' } }));
+            client.generation = 2;
+            release.resolve();
+            await handling;
+            const errors = await withTimeout(outcome.promise, 1_000, 'Stale notification handler did not finish');
+            assert.ok(errors.byteStreamError instanceof Error);
+            assert.match(errors.byteStreamError.message, /stale handler generation/);
+            assert.ok(errors.sendError instanceof Error);
+            assert.match(errors.sendError.message, /not connected/);
+            assert.equal(writes, 0);
+            assert.equal(client.handlerPressureByGeneration.size, 0);
+        } finally {
+            release.resolve();
+            await harness.close();
+        }
+    });
+
+    it('propagates traces through notifications in both directions', async () => {
+        const exporter = new InMemorySpanExporter();
+        initTelemetry({ serviceName: 'srpc-notification-trace-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        const harness = await createHarness();
+        const serverReceived = deferred<void>();
+        const clientReceived = deferred<void>();
+        harness.server.registerNotificationHandler('uChanged', () => serverReceived.resolve());
+        const client = harness.createClient('notification-traces');
+        client.registerNotificationHandler('dChanged', () => clientReceived.resolve());
+        try {
+            await client.connect();
+            const stream = harness.server.streamsByClientId.get('notification-traces');
+            assert.ok(stream);
+            await client.notify('uChanged', { message: 'upstream trace' });
+            await withTimeout(serverReceived.promise, 1_000, 'Server notification trace did not run');
+            await harness.server.notify(stream, 'dChanged', { message: 'downstream trace' });
+            await withTimeout(clientReceived.promise, 1_000, 'Client notification trace did not run');
+            await waitForCondition(() => exporter.getFinishedSpans().length >= 4, 1_000, 'Notification spans did not finish');
+            const spans = exporter.getFinishedSpans();
+            for (const [sendName, handlerName] of [
+                ['srpc:notifyServer', 'srpc:handleClientNotification'],
+                ['srpc:notifyClient', 'srpc:handleServerNotification']
+            ]) {
+                const sendSpan = spans.find(span => span.name === sendName);
+                const handlerSpan = spans.find(span => span.name === handlerName);
+                assert.ok(sendSpan);
+                assert.ok(handlerSpan);
+                assert.equal(handlerSpan.spanContext().traceId, sendSpan.spanContext().traceId);
+                assert.equal(handlerSpan.parentSpanContext?.spanId, sendSpan.spanContext().spanId);
+            }
+        } finally {
+            await harness.close();
+            resetTelemetryForTests();
         }
     });
 
