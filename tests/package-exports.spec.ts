@@ -60,6 +60,30 @@ describe('package exports', () => {
         assert.equal(root.init, undefined);
     });
 
+    it('loads google-libphonenumber only when a phone helper is used', () => {
+        const output = execFileSync(
+            process.execPath,
+            [
+                '-e',
+                `
+                    const phoneModule = require.resolve('google-libphonenumber');
+                    const foundation = require('@zyno-io/ts-server-foundation');
+                    const loadedOnImport = Boolean(require.cache[phoneModule]);
+                    const cleaned = foundation.cleanPhone('(404) 900-5600');
+                    const loadedAfterUse = Boolean(require.cache[phoneModule]);
+                    process.stdout.write(JSON.stringify({ loadedOnImport, cleaned, loadedAfterUse }));
+                `
+            ],
+            { cwd: process.cwd(), encoding: 'utf8' }
+        );
+
+        assert.deepStrictEqual(JSON.parse(output), {
+            loadedOnImport: false,
+            cleaned: '+14049005600',
+            loadedAfterUse: true
+        });
+    });
+
     it('forces the process timezone to UTC when loading a runtime entrypoint', () => {
         for (const entrypoint of ['@zyno-io/ts-server-foundation', '@zyno-io/ts-server-foundation/otel']) {
             const output = execFileSync(

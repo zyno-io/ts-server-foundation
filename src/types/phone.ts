@@ -1,10 +1,18 @@
 import { deserializer, ReflectionKind, validationRegistry, ValidatorError } from '../reflection';
 import type { TsfTypeTag, TsfValidatorTag } from '../reflection';
-import { PhoneNumberFormat, PhoneNumberUtil } from 'google-libphonenumber';
 import { getFirstTypeAnnotation } from './type-annotations';
 
-const phoneFormatter = PhoneNumberUtil.getInstance();
 const InvalidPhoneSymbol = '¡InvalidPhone¡';
+let phoneTools: ReturnType<typeof loadPhoneTools> | undefined;
+
+function loadPhoneTools() {
+    const { PhoneNumberFormat, PhoneNumberUtil } = require('google-libphonenumber') as typeof import('google-libphonenumber');
+    return { phoneFormatter: PhoneNumberUtil.getInstance(), PhoneNumberFormat };
+}
+
+function getPhoneTools() {
+    return (phoneTools ??= loadPhoneTools());
+}
 
 export function cleanPhone(value: string, country: string = 'US'): string | null {
     const cleaned = cleanPhoneInternal(value, country);
@@ -13,6 +21,7 @@ export function cleanPhone(value: string, country: string = 'US'): string | null
 
 function cleanPhoneInternal(value: string, country: string = 'US', stripUSPrefix = false): string {
     if (typeof value !== 'string') return InvalidPhoneSymbol;
+    const { phoneFormatter, PhoneNumberFormat } = getPhoneTools();
     const number = tryOrErrorSync(() => phoneFormatter.parseAndKeepRawInput(value, country));
     if (number instanceof Error) return InvalidPhoneSymbol;
     if (!phoneFormatter.isValidNumber(number)) return InvalidPhoneSymbol;
@@ -22,6 +31,7 @@ function cleanPhoneInternal(value: string, country: string = 'US', stripUSPrefix
 }
 
 export function formatPhoneFriendly(value: string, country?: string): string | null {
+    const { phoneFormatter, PhoneNumberFormat } = getPhoneTools();
     const number = tryOrErrorSync(() => phoneFormatter.parse(value, country));
     if (number instanceof Error) return null;
     if (!phoneFormatter.isValidNumber(number)) return null;
