@@ -99,16 +99,29 @@ export interface ISrpcLogger {
 }
 
 /**
- * Controls per-message sRPC traffic logs. `true` logs envelope/message types;
- * set `bodies` to include the decoded message body.
+ * Controls per-message sRPC traffic logs. `true` logs envelope/message types
+ * except pingPong-only heartbeats; set `bodies` to include the decoded body.
  */
 export interface SrpcTrafficLoggingOptions {
     bodies?: boolean;
+    /** Include pingPong-only heartbeat envelopes. Defaults to false. */
+    pingPong?: boolean;
 }
 
 export type SrpcTrafficLogging = boolean | SrpcTrafficLoggingOptions;
 
 const SrpcEnvelopeFields = new Set(['requestId', 'reply', 'error', 'userError', 'trace', 'pingPong', 'byteStreamOperation']);
+
+/** Identifies heartbeat-only pings and pongs without hiding mixed payloads or errors. */
+export function isSrpcPingPongOnly(message: BaseMessage): boolean {
+    return (
+        !!message.pingPong &&
+        message.byteStreamOperation === undefined &&
+        message.error === undefined &&
+        message.userError === undefined &&
+        Object.entries(message).every(([key, value]) => SrpcEnvelopeFields.has(key) || value === undefined)
+    );
+}
 
 /** Returns the application-level message fields carried by an sRPC envelope. */
 export function srpcMessageTypes(message: BaseMessage): string[] {

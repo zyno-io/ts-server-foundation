@@ -157,13 +157,14 @@ server.registerDisconnectHandler((stream, cause) => {
 
 Server options:
 
-| Option          | Description                                                |
-| --------------- | ---------------------------------------------------------- |
-| `logger`        | Logger with `info`, `warn`, `error`, and `debug` methods.  |
-| `clientMessage` | Generated codec for client-to-server envelope messages.    |
-| `serverMessage` | Generated codec for server-to-client envelope messages.    |
-| `wsPath`        | WebSocket path.                                            |
-| `httpServer`    | Optional Node HTTP server for direct upgrade registration. |
+| Option          | Description                                                                                      |
+| --------------- | ------------------------------------------------------------------------------------------------ |
+| `logger`        | Logger with `info`, `warn`, `error`, and `debug` methods.                                        |
+| `clientMessage` | Generated codec for client-to-server envelope messages.                                          |
+| `serverMessage` | Generated codec for server-to-client envelope messages.                                          |
+| `wsPath`        | WebSocket path.                                                                                  |
+| `httpServer`    | Optional Node HTTP server for direct upgrade registration.                                       |
+| `logTraffic`    | Optional [traffic logging](#traffic-logging); heartbeats are excluded unless explicitly enabled. |
 
 Handlers may also be zero-argument classes with a `handle(stream, data)` method. A new class instance is created for each request; SRPC does not resolve handler classes through application DI.
 
@@ -218,9 +219,10 @@ client.disconnect();
 
 Client options:
 
-| Option            | Default | Description                              |
-| ----------------- | ------- | ---------------------------------------- |
-| `enableReconnect` | `true`  | Reconnects after unexpected disconnects. |
+| Option            | Default | Description                                                                             |
+| ----------------- | ------- | --------------------------------------------------------------------------------------- |
+| `enableReconnect` | `true`  | Reconnects after unexpected disconnects.                                                |
+| `logTraffic`      | `false` | [Traffic logging](#traffic-logging); heartbeats are excluded unless explicitly enabled. |
 
 The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
 
@@ -323,13 +325,24 @@ Observers receive connection entries with `{ type, stream, at }`, disconnection 
 
 ## Traffic Logging
 
-Set `logTraffic: true` on an `SrpcServer` or `SrpcClient` to log every inbound and outbound envelope at info level with its direction and message type. To also log the decoded body, opt in explicitly:
+Set `logTraffic: true` on an `SrpcServer` or `SrpcClient` to log inbound and outbound envelopes at info level with their direction and message type, excluding `pingPong`-only heartbeat envelopes. Heartbeat logging defaults to off, including when body logging is enabled. To also log the decoded body, opt in explicitly:
 
 ```ts
 logTraffic: {
     bodies: true;
 }
 ```
+
+To include heartbeat envelopes, use `logTraffic: { pingPong: true }`, or combine both options:
+
+```ts
+logTraffic: {
+    pingPong: true,
+    bodies: true
+}
+```
+
+Only envelopes whose sole payload is `pingPong` are suppressed, including heartbeat pongs with `reply: true`. Envelope metadata such as `requestId` and `trace`, and undefined fields from generated codecs, do not prevent heartbeat suppression. Envelopes containing `pingPong` alongside another payload, `byteStreamOperation`, or a defined `error` or `userError` remain logged so other traffic is visible, including with codecs that allow multiple payload fields. These options affect only traffic logs; heartbeat handling, activation, and observer notifications are unchanged.
 
 Traffic bodies can contain application data, so enable body logging only where that data is appropriate for the configured log sink and retention policy.
 

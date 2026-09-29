@@ -35,6 +35,7 @@ import {
     encodeSrpcMessage,
     isSrpcMessageHandlerClass,
     isSrpcNotification,
+    isSrpcPingPongOnly,
     isValidSrpcTrace,
     serializeSrpcError,
     srpcMessageTypes
@@ -995,6 +996,7 @@ export class SrpcServer<
     private logTraffic(stream: SrpcStream<TMeta>, direction: 'inbound' | 'outbound', message: BaseMessage): void {
         const options = this.options.logTraffic;
         if (!options) return;
+        if (!(typeof options === 'object' && options.pingPong === true) && isSrpcPingPongOnly(message)) return;
         const bodies = typeof options === 'object' && options.bodies === true;
         this.logger.info('SRPC traffic', {
             direction,
