@@ -41,7 +41,13 @@ message ServerMessage {
     }
 }
 
-message PingPong {}
+enum PingPongType {
+    PING_PONG_TYPE_UNSPECIFIED = 0;
+    PING_PONG_TYPE_HELLO = 1;
+    PING_PONG_TYPE_REGISTERED = 2;
+    PING_PONG_TYPE_PONG = 3;
+}
+message PingPong { optional PingPongType type = 1; }
 message TraceContext {
     string traceId = 1;
     string spanId = 2;
@@ -167,7 +173,7 @@ Server options:
 
 Handlers may also be zero-argument classes with a `handle(stream, data)` method. A new class instance is created for each request; SRPC does not resolve handler classes through application DI.
 
-Connection setup is deliberately ordered. After authentication, the server creates a pending stream and sends the initial `pingPong`. Registered connection handlers then run in registration order and are awaited. Only after they complete does the stream become active and queued client requests begin. A connection-handler failure disconnects the stream before activation. Disconnect handlers run in registration order but are synchronous callbacks; returning a promise does not delay cleanup.
+Connection setup is deliberately ordered. After authentication, the server creates a pending stream and sends `pingPong` with type `HELLO`. Registered connection handlers then run in registration order and are awaited. Only after they complete does the stream become active, the server send `REGISTERED`, and queued client requests begin. A connection-handler failure disconnects the stream before activation. Disconnect handlers run in registration order but are synchronous callbacks; returning a promise does not delay cleanup.
 
 ## Server-To-Client Calls
 
@@ -226,7 +232,20 @@ The exported `SrpcClientOptions` type describes this object. `connect({ supersed
 
 Protocol-v2 and protocol-v3 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
 
-After the initial ping handshake, the client sends a ping every 55 seconds. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate ping-based liveness check.
+The optional `PingPong.type` enum distinguishes server handshake and heartbeat messages. Generated TypeScript codecs represent it as a numeric `PingPongType` enum with the prefixed names shown above and an optional `type` property (`undefined` when absent). The library exports matching numeric values as `SrpcPingPongType`.
+
+| Type                    | Value | `SrpcClient` behavior                                                                    |
+| ----------------------- | ----- | ---------------------------------------------------------------------------------------- |
+| `UNSPECIFIED` or absent | `0`   | Legacy sequence: answer the first ping, connect on the next, then only refresh liveness. |
+| `HELLO`                 | `1`   | Answer with a bare, untyped `pingPong`; wait for activation.                             |
+| `REGISTERED`            | `2`   | Complete activation without answering.                                                   |
+| `PONG`                  | `3`   | Refresh liveness without answering or completing activation.                             |
+
+An explicit `REGISTERED` completes activation even without a prior `HELLO`. Duplicate `HELLO` messages receive bare responses and do not complete activation or repeat connection callbacks. All pingPongs refresh liveness; unknown future nonzero types do nothing else. If liveness messages precede the handshake, the client still answers the first untyped ping and waits for the next untyped ping or `REGISTERED`. The DevConsole browser client also waits for typed `REGISTERED`, while preserving its existing first-ping connection behavior with untyped servers.
+
+After activation, the client sends an untyped ping every 55 seconds. Keeping client pings untyped preserves legacy codecs and avoids assigning server handshake/response meanings to client requests. The server updates inbound liveness for every pingPong and answers only after activation with `PONG`, regardless of its inbound type or `reply` flag. Server pingPongs and client heartbeat responses carry no `requestId` or `reply: true` flag. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate ping-based liveness check.
+
+This is wire-compatible with empty legacy `PingPong` messages. Old protobuf decoders ignore the new field, and new decoders accept empty messages. Applications own their envelope schemas and pass their generated codecs to sRPC: add the enum and optional field to each application's proto and regenerate with `tsf-gen-proto` to send or read the type. An old server-side codec ignores the in-memory `type` during encoding, so even an upgraded library sends empty pingPongs until that codec is regenerated. Existing peers can continue using the legacy handshake without regeneration. Custom codecs must likewise accept the optional field or ignore it.
 
 ## Authentication
 

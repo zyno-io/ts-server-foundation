@@ -26,6 +26,7 @@ import {
     SrpcIndeterminateDeliveryError,
     SrpcMessageFns,
     SrpcMeta,
+    SrpcPingPongType,
     SrpcTrafficLogging,
     encodeSrpcMessage,
     isSrpcNotification,
@@ -110,7 +111,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     private readonly byteStreamsByGeneration = new Map<number, IByteStream>();
     private readonly byteStreamPressureByGeneration = new Map<number, ByteStreamPressureState>();
     private readonly byteStreamDisconnectHandlersByGeneration = new Map<number, Set<() => void>>();
-    private awaitingActivation?: { ws: WebSocket; generation: number; clearConnectTimeout: () => void };
+    private awaitingActivation?: { ws: WebSocket; generation: number; clearConnectTimeout: () => void; helloReceived: boolean };
     private clearConnectTimeout?: () => void;
 
     isConnected = false;
@@ -240,14 +241,18 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
 
         this.lastPongMs = Date.now();
         this.logger.debug('SRPC client received initial handshake ping', { srpc: this.logData() });
-        if (!this.writeMessage({ pingPong: {} } as TClientInput, generation) || !this.isCurrent(ws, generation)) return;
-        this.awaitingActivation = { ws, generation, clearConnectTimeout };
+        const type = message.pingPong.type ?? SrpcPingPongType.UNSPECIFIED;
+        const helloReceived = type === SrpcPingPongType.HELLO || type === SrpcPingPongType.UNSPECIFIED;
+        if (helloReceived && (!this.writeMessage({ pingPong: {} } as TClientInput, generation) || !this.isCurrent(ws, generation))) return;
+        this.awaitingActivation = { ws, generation, clearConnectTimeout, helloReceived };
         ws.on('message', msgData => {
             void this.handleMessage(ws, generation, msgData).catch(error => {
                 this.logger.warn('Failed to dispatch SRPC message', error, { srpc: this.logData() });
                 this.closeGenerationWithError(ws, generation, 'badArg', 'Invalid message format');
             });
         });
+        // An explicit activation ack is sufficient even if HELLO was omitted.
+        if (type === SrpcPingPongType.REGISTERED) this.completeConnection(ws, generation);
     }
 
     private completeConnection(ws: WebSocket, generation: number): void {
@@ -380,7 +385,18 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
 
         if (message.pingPong) {
             this.lastPongMs = Date.now();
-            if (this.awaitingActivation?.ws === ws && this.awaitingActivation.generation === generation) this.completeConnection(ws, generation);
+            const type = message.pingPong.type ?? SrpcPingPongType.UNSPECIFIED;
+            const activation = this.awaitingActivation;
+            const isActivating = activation?.ws === ws && activation.generation === generation;
+            if (type === SrpcPingPongType.HELLO || (type === SrpcPingPongType.UNSPECIFIED && isActivating && !activation.helloReceived)) {
+                // Duplicate HELLOs are answered without completing activation.
+                if (this.writeMessage({ pingPong: {} } as TClientInput, generation) && this.isCurrent(ws, generation) && isActivating) {
+                    activation.helloReceived = true;
+                }
+            } else if (type === SrpcPingPongType.REGISTERED || (type === SrpcPingPongType.UNSPECIFIED && isActivating)) {
+                this.completeConnection(ws, generation);
+            }
+            // PONG and unknown future types only refresh liveness.
             return;
         }
 

@@ -6,7 +6,13 @@ package sgnl24.DevConsole;
 /// Framework
 ///
 
-message PingPong {}
+enum PingPongType {
+  PING_PONG_TYPE_UNSPECIFIED = 0;
+  PING_PONG_TYPE_HELLO = 1;
+  PING_PONG_TYPE_REGISTERED = 2;
+  PING_PONG_TYPE_PONG = 3;
+}
+message PingPong { optional PingPongType type = 1; }
 
 message WriteByteStream { bytes chunk = 1; }
 message FinishByteStream {}

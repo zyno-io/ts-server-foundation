@@ -6,12 +6,14 @@
  * Connection lifecycle (mirrors the Node.js SrpcClient):
  *   1. Connect via WebSocket with auth query params
  *   2. Wait for server's initial pingPong (handshake)
- *   3. Respond with pingPong → connection established
+ *   3. Respond to HELLO; wait for REGISTERED (legacy servers connect on the first ping)
  *   4. Send periodic pings; server responds with pongs
  *   5. Auto-reconnect with exponential backoff on disconnect
  *
  * For the DevConsole, authentication is skipped (server accepts all localhost connections).
  */
+
+import { PingPongType } from '../../src/devconsole/generated/devconsole';
 
 /** Matches SrpcMessageFns from src/srpc/types.ts */
 interface MessageFns<T> {
@@ -25,8 +27,7 @@ interface BaseMessage {
     reply?: boolean;
     error?: string;
     userError?: boolean;
-    // eslint-disable-next-line @typescript-eslint/no-empty-object-type
-    pingPong?: {};
+    pingPong?: { type?: number };
     byteStreamOperation?: unknown;
 }
 
@@ -95,12 +96,15 @@ export class SrpcBrowserClient<TOutbound extends BaseMessage = BaseMessage, TInb
 
             if (message.pingPong) {
                 this.lastPongMs = Date.now();
+                const type = message.pingPong.type ?? PingPongType.PING_PONG_TYPE_UNSPECIFIED;
+                const legacy = type === PingPongType.PING_PONG_TYPE_UNSPECIFIED;
+                if (type === PingPongType.PING_PONG_TYPE_HELLO || (legacy && !handshakeComplete)) {
+                    this.writeMessage({ pingPong: {} } as Partial<TOutbound>);
+                }
 
-                if (!handshakeComplete) {
-                    // Respond to server's initial ping (completes handshake)
+                if (!handshakeComplete && (type === PingPongType.PING_PONG_TYPE_REGISTERED || legacy)) {
                     handshakeComplete = true;
                     clearTimeout(connectTimeout);
-                    this.writeMessage({ pingPong: {} } as Partial<TOutbound>);
 
                     this.established = true;
                     this.isConnected = true;
@@ -113,7 +117,7 @@ export class SrpcBrowserClient<TOutbound extends BaseMessage = BaseMessage, TInb
                     return;
                 }
 
-                // Server responding to our ping
+                // HELLO never activates; PONG and future types only refresh liveness.
                 return;
             }
 
