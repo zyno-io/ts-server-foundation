@@ -481,6 +481,148 @@ describe('srpc', () => {
         ]);
     });
 
+    for (const peer of ['server', 'client'] as const) {
+        it(`omits heartbeat-only traffic on the ${peer} unless explicitly enabled`, () => {
+            const heartbeats: ClientMessage[] = [
+                { pingPong: {} },
+                { pingPong: {}, reply: true },
+                { requestId: 'x', reply: true, pingPong: {} },
+                {
+                    requestId: '',
+                    reply: false,
+                    error: undefined,
+                    userError: undefined,
+                    trace: { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), traceFlags: 1 },
+                    pingPong: {},
+                    byteStreamOperation: undefined,
+                    uEchoRequest: undefined,
+                    uChangedNotification: undefined
+                },
+                {
+                    requestId: 'x',
+                    reply: true,
+                    trace: { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), traceFlags: 1 },
+                    pingPong: {},
+                    error: undefined,
+                    userError: undefined,
+                    byteStreamOperation: undefined,
+                    uEchoRequest: undefined
+                }
+            ];
+            for (const options of [true, {}, { bodies: true }, { pingPong: false }, { bodies: true, pingPong: false }]) {
+                const fixture = createTrafficLoggingFixture(peer, options);
+                for (const direction of ['inbound', 'outbound'] as const) {
+                    for (const heartbeat of heartbeats) fixture.logTraffic(direction, heartbeat);
+                }
+                assert.deepEqual(fixture.entries, [], `Unexpected ${peer} heartbeat logs with ${JSON.stringify(options)}`);
+            }
+        });
+
+        it(`logs heartbeat traffic on the ${peer} when pingPong is enabled, with optional bodies`, () => {
+            const messages = [{ pingPong: {} }, { pingPong: {}, reply: true }, { requestId: 'x', reply: true, pingPong: {} }];
+            for (const bodies of [false, true]) {
+                const fixture = createTrafficLoggingFixture(peer, bodies ? { pingPong: true, bodies: true } : { pingPong: true });
+                for (const direction of ['inbound', 'outbound'] as const) {
+                    for (const message of messages) fixture.logTraffic(direction, message);
+                }
+                assert.deepEqual(
+                    fixture.entries,
+                    ['inbound', 'outbound'].flatMap(direction =>
+                        messages.map(message => [
+                            'SRPC traffic',
+                            { direction, ...fixture.identifiers, messageTypes: ['pingPong'], ...(bodies ? { body: message } : {}) }
+                        ])
+                    )
+                );
+            }
+        });
+
+        it(`preserves other and mixed-envelope traffic logging on the ${peer}`, () => {
+            const byteStreamOperation = { streamId: 1, finish: {} };
+            const payload = { message: 'hello' };
+            const messages: Array<[ClientMessage, string]> = [
+                [{ requestId: 'request-id', uEchoRequest: payload }, 'uEchoRequest'],
+                [{ requestId: 'request-id', reply: true }, 'reply'],
+                [{ requestId: 'request-id', error: 'failed' }, 'error'],
+                [{ byteStreamOperation }, 'byteStreamOperation'],
+                [{ uChangedNotification: payload }, 'uChangedNotification'],
+                [{ pingPong: {}, uEchoRequest: payload }, 'pingPong'],
+                [{ requestId: 'x', reply: true, pingPong: {}, uEchoRequest: payload }, 'pingPong'],
+                [{ pingPong: {}, byteStreamOperation }, 'pingPong'],
+                [{ pingPong: {}, error: 'failed' }, 'pingPong'],
+                [{ requestId: 'x', reply: true, pingPong: {}, error: 'failed' }, 'pingPong'],
+                [{ pingPong: {}, error: '' }, 'pingPong'],
+                [{ pingPong: {}, userError: true }, 'pingPong'],
+                [{ pingPong: {}, userError: false }, 'pingPong'],
+                [{ requestId: 'x', reply: true, pingPong: {}, userError: false }, 'pingPong']
+            ];
+            for (const options of [true, { bodies: true }]) {
+                const fixture = createTrafficLoggingFixture(peer, options);
+                for (const direction of ['inbound', 'outbound'] as const) {
+                    for (const [message, messageType] of messages) {
+                        fixture.logTraffic(direction, message);
+                        assert.deepEqual(fixture.entries.pop(), [
+                            'SRPC traffic',
+                            {
+                                direction,
+                                ...fixture.identifiers,
+                                messageTypes: [messageType],
+                                ...(typeof options === 'object' ? { body: message } : {})
+                            }
+                        ]);
+                    }
+                }
+            }
+        });
+    }
+
+    for (const pingPong of [false, true]) {
+        it(`preserves heartbeat observation and RPC traffic with heartbeat logging ${pingPong ? 'enabled' : 'disabled'}`, async () => {
+            const traffic: Array<{ peer: string; direction: string; messageTypes: string[] }> = [];
+            const createTrafficLogger = (peer: string) => ({
+                info(message: unknown, data: unknown) {
+                    if (message === 'SRPC traffic') traffic.push({ peer, ...(data as { direction: string; messageTypes: string[] }) });
+                },
+                warn() {},
+                error() {},
+                debug() {}
+            });
+            const logTraffic = pingPong ? { pingPong: true } : true;
+            const harness = await createHarness({ logger: createTrafficLogger('server'), logTraffic });
+            const clientId = 'traffic-logging-client';
+            const observedDirections = new Set<string>();
+            const unregister = registerSrpcObserver(entry => {
+                if (entry.type === 'message' && entry.stream.clientId === clientId && entry.data.pingPong) observedDirections.add(entry.direction);
+            });
+            const client = harness.createClient(clientId, {}, secret, { logTraffic });
+            (client as any).logger = createTrafficLogger('client');
+            harness.server.registerMessageHandler('uEcho', (_stream, data) => data);
+
+            try {
+                await client.connect();
+                assert.deepEqual(await client.invoke('uEcho', { message: 'hello' }), { message: 'hello' });
+                assert.deepEqual([...observedDirections].sort(), ['inbound', 'outbound']);
+                for (const peer of ['server', 'client']) {
+                    for (const direction of ['inbound', 'outbound']) {
+                        const entries = traffic.filter(entry => entry.peer === peer && entry.direction === direction);
+                        assert.ok(
+                            entries.some(entry => entry.messageTypes.some(type => type.startsWith('uEcho'))),
+                            `Missing ${peer} ${direction} RPC log`
+                        );
+                        assert.equal(
+                            entries.some(entry => entry.messageTypes.includes('pingPong')),
+                            pingPong,
+                            `${peer} ${direction} heartbeat logging`
+                        );
+                    }
+                }
+            } finally {
+                unregister();
+                await harness.close();
+            }
+        });
+    }
+
     it('ignores bounded late replies and rejects unknown UUID replies', async () => {
         const server = Object.create(SrpcServer.prototype) as any;
         const sent: Record<string, unknown>[] = [];
@@ -3490,6 +3632,30 @@ describe('srpc', () => {
         }
     });
 });
+
+function createTrafficLoggingFixture(peer: 'server' | 'client', logTraffic: SrpcClientOptions['logTraffic']) {
+    const entries: unknown[][] = [];
+    const instance = Object.create(peer === 'server' ? SrpcServer.prototype : SrpcClient.prototype) as any;
+    instance.logger = {
+        info: (...messages: unknown[]) => entries.push(messages),
+        warn() {},
+        error() {},
+        debug() {}
+    };
+    const stream = { id: 'stream-id', clientId: 'client-id' };
+    instance.options = { logTraffic };
+    instance.clientOptions = { logTraffic };
+    instance.clientId = stream.clientId;
+    const identifiers = peer === 'server' ? { streamId: stream.id, clientId: stream.clientId } : { clientId: stream.clientId };
+    return {
+        entries,
+        identifiers,
+        logTraffic(direction: 'inbound' | 'outbound', message: BaseMessage) {
+            if (peer === 'server') instance.logTraffic(stream, direction, message);
+            else instance.logTraffic(direction, message);
+        }
+    };
+}
 
 async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMessage, ServerMessage>> = {}) {
     process.env.APP_ENV = 'test';

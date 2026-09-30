@@ -30,6 +30,7 @@ import {
     SrpcTrafficLogging,
     encodeSrpcMessage,
     isSrpcNotification,
+    isSrpcPingPongOnly,
     isValidSrpcTrace,
     serializeSrpcError,
     srpcMessageTypes
@@ -708,6 +709,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     private logTraffic(direction: 'inbound' | 'outbound', message: BaseMessage): void {
         const options = this.clientOptions?.logTraffic;
         if (!options) return;
+        if (!(typeof options === 'object' && options.pingPong === true) && isSrpcPingPongOnly(message)) return;
         const bodies = typeof options === 'object' && options.bodies === true;
         this.logger.info('SRPC traffic', {
             direction,
