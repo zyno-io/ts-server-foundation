@@ -546,3 +546,22 @@ const stop = registerDatabaseQueryObserver(entry => {
 ```
 
 Observers receive start/finish events with SQL, bindings, dialect, operation, timing, and errors.
+
+## PostgreSQL connection recovery
+
+PostgreSQL pools created by the driver default `connectionTimeoutMillis` to 5000
+(5 seconds). Set this standard pg option in `createPostgresDatabase` or
+`PostgresDriver` configuration to override it; explicit `0` disables the timeout.
+Injected pools retain their own timeout configuration.
+
+The driver logs pool and client connection errors through the `PostgresDriver`
+logger, including only the source and error message. Failed idle clients are
+evicted by pg-pool; failed checked-out clients are destroyed when released.
+Always release acquired connections, including after query or transaction errors.
+Later acquisitions open fresh connections. Failed queries and transactions reject
+and are never automatically replayed, because a disconnected write may already
+have committed.
+
+Custom `PgPoolLike` and `PgClientLike` implementations remain supported without
+event methods. To support disconnect recovery they should provide the optional
+`on` methods and honor `client.release(error)` by destroying failed clients.
