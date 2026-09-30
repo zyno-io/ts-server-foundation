@@ -9,8 +9,10 @@ package sgnl24.DevConsole;
 enum PingPongType {
   PING_PONG_TYPE_UNSPECIFIED = 0;
   PING_PONG_TYPE_HELLO = 1;
-  PING_PONG_TYPE_REGISTERED = 2;
-  PING_PONG_TYPE_PONG = 3;
+  PING_PONG_TYPE_HELLO_ACK = 2;
+  PING_PONG_TYPE_ACTIVATED = 3;
+  PING_PONG_TYPE_PING = 4;
+  PING_PONG_TYPE_PONG = 5;
 }
 message PingPong { optional PingPongType type = 1; }
 

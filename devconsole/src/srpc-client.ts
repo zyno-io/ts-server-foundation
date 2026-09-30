@@ -6,7 +6,7 @@
  * Connection lifecycle (mirrors the Node.js SrpcClient):
  *   1. Connect via WebSocket with auth query params
  *   2. Wait for server's initial pingPong (handshake)
- *   3. Respond to HELLO; wait for REGISTERED (legacy servers connect on the first ping)
+ *   3. Respond to HELLO with HELLO_ACK; wait for ACTIVATED (legacy servers connect on the first ping)
  *   4. Send periodic pings; server responds with pongs
  *   5. Auto-reconnect with exponential backoff on disconnect
  *
@@ -99,10 +99,11 @@ export class SrpcBrowserClient<TOutbound extends BaseMessage = BaseMessage, TInb
                 const type = message.pingPong.type ?? PingPongType.PING_PONG_TYPE_UNSPECIFIED;
                 const legacy = type === PingPongType.PING_PONG_TYPE_UNSPECIFIED;
                 if (type === PingPongType.PING_PONG_TYPE_HELLO || (legacy && !handshakeComplete)) {
-                    this.writeMessage({ pingPong: {} } as Partial<TOutbound>);
+                    const pingPong = legacy ? {} : { type: PingPongType.PING_PONG_TYPE_HELLO_ACK };
+                    this.writeMessage({ pingPong } as Partial<TOutbound>);
                 }
 
-                if (!handshakeComplete && (type === PingPongType.PING_PONG_TYPE_REGISTERED || legacy)) {
+                if (!handshakeComplete && (type === PingPongType.PING_PONG_TYPE_ACTIVATED || legacy)) {
                     handshakeComplete = true;
                     clearTimeout(connectTimeout);
 
@@ -117,7 +118,7 @@ export class SrpcBrowserClient<TOutbound extends BaseMessage = BaseMessage, TInb
                     return;
                 }
 
-                // HELLO never activates; PONG and future types only refresh liveness.
+                // HELLO never activates; PING, PONG, and future types only refresh liveness.
                 return;
             }
 
@@ -218,7 +219,7 @@ export class SrpcBrowserClient<TOutbound extends BaseMessage = BaseMessage, TInb
             this.ws?.close(4001, 'Pong timeout');
             return;
         }
-        this.writeMessage({ pingPong: {} } as Partial<TOutbound>);
+        this.writeMessage({ pingPong: { type: PingPongType.PING_PONG_TYPE_PING } } as Partial<TOutbound>);
     }
 
     ////////////////////////////////////////

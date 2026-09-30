@@ -23,8 +23,10 @@ export type SrpcMeta = object;
 export enum SrpcPingPongType {
     UNSPECIFIED = 0,
     HELLO = 1,
-    REGISTERED = 2,
-    PONG = 3
+    HELLO_ACK = 2,
+    ACTIVATED = 3,
+    PING = 4,
+    PONG = 5
 }
 
 export interface BaseMessage {

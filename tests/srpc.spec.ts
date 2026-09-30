@@ -95,7 +95,15 @@ describe('srpc', () => {
     it('preserves optional pingPong type presence and compatibility with old protobuf codecs', () => {
         assert.equal(PingPong.decode(PingPong.encode({}).finish()).type, undefined);
         assert.equal(PingPong.decode(PingPong.encode({ type: PingPongType.PING_PONG_TYPE_UNSPECIFIED }).finish()).type, 0);
-        for (const type of [SrpcPingPongType.UNSPECIFIED, SrpcPingPongType.HELLO, SrpcPingPongType.REGISTERED, SrpcPingPongType.PONG, 123]) {
+        for (const type of [
+            SrpcPingPongType.UNSPECIFIED,
+            SrpcPingPongType.HELLO,
+            SrpcPingPongType.HELLO_ACK,
+            SrpcPingPongType.ACTIVATED,
+            SrpcPingPongType.PING,
+            SrpcPingPongType.PONG,
+            123
+        ]) {
             const message = { pingPong: { type } };
             const encoded = DevConsoleServerMessage.encode(DevConsoleServerMessage.fromPartial(message)).finish();
             assert.equal(DevConsoleServerMessage.decode(encoded).pingPong?.type, type);
@@ -106,11 +114,13 @@ describe('srpc', () => {
             assert.equal(isSrpcNotification(message), false);
         }
         assert.equal(PingPongType.PING_PONG_TYPE_HELLO, SrpcPingPongType.HELLO);
-        assert.equal(PingPongType.PING_PONG_TYPE_REGISTERED, SrpcPingPongType.REGISTERED);
+        assert.equal(PingPongType.PING_PONG_TYPE_HELLO_ACK, SrpcPingPongType.HELLO_ACK);
+        assert.equal(PingPongType.PING_PONG_TYPE_ACTIVATED, SrpcPingPongType.ACTIVATED);
+        assert.equal(PingPongType.PING_PONG_TYPE_PING, SrpcPingPongType.PING);
         assert.equal(PingPongType.PING_PONG_TYPE_PONG, SrpcPingPongType.PONG);
     });
 
-    it('sends HELLO before activation, REGISTERED after activation, and bare-envelope PONG responses', async () => {
+    it('sends HELLO before activation, ACTIVATED after activation, and bare-envelope PONG responses', async () => {
         const harness = await createHarness();
         const entered = deferred<SrpcStream<SrpcMeta>>();
         const release = deferred<void>();
@@ -128,17 +138,22 @@ describe('srpc', () => {
             await waitForCondition(() => messages.length === 1, 1_000, 'Missing HELLO');
             assert.deepEqual(messages, [{ pingPong: { type: SrpcPingPongType.HELLO } }]);
             stream.lastPingAt = 1;
-            socket.send(encodeRawSrpcMessage({ pingPong: {}, reply: true }));
-            await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'Pending ping did not update liveness');
+            socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.HELLO_ACK }, reply: true }));
+            await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'HELLO_ACK did not update liveness');
             assert.equal(messages.length, 1);
             assert.equal(stream.isActivated, false);
 
-            release.resolve();
-            await waitForCondition(() => messages.length === 2, 1_000, 'Missing REGISTERED');
-            assert.equal(stream.isActivated, true);
-            assert.deepEqual(messages[1], { pingPong: { type: SrpcPingPongType.REGISTERED } });
+            stream.lastPingAt = 1;
+            socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.PING } }));
+            await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'Pending PING did not update liveness');
+            assert.equal(messages.length, 1);
 
-            for (const type of [undefined, 0, 1, 2, 3, 123]) {
+            release.resolve();
+            await waitForCondition(() => messages.length === 2, 1_000, 'Missing ACTIVATED');
+            assert.equal(stream.isActivated, true);
+            assert.deepEqual(messages[1], { pingPong: { type: SrpcPingPongType.ACTIVATED } });
+
+            for (const type of [undefined, SrpcPingPongType.UNSPECIFIED, SrpcPingPongType.PING]) {
                 for (const reply of [false, true]) {
                     const count: number = messages.length;
                     stream.lastPingAt = 1;
@@ -148,6 +163,18 @@ describe('srpc', () => {
                     assert.deepEqual(messages[count], { pingPong: { type: SrpcPingPongType.PONG } });
                 }
             }
+
+            for (const type of [SrpcPingPongType.HELLO, SrpcPingPongType.HELLO_ACK, SrpcPingPongType.ACTIVATED, SrpcPingPongType.PONG, 123]) {
+                const count: number = messages.length;
+                stream.lastPingAt = 1;
+                socket.send(encodeRawSrpcMessage({ pingPong: { type }, reply: true }));
+                await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'Heartbeat did not update liveness');
+                // A round trip confirms that the ignored type was processed without a response.
+                socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.PING } }));
+                await waitForCondition(() => messages.length > count, 1_000, 'Missing PONG after ignored heartbeat');
+                assert.equal(messages.length, count + 1);
+                assert.deepEqual(messages[count], { pingPong: { type: SrpcPingPongType.PONG } });
+            }
         } finally {
             release.resolve();
             socket.terminate();
@@ -155,47 +182,47 @@ describe('srpc', () => {
         }
     });
 
-    it('answers typed HELLOs and waits for REGISTERED while PONG only updates liveness', async () => {
+    it('answers typed HELLOs and waits for ACTIVATED while PONG only updates liveness', async () => {
         const test = createPingPongClient();
         try {
             await test.receive({ pingPong: { type: SrpcPingPongType.HELLO }, reply: true }, true);
-            assert.deepEqual(test.sent, [{ pingPong: {} }]);
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.HELLO_ACK } }]);
             assert.equal(test.client.isConnected, false);
             assert.equal(test.client.pingInterval, undefined);
             await test.receive({ pingPong: { type: SrpcPingPongType.HELLO } });
             assert.equal(test.client.isConnected, false);
-            assert.deepEqual(test.sent, [{ pingPong: {} }, { pingPong: {} }]);
-            for (const type of [SrpcPingPongType.PONG, 123]) {
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.HELLO_ACK } }, { pingPong: { type: SrpcPingPongType.HELLO_ACK } }]);
+            for (const type of [SrpcPingPongType.HELLO_ACK, SrpcPingPongType.PING, SrpcPingPongType.PONG, 123]) {
                 test.client.lastPongMs = 1;
                 await test.receive({ pingPong: { type }, reply: true });
                 assert.equal(test.client.lastPongMs > 1, true);
                 assert.equal(test.client.isConnected, false);
                 assert.equal(test.sent.length, 2);
             }
-            await test.receive({ pingPong: { type: SrpcPingPongType.REGISTERED }, reply: true });
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED }, reply: true });
             assert.equal(test.client.isConnected, true);
             assert.equal(test.connectionCount(), 1);
             assert.equal(test.timeoutClearCount(), 1);
-            await test.receive({ pingPong: { type: SrpcPingPongType.REGISTERED } });
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } });
             await test.receive({ pingPong: { type: SrpcPingPongType.PONG } });
             await test.receive({ pingPong: {} });
             assert.equal(test.sent.length, 2);
             await test.receive({ pingPong: { type: SrpcPingPongType.HELLO } });
-            assert.deepEqual(test.sent[2], { pingPong: {} });
+            assert.deepEqual(test.sent[2], { pingPong: { type: SrpcPingPongType.HELLO_ACK } });
             assert.equal(test.connectionCount(), 1);
         } finally {
             test.client.disconnect();
         }
     });
 
-    it('accepts REGISTERED without HELLO and does not answer it', async () => {
-        for (const firstType of [SrpcPingPongType.REGISTERED, SrpcPingPongType.PONG, 123]) {
+    it('accepts ACTIVATED without HELLO and does not answer it', async () => {
+        for (const firstType of [SrpcPingPongType.ACTIVATED, SrpcPingPongType.HELLO_ACK, SrpcPingPongType.PING, SrpcPingPongType.PONG, 123]) {
             const test = createPingPongClient();
             try {
                 await test.receive({ pingPong: { type: firstType } }, true);
-                assert.equal(test.client.isConnected, firstType === SrpcPingPongType.REGISTERED);
+                assert.equal(test.client.isConnected, firstType === SrpcPingPongType.ACTIVATED);
                 assert.deepEqual(test.sent, []);
-                await test.receive({ pingPong: { type: SrpcPingPongType.REGISTERED } });
+                await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } });
                 assert.equal(test.client.isConnected, true);
                 assert.equal(test.connectionCount(), 1);
                 assert.equal(test.timeoutClearCount(), 1);
@@ -242,22 +269,38 @@ describe('srpc', () => {
         }
     });
 
-    it('keeps untyped client keepalives at 55 seconds and the strict 75-second pong timeout', async context => {
+    it('sends typed client PING keepalives at 55 seconds and keeps the strict 75-second pong timeout', async context => {
         context.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1_000_000 });
         const test = createPingPongClient();
         try {
-            await test.receive({ pingPong: { type: SrpcPingPongType.REGISTERED } }, true);
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } }, true);
             context.mock.timers.tick(54_999);
             assert.deepEqual(test.sent, []);
             context.mock.timers.tick(1);
-            assert.deepEqual(test.sent, [{ pingPong: {} }]);
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.PING } }]);
             context.mock.timers.tick(20_000);
             test.client.doPingPong();
             assert.equal(test.closes.length, 0);
-            assert.deepEqual(test.sent[1], { pingPong: {} });
+            assert.deepEqual(test.sent[1], { pingPong: { type: SrpcPingPongType.PING } });
             context.mock.timers.tick(1);
             test.client.doPingPong();
             assert.deepEqual(test.closes, [[4003, 'Pong timeout']]);
+        } finally {
+            test.client.disconnect();
+        }
+    });
+
+    it('uses a typed PING for an immediate connection check without answering PONG', async () => {
+        const test = createPingPongClient();
+        try {
+            test.client.triggerConnectionCheck();
+            assert.deepEqual(test.sent, []);
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } }, true);
+            test.client.triggerConnectionCheck();
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.PING } }]);
+            await test.receive({ pingPong: { type: SrpcPingPongType.PONG } });
+            assert.equal(test.sent.length, 1);
+            assert.equal(test.client.isConnected, true);
         } finally {
             test.client.disconnect();
         }
@@ -311,7 +354,7 @@ describe('srpc', () => {
             await waitForCondition(() => messages.length >= 2, 1_000, 'Old client did not receive handshake pings');
             const count = messages.length;
             socket.send(LegacyEnvelope.encode({ requestId: '', reply: false, pingPong: {} }).finish());
-            // The initial handshake pong can also be in flight after REGISTERED.
+            // The initial handshake pong can also be in flight after ACTIVATED.
             await waitForCondition(() => messages.length >= count + 1, 1_000, 'Old client did not receive PONG');
             for (const message of messages) {
                 assert.deepEqual(message, { requestId: '', reply: false, pingPong: {} });

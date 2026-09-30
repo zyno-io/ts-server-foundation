@@ -227,7 +227,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         if (!this.isConnected) return;
         this.logger.debug('Triggering SRPC connection health check', { srpc: this.logData() });
         this.lastPongMs = Date.now() - 20_000;
-        this.writeMessage({ pingPong: {} } as TClientInput);
+        this.writeMessage({ pingPong: { type: SrpcPingPongType.PING } } as TClientInput);
     }
 
     private handleInitialHandshake(ws: WebSocket, generation: number, data: WebSocket.RawData, clearConnectTimeout: () => void): void {
@@ -243,7 +243,10 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         this.logger.debug('SRPC client received initial handshake ping', { srpc: this.logData() });
         const type = message.pingPong.type ?? SrpcPingPongType.UNSPECIFIED;
         const helloReceived = type === SrpcPingPongType.HELLO || type === SrpcPingPongType.UNSPECIFIED;
-        if (helloReceived && (!this.writeMessage({ pingPong: {} } as TClientInput, generation) || !this.isCurrent(ws, generation))) return;
+        if (helloReceived) {
+            const pingPong = type === SrpcPingPongType.HELLO ? { type: SrpcPingPongType.HELLO_ACK } : {};
+            if (!this.writeMessage({ pingPong } as TClientInput, generation) || !this.isCurrent(ws, generation)) return;
+        }
         this.awaitingActivation = { ws, generation, clearConnectTimeout, helloReceived };
         ws.on('message', msgData => {
             void this.handleMessage(ws, generation, msgData).catch(error => {
@@ -252,7 +255,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             });
         });
         // An explicit activation ack is sufficient even if HELLO was omitted.
-        if (type === SrpcPingPongType.REGISTERED) this.completeConnection(ws, generation);
+        if (type === SrpcPingPongType.ACTIVATED) this.completeConnection(ws, generation);
     }
 
     private completeConnection(ws: WebSocket, generation: number): void {
@@ -364,7 +367,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             }
             return;
         }
-        this.writeMessage({ pingPong: {} } as TClientInput);
+        this.writeMessage({ pingPong: { type: SrpcPingPongType.PING } } as TClientInput);
     }
 
     private async handleMessage(ws: WebSocket, generation: number, data: WebSocket.RawData): Promise<void> {
@@ -390,13 +393,14 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             const isActivating = activation?.ws === ws && activation.generation === generation;
             if (type === SrpcPingPongType.HELLO || (type === SrpcPingPongType.UNSPECIFIED && isActivating && !activation.helloReceived)) {
                 // Duplicate HELLOs are answered without completing activation.
-                if (this.writeMessage({ pingPong: {} } as TClientInput, generation) && this.isCurrent(ws, generation) && isActivating) {
+                const pingPong = type === SrpcPingPongType.HELLO ? { type: SrpcPingPongType.HELLO_ACK } : {};
+                if (this.writeMessage({ pingPong } as TClientInput, generation) && this.isCurrent(ws, generation) && isActivating) {
                     activation.helloReceived = true;
                 }
-            } else if (type === SrpcPingPongType.REGISTERED || (type === SrpcPingPongType.UNSPECIFIED && isActivating)) {
+            } else if (type === SrpcPingPongType.ACTIVATED || (type === SrpcPingPongType.UNSPECIFIED && isActivating)) {
                 this.completeConnection(ws, generation);
             }
-            // PONG and unknown future types only refresh liveness.
+            // PING, PONG, and unknown future types only refresh liveness.
             return;
         }
 

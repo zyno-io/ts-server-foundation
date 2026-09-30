@@ -12,8 +12,10 @@ export const protobufPackage = 'sgnl24.DevConsole';
 export enum PingPongType {
     PING_PONG_TYPE_UNSPECIFIED = 0,
     PING_PONG_TYPE_HELLO = 1,
-    PING_PONG_TYPE_REGISTERED = 2,
-    PING_PONG_TYPE_PONG = 3,
+    PING_PONG_TYPE_HELLO_ACK = 2,
+    PING_PONG_TYPE_ACTIVATED = 3,
+    PING_PONG_TYPE_PING = 4,
+    PING_PONG_TYPE_PONG = 5,
     UNRECOGNIZED = -1
 }
 
@@ -26,9 +28,15 @@ export function pingPongTypeFromJSON(object: any): PingPongType {
         case 'PING_PONG_TYPE_HELLO':
             return PingPongType.PING_PONG_TYPE_HELLO;
         case 2:
-        case 'PING_PONG_TYPE_REGISTERED':
-            return PingPongType.PING_PONG_TYPE_REGISTERED;
+        case 'PING_PONG_TYPE_HELLO_ACK':
+            return PingPongType.PING_PONG_TYPE_HELLO_ACK;
         case 3:
+        case 'PING_PONG_TYPE_ACTIVATED':
+            return PingPongType.PING_PONG_TYPE_ACTIVATED;
+        case 4:
+        case 'PING_PONG_TYPE_PING':
+            return PingPongType.PING_PONG_TYPE_PING;
+        case 5:
         case 'PING_PONG_TYPE_PONG':
             return PingPongType.PING_PONG_TYPE_PONG;
         case -1:
@@ -44,8 +52,12 @@ export function pingPongTypeToJSON(object: PingPongType): string {
             return 'PING_PONG_TYPE_UNSPECIFIED';
         case PingPongType.PING_PONG_TYPE_HELLO:
             return 'PING_PONG_TYPE_HELLO';
-        case PingPongType.PING_PONG_TYPE_REGISTERED:
-            return 'PING_PONG_TYPE_REGISTERED';
+        case PingPongType.PING_PONG_TYPE_HELLO_ACK:
+            return 'PING_PONG_TYPE_HELLO_ACK';
+        case PingPongType.PING_PONG_TYPE_ACTIVATED:
+            return 'PING_PONG_TYPE_ACTIVATED';
+        case PingPongType.PING_PONG_TYPE_PING:
+            return 'PING_PONG_TYPE_PING';
         case PingPongType.PING_PONG_TYPE_PONG:
             return 'PING_PONG_TYPE_PONG';
         case PingPongType.UNRECOGNIZED:
