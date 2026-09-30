@@ -30,6 +30,7 @@ import {
     SrpcError,
     SrpcIndeterminateDeliveryError,
     SrpcMeta,
+    SrpcPingPongType,
     SrpcStream,
     TSrpcMessageHandlerFnOrClass,
     encodeSrpcMessage,
@@ -375,7 +376,7 @@ export class SrpcServer<
                 // throwing callback therefore cannot leave a live socket without
                 // a message consumer.
                 stream.$ws.on('message', data => this.handleWsMessage(stream, data));
-                if (!this.writeToStream(stream, { pingPong: {} } as TServerOutput)) {
+                if (!this.writeToStream(stream, { pingPong: { type: SrpcPingPongType.HELLO } } as TServerOutput)) {
                     this.cleanupStream(stream, 'disconnect');
                     return;
                 }
@@ -385,7 +386,7 @@ export class SrpcServer<
                 if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
                 this.activateStream(stream);
                 if (!stream.isActivated) return;
-                if (!this.writeToStream(stream, { pingPong: {} } as TServerOutput)) {
+                if (!this.writeToStream(stream, { pingPong: { type: SrpcPingPongType.ACTIVATED } } as TServerOutput)) {
                     this.cleanupStream(stream, 'disconnect');
                     return;
                 }
@@ -466,10 +467,12 @@ export class SrpcServer<
         this.logTraffic(stream, 'inbound', data);
         if (data.pingPong) {
             stream.lastPingAt = Date.now();
-            // The initial ping establishes frame ordering before activation.
-            // Modern clients reserve the next server ping as their activation
-            // acknowledgement, so an early client pong is not echoed.
-            if (stream.isActivated) this.writeToStream(stream, { pingPong: {} } as TServerOutput);
+            const type = data.pingPong.type ?? SrpcPingPongType.UNSPECIFIED;
+            // ACTIVATED confirms activation; early client pings only refresh
+            // liveness so legacy clients still receive the ordered handshake.
+            if (stream.isActivated && (type === SrpcPingPongType.PING || type === SrpcPingPongType.UNSPECIFIED)) {
+                this.writeToStream(stream, { pingPong: { type: SrpcPingPongType.PONG } } as TServerOutput);
+            }
             return;
         }
 

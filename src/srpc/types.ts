@@ -19,6 +19,16 @@ export type NotificationData<T, P extends string> = `${P}Notification` extends k
 
 export type SrpcMeta = object;
 
+/** Numeric wire values shared with the protobuf PingPongType enum. */
+export enum SrpcPingPongType {
+    UNSPECIFIED = 0,
+    HELLO = 1,
+    HELLO_ACK = 2,
+    ACTIVATED = 3,
+    PING = 4,
+    PONG = 5
+}
+
 export interface BaseMessage {
     requestId?: string;
     reply?: boolean;
@@ -29,7 +39,8 @@ export interface BaseMessage {
         spanId: string;
         traceFlags: number;
     };
-    pingPong?: object;
+    /** Optional numeric enum; empty legacy PingPong codecs remain compatible. */
+    pingPong?: { type?: number };
     byteStreamOperation?: {
         streamId: number;
         write?: { chunk: Uint8Array };

@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package tsf.tests.legacy;
+
+// Intentionally frozen before PingPong.type to exercise old application codecs.
+message LegacyPingPong {}
+
+message LegacyEnvelope {
+    string requestId = 1;
+    bool reply = 2;
+    LegacyPingPong pingPong = 50;
+}

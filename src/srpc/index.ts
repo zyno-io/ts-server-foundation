@@ -31,6 +31,7 @@ export {
     SrpcMeshAuthenticationError,
     SrpcMeshProtocolError,
     SrpcOwnerUnavailableError,
+    SrpcPingPongType,
     SrpcStaleConnectionError,
     SrpcStreamClosedError
 } from './types';

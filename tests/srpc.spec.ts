@@ -22,6 +22,7 @@ import {
     SrpcIndeterminateDeliveryError,
     SrpcMessageFns,
     SrpcMeta,
+    SrpcPingPongType,
     SrpcServer,
     SrpcStream,
     deferred,
@@ -29,7 +30,9 @@ import {
 } from '../src';
 import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
 import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
-import { isSrpcNotification } from '../src/srpc/types';
+import { isSrpcNotification, srpcMessageTypes } from '../src/srpc/types';
+import { DevConsoleClientMessage, DevConsoleServerMessage, PingPong, PingPongType } from '../src/devconsole/generated/devconsole';
+import { LegacyEnvelope } from './fixtures/generated/srpc-legacy';
 
 const originalEnv = { ...process.env };
 const secret = 'srpc-test-secret';
@@ -89,6 +92,280 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    it('preserves optional pingPong type presence and compatibility with old protobuf codecs', () => {
+        assert.equal(PingPong.decode(PingPong.encode({}).finish()).type, undefined);
+        assert.equal(PingPong.decode(PingPong.encode({ type: PingPongType.PING_PONG_TYPE_UNSPECIFIED }).finish()).type, 0);
+        for (const type of [
+            SrpcPingPongType.UNSPECIFIED,
+            SrpcPingPongType.HELLO,
+            SrpcPingPongType.HELLO_ACK,
+            SrpcPingPongType.ACTIVATED,
+            SrpcPingPongType.PING,
+            SrpcPingPongType.PONG,
+            123
+        ]) {
+            const message = { pingPong: { type } };
+            const encoded = DevConsoleServerMessage.encode(DevConsoleServerMessage.fromPartial(message)).finish();
+            assert.equal(DevConsoleServerMessage.decode(encoded).pingPong?.type, type);
+            assert.deepEqual(LegacyEnvelope.decode(encoded).pingPong, {});
+            const legacyEncoded = LegacyEnvelope.encode({ requestId: '', reply: false, pingPong: message.pingPong }).finish();
+            assert.equal(DevConsoleServerMessage.decode(legacyEncoded).pingPong?.type, undefined);
+            assert.deepEqual(srpcMessageTypes(message), ['pingPong']);
+            assert.equal(isSrpcNotification(message), false);
+        }
+        assert.equal(PingPongType.PING_PONG_TYPE_HELLO, SrpcPingPongType.HELLO);
+        assert.equal(PingPongType.PING_PONG_TYPE_HELLO_ACK, SrpcPingPongType.HELLO_ACK);
+        assert.equal(PingPongType.PING_PONG_TYPE_ACTIVATED, SrpcPingPongType.ACTIVATED);
+        assert.equal(PingPongType.PING_PONG_TYPE_PING, SrpcPingPongType.PING);
+        assert.equal(PingPongType.PING_PONG_TYPE_PONG, SrpcPingPongType.PONG);
+    });
+
+    it('sends HELLO before activation, ACTIVATED after activation, and bare-envelope PONG responses', async () => {
+        const harness = await createHarness();
+        const entered = deferred<SrpcStream<SrpcMeta>>();
+        const release = deferred<void>();
+        const messages: ServerMessage[] = [];
+        harness.server.registerConnectionHandler(stream => {
+            entered.resolve(stream);
+            return release.promise;
+        });
+        const socket = new WebSocket(createSignedRawWebSocketUrl(harness.port, 'typed-server-pings'));
+        socket.on('message', data => messages.push(JsonMessage.decode(webSocketDataToBuffer(data))));
+
+        try {
+            await waitForWebSocketOpen(socket);
+            const stream = await entered.promise;
+            await waitForCondition(() => messages.length === 1, 1_000, 'Missing HELLO');
+            assert.deepEqual(messages, [{ pingPong: { type: SrpcPingPongType.HELLO } }]);
+            stream.lastPingAt = 1;
+            socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.HELLO_ACK }, reply: true }));
+            await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'HELLO_ACK did not update liveness');
+            assert.equal(messages.length, 1);
+            assert.equal(stream.isActivated, false);
+
+            stream.lastPingAt = 1;
+            socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.PING } }));
+            await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'Pending PING did not update liveness');
+            assert.equal(messages.length, 1);
+
+            release.resolve();
+            await waitForCondition(() => messages.length === 2, 1_000, 'Missing ACTIVATED');
+            assert.equal(stream.isActivated, true);
+            assert.deepEqual(messages[1], { pingPong: { type: SrpcPingPongType.ACTIVATED } });
+
+            for (const type of [undefined, SrpcPingPongType.UNSPECIFIED, SrpcPingPongType.PING]) {
+                for (const reply of [false, true]) {
+                    const count: number = messages.length;
+                    stream.lastPingAt = 1;
+                    socket.send(encodeRawSrpcMessage({ pingPong: type === undefined ? {} : { type }, reply, requestId: 'ignored-heartbeat-id' }));
+                    await waitForCondition(() => messages.length === count + 1, 1_000, 'Missing PONG');
+                    assert.equal(stream.lastPingAt > 1, true);
+                    assert.deepEqual(messages[count], { pingPong: { type: SrpcPingPongType.PONG } });
+                }
+            }
+
+            for (const type of [SrpcPingPongType.HELLO, SrpcPingPongType.HELLO_ACK, SrpcPingPongType.ACTIVATED, SrpcPingPongType.PONG, 123]) {
+                const count: number = messages.length;
+                stream.lastPingAt = 1;
+                socket.send(encodeRawSrpcMessage({ pingPong: { type }, reply: true }));
+                await waitForCondition(() => stream.lastPingAt > 1, 1_000, 'Heartbeat did not update liveness');
+                // A round trip confirms that the ignored type was processed without a response.
+                socket.send(encodeRawSrpcMessage({ pingPong: { type: SrpcPingPongType.PING } }));
+                await waitForCondition(() => messages.length > count, 1_000, 'Missing PONG after ignored heartbeat');
+                assert.equal(messages.length, count + 1);
+                assert.deepEqual(messages[count], { pingPong: { type: SrpcPingPongType.PONG } });
+            }
+        } finally {
+            release.resolve();
+            socket.terminate();
+            await harness.close();
+        }
+    });
+
+    it('answers typed HELLOs and waits for ACTIVATED while PONG only updates liveness', async () => {
+        const test = createPingPongClient();
+        try {
+            await test.receive({ pingPong: { type: SrpcPingPongType.HELLO }, reply: true }, true);
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.HELLO_ACK } }]);
+            assert.equal(test.client.isConnected, false);
+            assert.equal(test.client.pingInterval, undefined);
+            await test.receive({ pingPong: { type: SrpcPingPongType.HELLO } });
+            assert.equal(test.client.isConnected, false);
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.HELLO_ACK } }, { pingPong: { type: SrpcPingPongType.HELLO_ACK } }]);
+            for (const type of [SrpcPingPongType.HELLO_ACK, SrpcPingPongType.PING, SrpcPingPongType.PONG, 123]) {
+                test.client.lastPongMs = 1;
+                await test.receive({ pingPong: { type }, reply: true });
+                assert.equal(test.client.lastPongMs > 1, true);
+                assert.equal(test.client.isConnected, false);
+                assert.equal(test.sent.length, 2);
+            }
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED }, reply: true });
+            assert.equal(test.client.isConnected, true);
+            assert.equal(test.connectionCount(), 1);
+            assert.equal(test.timeoutClearCount(), 1);
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } });
+            await test.receive({ pingPong: { type: SrpcPingPongType.PONG } });
+            await test.receive({ pingPong: {} });
+            assert.equal(test.sent.length, 2);
+            await test.receive({ pingPong: { type: SrpcPingPongType.HELLO } });
+            assert.deepEqual(test.sent[2], { pingPong: { type: SrpcPingPongType.HELLO_ACK } });
+            assert.equal(test.connectionCount(), 1);
+        } finally {
+            test.client.disconnect();
+        }
+    });
+
+    it('accepts ACTIVATED without HELLO and does not answer it', async () => {
+        for (const firstType of [SrpcPingPongType.ACTIVATED, SrpcPingPongType.HELLO_ACK, SrpcPingPongType.PING, SrpcPingPongType.PONG, 123]) {
+            const test = createPingPongClient();
+            try {
+                await test.receive({ pingPong: { type: firstType } }, true);
+                assert.equal(test.client.isConnected, firstType === SrpcPingPongType.ACTIVATED);
+                assert.deepEqual(test.sent, []);
+                await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } });
+                assert.equal(test.client.isConnected, true);
+                assert.equal(test.connectionCount(), 1);
+                assert.equal(test.timeoutClearCount(), 1);
+                assert.deepEqual(test.sent, []);
+            } finally {
+                test.client.disconnect();
+            }
+        }
+    });
+
+    it('keeps the legacy two-ping sequence for absent and UNSPECIFIED types regardless of reply flags', async () => {
+        for (const type of [undefined, SrpcPingPongType.UNSPECIFIED]) {
+            for (const reply of [false, true]) {
+                const test = createPingPongClient();
+                const message = { pingPong: type === undefined ? {} : { type }, reply };
+                try {
+                    await test.receive(message, true);
+                    assert.equal(test.client.isConnected, false);
+                    assert.deepEqual(test.sent, [{ pingPong: {} }]);
+                    await test.receive(message);
+                    assert.equal(test.client.isConnected, true);
+                    await test.receive(message);
+                    assert.equal(test.connectionCount(), 1);
+                    assert.deepEqual(test.sent, [{ pingPong: {} }]);
+                } finally {
+                    test.client.disconnect();
+                }
+            }
+        }
+    });
+
+    it('still performs an untyped handshake if a typed liveness message arrives first', async () => {
+        const test = createPingPongClient();
+        try {
+            await test.receive({ pingPong: { type: SrpcPingPongType.PONG } }, true);
+            await test.receive({ pingPong: {} });
+            assert.equal(test.client.isConnected, false);
+            assert.deepEqual(test.sent, [{ pingPong: {} }]);
+            await test.receive({ pingPong: {} });
+            assert.equal(test.client.isConnected, true);
+            assert.equal(test.sent.length, 1);
+        } finally {
+            test.client.disconnect();
+        }
+    });
+
+    it('sends typed client PING keepalives at 55 seconds and keeps the strict 75-second pong timeout', async context => {
+        context.mock.timers.enable({ apis: ['Date', 'setInterval', 'setTimeout'], now: 1_000_000 });
+        const test = createPingPongClient();
+        try {
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } }, true);
+            context.mock.timers.tick(54_999);
+            assert.deepEqual(test.sent, []);
+            context.mock.timers.tick(1);
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.PING } }]);
+            context.mock.timers.tick(20_000);
+            test.client.doPingPong();
+            assert.equal(test.closes.length, 0);
+            assert.deepEqual(test.sent[1], { pingPong: { type: SrpcPingPongType.PING } });
+            context.mock.timers.tick(1);
+            test.client.doPingPong();
+            assert.deepEqual(test.closes, [[4003, 'Pong timeout']]);
+        } finally {
+            test.client.disconnect();
+        }
+    });
+
+    it('uses a typed PING for an immediate connection check without answering PONG', async () => {
+        const test = createPingPongClient();
+        try {
+            test.client.triggerConnectionCheck();
+            assert.deepEqual(test.sent, []);
+            await test.receive({ pingPong: { type: SrpcPingPongType.ACTIVATED } }, true);
+            test.client.triggerConnectionCheck();
+            assert.deepEqual(test.sent, [{ pingPong: { type: SrpcPingPongType.PING } }]);
+            await test.receive({ pingPong: { type: SrpcPingPongType.PONG } });
+            assert.equal(test.sent.length, 1);
+            assert.equal(test.client.isConnected, true);
+        } finally {
+            test.client.disconnect();
+        }
+    });
+
+    it('connects and exchanges heartbeats when the server still uses an empty PingPong protobuf codec', async () => {
+        const harness = await createHarness({
+            clientMessage: withEnvelopeDefaults(LegacyEnvelope),
+            serverMessage: withEnvelopeDefaults(LegacyEnvelope)
+        });
+        const entered = deferred<void>();
+        const release = deferred<void>();
+        const client = harness.createClient('old-proto-server', {}, secret, undefined, {
+            clientMessage: withEnvelopeDefaults(DevConsoleClientMessage),
+            serverMessage: withEnvelopeDefaults(DevConsoleServerMessage)
+        }) as any;
+        harness.server.registerConnectionHandler(() => {
+            entered.resolve();
+            return release.promise;
+        });
+        try {
+            const connecting = client.connect();
+            await entered.promise;
+            await waitForCondition(() => !!client.awaitingActivation, 1_000, 'Legacy HELLO was not answered');
+            assert.equal(client.isConnected, false);
+            release.resolve();
+            await connecting;
+            client.triggerConnectionCheck();
+            await waitForCondition(() => client.lastPongMs > Date.now() - 1_000, 1_000, 'Legacy PONG did not refresh liveness');
+        } finally {
+            release.resolve();
+            await harness.close();
+        }
+    });
+
+    it('supports an old client that decodes empty PingPong and connects on the first server ping', async () => {
+        const harness = await createHarness({
+            clientMessage: withEnvelopeDefaults(DevConsoleClientMessage),
+            serverMessage: withEnvelopeDefaults(DevConsoleServerMessage)
+        });
+        const messages: ReturnType<typeof LegacyEnvelope.decode>[] = [];
+        const socket = new WebSocket(createSignedRawWebSocketUrl(harness.port, 'old-proto-client'));
+        socket.on('message', data => {
+            const message = LegacyEnvelope.decode(webSocketDataToBuffer(data));
+            messages.push(message);
+            // Legacy first-ping handshake; subsequent server pings are liveness only.
+            if (messages.length === 1) socket.send(LegacyEnvelope.encode({ requestId: '', reply: false, pingPong: {} }).finish());
+        });
+        try {
+            await waitForWebSocketOpen(socket);
+            await waitForCondition(() => messages.length >= 2, 1_000, 'Old client did not receive handshake pings');
+            const count = messages.length;
+            socket.send(LegacyEnvelope.encode({ requestId: '', reply: false, pingPong: {} }).finish());
+            // The initial handshake pong can also be in flight after ACTIVATED.
+            await waitForCondition(() => messages.length >= count + 1, 1_000, 'Old client did not receive PONG');
+            for (const message of messages) {
+                assert.deepEqual(message, { requestId: '', reply: false, pingPong: {} });
+            }
+            assert.equal(harness.server.streamsByClientId.get('old-proto-client')?.isActivated, true);
+        } finally {
+            socket.terminate();
+            await harness.close();
+        }
+    });
+
     it('distinguishes notifications from malformed requests and replies, including protobuf envelope defaults', () => {
         assert.equal(isSrpcNotification({ requestId: '', reply: false, uChangedNotification: {} } as ClientMessage), true);
         for (const message of [
@@ -3239,12 +3516,18 @@ async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMes
         server,
         httpServer,
         port,
-        createClient(clientId: string, meta: SrpcMeta = {}, clientSecret = secret, clientOptions?: SrpcClientOptions) {
+        createClient(
+            clientId: string,
+            meta: SrpcMeta = {},
+            clientSecret = secret,
+            clientOptions?: SrpcClientOptions,
+            codecs = { clientMessage: JsonMessage, serverMessage: JsonMessage }
+        ) {
             const client = new SrpcClient<ClientMessage, ServerMessage>(
                 createLogger(`SrpcClient:${clientId}`),
                 `ws://127.0.0.1:${port}/srpc-test`,
-                JsonMessage,
-                JsonMessage,
+                codecs.clientMessage,
+                codecs.serverMessage,
                 clientId,
                 meta,
                 clientSecret,
@@ -3257,6 +3540,53 @@ async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMes
             for (const client of clients) client.disconnect();
             server.close();
             await app.stop();
+        }
+    };
+}
+
+// Supply proto3 scalar defaults while leaving the PingPong payload untouched.
+function withEnvelopeDefaults<T extends BaseMessage>(codec: SrpcMessageFns<T>): SrpcMessageFns<T> {
+    return {
+        encode: message => codec.encode({ ...message, requestId: message.requestId ?? '', reply: message.reply ?? false }),
+        decode: input => codec.decode(input)
+    };
+}
+
+function createPingPongClient() {
+    const client = new SrpcClient<ClientMessage, ServerMessage>(
+        createLogger('SrpcPingPongClient'),
+        'ws://127.0.0.1/srpc',
+        JsonMessage,
+        JsonMessage,
+        'ping-pong-client',
+        {},
+        secret,
+        { enableReconnect: false }
+    ) as any;
+    const sent: ClientMessage[] = [];
+    const closes: Array<[number, string]> = [];
+    const ws = {
+        readyState: WebSocket.OPEN,
+        bufferedAmount: 0,
+        send: (data: Buffer) => sent.push(JsonMessage.decode(data)),
+        close: (code: number, reason: string) => closes.push([code, reason]),
+        on() {}
+    };
+    let connections = 0;
+    let timeoutClears = 0;
+    client.ws = ws;
+    client.generation = 1;
+    client.registerConnectionHandler(() => connections++);
+    return {
+        client,
+        sent,
+        closes,
+        connectionCount: () => connections,
+        timeoutClearCount: () => timeoutClears,
+        async receive(message: ServerMessage, initial = false) {
+            const data = encodeRawSrpcMessage(message);
+            if (initial) client.handleInitialHandshake(ws, 1, data, () => timeoutClears++);
+            else await client.handleMessage(ws, 1, data);
         }
     };
 }
