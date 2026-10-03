@@ -165,13 +165,18 @@ resetLogSink();
 
 ## Error Handling
 
-Reporting is based on the structured entry, not only the method name. The logger automatically:
+Reporting is based on the emitted log level. The logger automatically:
 
 1. Extracts the error message and stack trace
 2. Includes any `cause` chain
-3. Reports an emitted entry carrying an error, plus every emitted `error` and `alert` entry even when no `Error` argument was supplied, to the global reporter and installed Sentry integration; entries filtered by `logger.level` are neither emitted nor reported
-4. Maps `alert` to Sentry `fatal`, `warning` to Sentry `warning`, and other reported levels to Sentry `error`
-5. Sends Slack webhooks only for `alert` entries; ordinary `error` entries and warning entries carrying errors do not page Slack
+3. Reports only emitted `error` and `alert` entries to the global reporter and installed Sentry integration (including Bugsink), even when no `Error` argument was supplied; entries filtered by `logger.level` are neither emitted nor reported
+4. Maps `alert` to Sentry `fatal` and `error` to Sentry `error`
+5. Sends Slack webhooks only for `alert` entries
+
+`warning` (including the `warn` alias), `info`, `log`, `debug`, and `debug2` preserve error
+arguments and `{ err }` fields in structured output without invoking error reporters. Attaching
+an error does not raise the entry's severity. Explicit calls to the [`reportError()` helper](./helpers.md#error-helpers-and-reporting)
+retain their own reporting behavior independently of this logger-level gate.
 
 ```typescript
 try {
