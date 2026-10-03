@@ -156,7 +156,7 @@ export class Logger {
             timestamp: new Date()
         });
 
-        if (error || level === LoggerLevel.alert || level === LoggerLevel.error) {
+        if (level === LoggerLevel.alert || level === LoggerLevel.error) {
             this.handleError(level, message, error, parsed.data, contextProps);
         }
     }

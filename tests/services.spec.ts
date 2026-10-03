@@ -518,7 +518,7 @@ describe('services', () => {
         assert.equal(entries.length, 4);
     });
 
-    it('matches DKSF error argument extraction and reporter wrapping', () => {
+    it('preserves error argument extraction and reports only error and alert entries', () => {
         const entries: LogEntry[] = [];
         const reports: { level: number; error: DecoratedError; context: Record<string, unknown> }[] = [];
         setLogSink(entry => entries.push(entry));
@@ -570,15 +570,15 @@ describe('services', () => {
 
         assert.equal(reports[1].error.message, 'something failed');
         assert.strictEqual(reports[1].error.cause, cause);
-        assert.equal(reports[2].level, LoggerLevel.warning);
+        assert.equal(reports[2].level, LoggerLevel.error);
         assert.strictEqual(reports[2].error.cause, cause);
-        assert.deepStrictEqual(reports[3].context.data, { recordId: 123, scopeId: 7 });
-        assert.strictEqual(reports[4].error, cause);
-        assert.equal(reports[4].error.cause, undefined);
-        assert.equal(reports[5].level, LoggerLevel.alert);
-        assert.equal(reports[5].error.message, 'alert message');
-        assert.equal(reports[6].error.message, 'structured failed');
-        assert.deepStrictEqual(reports[6].error.cause, {
+        assert.deepStrictEqual(reports[2].context.data, { recordId: 123, scopeId: 7 });
+        assert.strictEqual(reports[3].error, cause);
+        assert.equal(reports[3].error.cause, undefined);
+        assert.equal(reports[4].level, LoggerLevel.alert);
+        assert.equal(reports[4].error.message, 'alert message');
+        assert.equal(reports[5].error.message, 'structured failed');
+        assert.deepStrictEqual(reports[5].error.cause, {
             code: 'E_HTTP',
             message: 'axios failed',
             stack: 'stack',
@@ -594,7 +594,40 @@ describe('services', () => {
                 data: undefined
             }
         });
-        assert.equal(reports.length, 7);
+        assert.equal(reports.length, 6);
+    });
+
+    it('logs lower-severity errors without posting to Sentry or invoking the global reporter', () => {
+        const entries: LogEntry[] = [];
+        setLogSink(entry => entries.push(entry));
+        const reporter = mock.fn();
+        setGlobalErrorReporter(reporter);
+        const capture = mock.method(Sentry, 'captureException', () => 'event-id');
+        installSentry({ dsn: 'https://public@example.com/1', enabled: false });
+
+        const logger = new ExtendedLogger('ReporterScope');
+        logger.level = LoggerLevel.debug2;
+        createDebug.enable('ReporterScope');
+        const cause = new Error('expected operation failure');
+        const message = 'WebRTC audio connection wait aborted';
+
+        for (const method of ['info', 'warning', 'warn', 'log', 'debug', 'debug2'] as const) {
+            logger[method](`${method} with err`, { err: cause, recordId: 123 });
+            logger[method](`${method} with error`, cause);
+            logger[method](cause);
+            logger[method](`${method} with string err`, { err: message });
+        }
+
+        assert.equal(entries.length, 24);
+        for (let index = 0; index < entries.length; index += 4) {
+            assert.strictEqual(entries[index].error, cause);
+            assert.deepStrictEqual(entries[index].data, { recordId: 123 });
+            assert.strictEqual(entries[index + 1].error, cause);
+            assert.strictEqual(entries[index + 2].error, cause);
+            assert.equal(entries[index + 3].error, message);
+        }
+        assert.equal(reporter.mock.callCount(), 0);
+        assert.equal(capture.mock.callCount(), 0);
     });
 
     it('sanitizes Axios error diagnostics without mutating the original error', () => {
