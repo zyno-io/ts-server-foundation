@@ -30,6 +30,8 @@ import {
     SrpcTrafficLogging,
     encodeSrpcMessage,
     isSrpcNotification,
+    isSrpcRequestAcknowledgment,
+    supportsSrpcRequestAcknowledgments,
     isSrpcPingPongOnly,
     isValidSrpcTrace,
     serializeSrpcError,
@@ -44,6 +46,8 @@ export class SrpcConflictError extends Error {
 }
 
 export interface SrpcClientOptions {
+    /** Defaults to v3 for existing codecs/servers. v4 requires requestAck in both envelope codecs. */
+    protocolVersion?: 3 | 4;
     enableReconnect?: boolean;
     logTraffic?: SrpcTrafficLogging;
     /** Audience signed into canonical credentials. Defaults to the WebSocket path. */
@@ -128,6 +132,12 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         private readonly clientOptions?: SrpcClientOptions
     ) {
         validateClientResourceOptions(clientOptions);
+        if (
+            clientOptions?.protocolVersion === 4 &&
+            (!supportsSrpcRequestAcknowledgments(clientMessage) || !supportsSrpcRequestAcknowledgments(serverMessage))
+        ) {
+            throw new Error('Protocol v4 requires request acknowledgment codecs');
+        }
         this.enableReconnect = clientOptions?.enableReconnect !== false;
         this.senderAnnouncements = clientOptions?.senderAnnouncements !== false;
     }
@@ -386,6 +396,16 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             return;
         }
         this.logTraffic('inbound', message);
+        if (message.requestAck) {
+            if (this.clientOptions?.protocolVersion !== 4 || !isSrpcRequestAcknowledgment(message)) {
+                this.closeGenerationWithError(ws, generation, 'badArg', 'Invalid request acknowledgment');
+                return;
+            }
+            if (!this.requestQueue.has(message.requestId!) && !this.isLateReply(message.requestId!)) {
+                this.closeGenerationWithError(ws, generation, 'badArg', 'Unknown request ID');
+            }
+            return;
+        }
 
         if (message.pingPong) {
             this.lastPongMs = Date.now();
@@ -444,6 +464,9 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             });
             this.closeGenerationWithError(ws, generation, 'badArg', 'Too many in-flight server requests');
             return;
+        }
+        if (!notification && this.clientOptions?.protocolVersion === 4) {
+            if (!this.writeMessage({ requestId: message.requestId, requestAck: true } as TClientInput, generation)) return;
         }
         pressure.requests++;
         pressure.bytes += bytes;
@@ -592,6 +615,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         const metadata = srpcQueryMetadata(normalizeMetadata(this.clientMeta));
         const supersede = this.supersede ? '1' : '0';
         const audience = this.clientOptions?.authAudience ?? url.pathname;
+        const protocol = String(this.clientOptions?.protocolVersion ?? 3);
         const signable = canonicalAuthV2({
             path: url.pathname,
             audience,
@@ -600,7 +624,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             nonce,
             id: this.streamId,
             cid,
-            protocol: '3',
+            protocol,
             supersede,
             capabilities,
             metadata
@@ -612,7 +636,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             id: this.streamId,
             cid,
             signature,
-            pv: '3',
+            pv: protocol,
             nonce,
             aud: audience,
             ...(capabilities ? { cap: capabilities } : {}),
@@ -1076,6 +1100,9 @@ function configuredPositiveInteger(value: number | undefined, fallback: number):
 
 function validateClientResourceOptions(options: SrpcClientOptions | undefined): void {
     if (!options) return;
+    if (options.protocolVersion !== undefined && options.protocolVersion !== 3 && options.protocolVersion !== 4) {
+        throw new Error('sRPC client protocolVersion must be 3 or 4');
+    }
     for (const [name, value] of [
         ['maxPendingRequests', options.maxPendingRequests],
         ['maxPendingRequestBytes', options.maxPendingRequestBytes],

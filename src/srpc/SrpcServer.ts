@@ -36,6 +36,8 @@ import {
     encodeSrpcMessage,
     isSrpcMessageHandlerClass,
     isSrpcNotification,
+    isSrpcRequestAcknowledgment,
+    supportsSrpcRequestAcknowledgments,
     isSrpcPingPongOnly,
     isValidSrpcTrace,
     serializeSrpcError,
@@ -69,7 +71,7 @@ interface StreamInfo {
     clientId: string;
     appVersion: string;
     configureTs: number;
-    protocolVersion: 1 | 2 | 3;
+    protocolVersion: 1 | 2 | 3 | 4;
     capabilities: ReadonlySet<string>;
     supersede: boolean;
     address: string;
@@ -178,7 +180,12 @@ export class SrpcServer<
             this.logger.warn(event, { srpc: { ...handshakeLogData, ...extra } });
             cb(false, code, safeHandshakeMessage(message));
         };
-        if (!clientStreamId || !clientId || !appVersion || (protocolVersion !== 1 && protocolVersion !== 2 && protocolVersion !== 3)) {
+        if (
+            !clientStreamId ||
+            !clientId ||
+            !appVersion ||
+            (protocolVersion !== 1 && protocolVersion !== 2 && protocolVersion !== 3 && protocolVersion !== 4)
+        ) {
             rejectHandshake('SRPC client missing required handshake parameters', 400, 'Missing required query parameters');
             return;
         }
@@ -194,6 +201,14 @@ export class SrpcServer<
         }
         if (this.streamsById.size >= this.maxActiveStreams) {
             rejectHandshake('SRPC active-stream capacity exceeded', 503, 'Too many active client streams', { activeStreams: this.streamsById.size });
+            return;
+        }
+
+        if (
+            protocolVersion >= 4 &&
+            (!supportsSrpcRequestAcknowledgments(this.options.clientMessage) || !supportsSrpcRequestAcknowledgments(this.options.serverMessage))
+        ) {
+            rejectHandshake('SRPC v4 codec is missing request acknowledgments', 400, 'Protocol v4 requires request acknowledgment codecs');
             return;
         }
 
@@ -466,6 +481,16 @@ export class SrpcServer<
         if (!this.isStreamDispatchAvailable(stream)) return;
         notifySrpcObservers({ type: 'message', stream, direction: 'inbound', data, at: Date.now() });
         this.logTraffic(stream, 'inbound', data);
+        if (data.requestAck) {
+            if (stream.protocolVersion < 4 || !isSrpcRequestAcknowledgment(data)) {
+                this.closeStreamWithError(stream, 'badArg', 'Invalid request acknowledgment');
+                return;
+            }
+            const queued = stream.$queue.get(data.requestId!);
+            if (queued) queued.acknowledge?.();
+            else if (!this.isLateReply(stream, data.requestId!)) this.closeStreamWithError(stream, 'badArg', 'Unknown request ID');
+            return;
+        }
         if (data.pingPong) {
             stream.lastPingAt = Date.now();
             const type = data.pingPong.type ?? SrpcPingPongType.UNSPECIFIED;
@@ -535,6 +560,9 @@ export class SrpcServer<
         if ((this.inFlightClientRequestBytes.get(stream) ?? 0) + retainedBytes > this.maxInFlightClientRequestBytes) {
             this.closeStreamWithError(stream, 'badArg', 'Too many in-flight client request bytes');
             return;
+        }
+        if (!notification && stream.protocolVersion >= 4) {
+            if (!this.writeToStream(stream, { requestId: data.requestId, requestAck: true } as TServerOutput)) return;
         }
         this.inFlightClientRequests.set(stream, inFlight + 1);
         this.inFlightClientRequestBytes.set(stream, (this.inFlightClientRequestBytes.get(stream) ?? 0) + retainedBytes);
@@ -839,7 +867,7 @@ export class SrpcServer<
     private async validateClientAuth(
         meta: Record<string, string>,
         request: IncomingMessage,
-        protocolVersion: 1 | 2 | 3
+        protocolVersion: 1 | 2 | 3 | 4
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
             const result = await this.clientAuthorizer(meta, request);
@@ -1185,20 +1213,26 @@ export class SrpcServer<
                     };
 
                     const response = await new Promise<unknown>((resolve, reject) => {
+                        let acknowledged = false;
                         const timeout = setTimeout(() => {
                             if (!stream.$queue.has(requestId)) return;
                             stream.$queue.delete(requestId);
                             this.addLateReplyTombstone(stream, requestId);
                             releaseRetainedBytes();
                             reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
-                            if (this.options.disconnectOnRequestTimeout === true) {
-                                this.logger.warn('Revoking SRPC stream after request timeout', { srpc: { ...logMeta, timeoutMs } });
+                            if (this.options.disconnectOnRequestTimeout !== false && stream.protocolVersion >= 4 && !acknowledged) {
+                                this.logger.warn('Revoking SRPC stream after an unacknowledged request timed out', {
+                                    srpc: { ...logMeta, timeoutMs }
+                                });
                                 this.cleanupStream(stream, 'timeout');
                             }
                         }, timeoutMs);
 
                         const queueItem: IQueuedRequest = {
                             exp: Date.now() + timeoutMs,
+                            acknowledge: () => {
+                                acknowledged = true;
+                            },
                             resolve: response => {
                                 clearTimeout(timeout);
                                 releaseRetainedBytes();

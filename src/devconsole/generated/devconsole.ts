@@ -271,6 +271,8 @@ export interface DevConsoleClientMessage {
     error?: string | undefined;
     userError?: boolean | undefined;
     trace?: TraceContext | undefined;
+    /** Transport v4 receipt; reply remains false. */
+    requestAck?: boolean | undefined;
     /** framework */
     pingPong?: PingPong | undefined;
     byteStreamOperation?: ByteStreamOperation | undefined;
@@ -304,6 +306,8 @@ export interface DevConsoleServerMessage {
     error?: string | undefined;
     userError?: boolean | undefined;
     trace?: TraceContext | undefined;
+    /** Transport v4 receipt; reply remains false. */
+    requestAck?: boolean | undefined;
     /** framework */
     pingPong?: PingPong | undefined;
     byteStreamOperation?: ByteStreamOperation | undefined;
@@ -4064,6 +4068,7 @@ function createBaseDevConsoleClientMessage(): DevConsoleClientMessage {
         error: undefined,
         userError: undefined,
         trace: undefined,
+        requestAck: undefined,
         pingPong: undefined,
         byteStreamOperation: undefined,
         dEventResponse: undefined,
@@ -4105,6 +4110,9 @@ export const DevConsoleClientMessage: MessageFns<DevConsoleClientMessage> = {
         }
         if (message.trace !== undefined) {
             TraceContext.encode(message.trace, writer.uint32(42).fork()).join();
+        }
+        if (message.requestAck !== undefined) {
+            writer.uint32(72).bool(message.requestAck);
         }
         if (message.pingPong !== undefined) {
             PingPong.encode(message.pingPong, writer.uint32(402).fork()).join();
@@ -4226,6 +4234,14 @@ export const DevConsoleClientMessage: MessageFns<DevConsoleClientMessage> = {
                         }
 
                         message.trace = TraceContext.decode(reader, reader.uint32());
+                        continue;
+                    }
+                    case 9: {
+                        if (tag !== 72) {
+                            break;
+                        }
+
+                        message.requestAck = reader.bool();
                         continue;
                     }
                     case 50: {
@@ -4423,6 +4439,7 @@ export const DevConsoleClientMessage: MessageFns<DevConsoleClientMessage> = {
             error: isSet(object.error) ? globalThis.String(object.error) : undefined,
             userError: isSet(object.userError) ? globalThis.Boolean(object.userError) : undefined,
             trace: isSet(object.trace) ? TraceContext.fromJSON(object.trace) : undefined,
+            requestAck: isSet(object.requestAck) ? globalThis.Boolean(object.requestAck) : undefined,
             pingPong: isSet(object.pingPong) ? PingPong.fromJSON(object.pingPong) : undefined,
             byteStreamOperation: isSet(object.byteStreamOperation) ? ByteStreamOperation.fromJSON(object.byteStreamOperation) : undefined,
             dEventResponse: isSet(object.dEventResponse) ? DEventResponse.fromJSON(object.dEventResponse) : undefined,
@@ -4476,6 +4493,9 @@ export const DevConsoleClientMessage: MessageFns<DevConsoleClientMessage> = {
         }
         if (message.trace !== undefined) {
             obj.trace = TraceContext.toJSON(message.trace);
+        }
+        if (message.requestAck !== undefined) {
+            obj.requestAck = message.requestAck;
         }
         if (message.pingPong !== undefined) {
             obj.pingPong = PingPong.toJSON(message.pingPong);
@@ -4556,6 +4576,7 @@ export const DevConsoleClientMessage: MessageFns<DevConsoleClientMessage> = {
         message.error = object.error ?? undefined;
         message.userError = object.userError ?? undefined;
         message.trace = object.trace !== undefined && object.trace !== null ? TraceContext.fromPartial(object.trace) : undefined;
+        message.requestAck = object.requestAck ?? undefined;
         message.pingPong = object.pingPong !== undefined && object.pingPong !== null ? PingPong.fromPartial(object.pingPong) : undefined;
         message.byteStreamOperation =
             object.byteStreamOperation !== undefined && object.byteStreamOperation !== null
@@ -4646,6 +4667,7 @@ function createBaseDevConsoleServerMessage(): DevConsoleServerMessage {
         error: undefined,
         userError: undefined,
         trace: undefined,
+        requestAck: undefined,
         pingPong: undefined,
         byteStreamOperation: undefined,
         dEventRequest: undefined,
@@ -4687,6 +4709,9 @@ export const DevConsoleServerMessage: MessageFns<DevConsoleServerMessage> = {
         }
         if (message.trace !== undefined) {
             TraceContext.encode(message.trace, writer.uint32(42).fork()).join();
+        }
+        if (message.requestAck !== undefined) {
+            writer.uint32(72).bool(message.requestAck);
         }
         if (message.pingPong !== undefined) {
             PingPong.encode(message.pingPong, writer.uint32(402).fork()).join();
@@ -4808,6 +4833,14 @@ export const DevConsoleServerMessage: MessageFns<DevConsoleServerMessage> = {
                         }
 
                         message.trace = TraceContext.decode(reader, reader.uint32());
+                        continue;
+                    }
+                    case 9: {
+                        if (tag !== 72) {
+                            break;
+                        }
+
+                        message.requestAck = reader.bool();
                         continue;
                     }
                     case 50: {
@@ -5005,6 +5038,7 @@ export const DevConsoleServerMessage: MessageFns<DevConsoleServerMessage> = {
             error: isSet(object.error) ? globalThis.String(object.error) : undefined,
             userError: isSet(object.userError) ? globalThis.Boolean(object.userError) : undefined,
             trace: isSet(object.trace) ? TraceContext.fromJSON(object.trace) : undefined,
+            requestAck: isSet(object.requestAck) ? globalThis.Boolean(object.requestAck) : undefined,
             pingPong: isSet(object.pingPong) ? PingPong.fromJSON(object.pingPong) : undefined,
             byteStreamOperation: isSet(object.byteStreamOperation) ? ByteStreamOperation.fromJSON(object.byteStreamOperation) : undefined,
             dEventRequest: isSet(object.dEventRequest) ? DEventRequest.fromJSON(object.dEventRequest) : undefined,
@@ -5060,6 +5094,9 @@ export const DevConsoleServerMessage: MessageFns<DevConsoleServerMessage> = {
         }
         if (message.trace !== undefined) {
             obj.trace = TraceContext.toJSON(message.trace);
+        }
+        if (message.requestAck !== undefined) {
+            obj.requestAck = message.requestAck;
         }
         if (message.pingPong !== undefined) {
             obj.pingPong = PingPong.toJSON(message.pingPong);
@@ -5140,6 +5177,7 @@ export const DevConsoleServerMessage: MessageFns<DevConsoleServerMessage> = {
         message.error = object.error ?? undefined;
         message.userError = object.userError ?? undefined;
         message.trace = object.trace !== undefined && object.trace !== null ? TraceContext.fromPartial(object.trace) : undefined;
+        message.requestAck = object.requestAck ?? undefined;
         message.pingPong = object.pingPong !== undefined && object.pingPong !== null ? PingPong.fromPartial(object.pingPong) : undefined;
         message.byteStreamOperation =
             object.byteStreamOperation !== undefined && object.byteStreamOperation !== null

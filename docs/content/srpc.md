@@ -234,7 +234,7 @@ Client options:
 
 The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
 
-Protocol-v2 and protocol-v3 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
+Protocol-v2, protocol-v3, and protocol-v4 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
 
 The optional `PingPong.type` enum distinguishes handshake messages from client pings and server pongs. Generated TypeScript codecs represent it as a numeric `PingPongType` enum with the prefixed names shown above and an optional `type` property (`undefined` when absent). The library exports matching numeric values as `SrpcPingPongType`.
 
@@ -257,7 +257,7 @@ This is wire-compatible with empty legacy `PingPong` messages. Old protobuf deco
 
 Clients sign connection metadata with HMAC-SHA256. New clients send `pv=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `cap` capabilities and `supersede`, and custom metadata as ordinary WebSocket query parameters. Every query parameter other than those transport fields becomes `stream.meta`. The canonical signature covers the request path, audience, protocol version, capabilities, and normalized metadata.
 
-Servers require an explicit `pv` by default, but accept `_v` when `pv` is absent for compatibility. The protocol version selects the authentication format: v1/v2 use the legacy HMAC format and v3 uses the canonical HMAC format. Legacy `_supersede` and `m--<key>` metadata are accepted; `_supersede` is used only when `supersede` is absent, and `m--<key>` is normalized to `<key>` in `stream.meta` with unprefixed metadata taking precedence. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to use its original signature (`1`, `appv`, `ts`, `id`, `cid`), whose stream ID is consumed once for replay protection and whose capability field is ignored. New clients must use v3. Deploy servers before clients: a v3 client requires a server that recognizes v3. An explicit `pv=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
+Servers require an explicit `pv` by default, but accept `_v` when `pv` is absent for compatibility. The protocol version selects the authentication format: v1/v2 use the legacy HMAC format and v3/v4 use the canonical HMAC format. Legacy `_supersede` and `m--<key>` metadata are accepted; `_supersede` is used only when `supersede` is absent, and `m--<key>` is normalized to `<key>` in `stream.meta` with unprefixed metadata taking precedence. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to use its original signature (`1`, `appv`, `ts`, `id`, `cid`), whose stream ID is consumed once for replay protection and whose capability field is ignored. Clients use v3 by default. Set `SrpcClientOptions.protocolVersion: 4` after both envelope codecs and the server support receipts. The canonical signature binds the advertised version. Deploy servers before clients: v4 requires a server that recognizes v4. An explicit `pv=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
 
 By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
 
@@ -302,7 +302,7 @@ Connected streams expose metadata:
 
 The exported `SrpcStream<TMeta>` type describes these server-side streams. It also exposes the underlying WebSocket and request queue through `$ws` and `$queue`; treat those fields as low-level protocol surfaces and prefer `SrpcServer.invoke()`, handlers, and `SrpcByteStream` for application work.
 
-Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected protocol-v2 or protocol-v3 duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
+Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected protocol-v2, protocol-v3, or protocol-v4 duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity or an unacknowledged v4 request deadline, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
 
 ## Byte Streams
 
@@ -400,20 +400,43 @@ throw or callback error also revokes before closing. Normal graceful
 disconnects retain their ordinary close-event semantics and carry the supplied
 bounded close reason.
 
-For server-to-client calls, `SrpcServer` accepts the optional
-`disconnectOnRequestTimeout` policy, which defaults to `false`. Enable it when
-an unanswered RPC makes that client connection unusable. The existing request
-timer synchronously revokes the exact stream generation with cause `timeout`
-and WebSocket close code `4003`, without waiting for the close handshake or
-transport inactivity. Other pending calls are rejected and normal disconnect
-callbacks run once; a replacement connection is preserved.
+Protocol v4 adds receipt acknowledgments: `{ requestId, requestAck: true }`
+contains no reply, error, or application payload. Both peers acknowledge an
+admitted request before dispatching its handler. This confirms receipt by the
+transport; it does not establish authorization, success, or completion. Replies
+and errors continue to use `reply: true`. Notifications receive no acknowledgment.
 
-The policy also applies to `MeshSrpcServer`: the node that owns the physical
-client stream enforces its local RPC deadline and removes that generation from
-the mesh registry through the existing ownership-safe cleanup. A routing or
-peer-link timeout on another node does not itself revoke the client. Owner-side
-expiry continues even if the requesting node disconnects. Calls that receive a
-response or remote error before their deadline do not trigger this policy.
+For server-to-client calls, `disconnectOnRequestTimeout` defaults to `true`,
+but applies only to an explicitly negotiated v4 stream. If the RPC deadline
+expires without either a receipt or a final response, the existing timer
+synchronously revokes the exact stream with cause `timeout` and close code
+`4003`, before the close handshake or inactivity timer completes. Normal
+cleanup rejects other pending calls and runs disconnect callbacks once. A
+replacement generation is preserved. Setting the option to `false` disables
+this policy; v1–v3 retain their prior timeout behavior even when it is enabled.
 
-A timeout still means delivery is indeterminate. Revoking the connection does
-not prove the operation did not run, and does not automatically retry it.
+A receipt does not resolve a call, extend its deadline, release its queue
+accounting, or request a retry. If an acknowledged handler takes too long,
+`invoke()` still rejects at its ordinary deadline but the session remains
+usable. Late receipts and results for expired calls are ignored for the normal
+bounded tombstone period. A final response before receipt also completes the
+call normally.
+
+Both envelope codecs must preserve `requestAck` before a client advertises
+v4. For protobuf, add `bool requestAck` (or `optional bool requestAck`) using an
+unused field number in each message container and regenerate bindings. TSF's
+DevConsole schema and the RMM bridge schema reserve field 9 for this purpose.
+A v4 client or server refuses negotiation when its codecs drop the field.
+`SrpcClient` stays on v3 by default so upgrading TSF alone does not advertise a
+wire version unsupported by an existing server or codec. Versionless clients
+cannot acquire v4 through `defaultUnspecifiedProtocolVersion`.
+
+The policy also applies to `MeshSrpcServer`: the physical connection owner
+tracks receipts and enforces its existing local RPC deadline. Local, forwarded
+typed, and service calls share this path. Owner-side expiry continues if the
+requesting node disappears. Routing or peer-link deadlines alone do not revoke
+the client, and mesh registry removal uses the existing ownership-safe cleanup.
+
+Delivery remains indeterminate on timeout, with or without a receipt. A
+receipt does not prove an operation ran, and a missing receipt does not prove
+it did not. Commands are not automatically retried.

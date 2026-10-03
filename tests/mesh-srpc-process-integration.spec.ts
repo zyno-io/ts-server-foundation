@@ -176,7 +176,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             else process.env.POD_IP = originalPodIp;
         }
     });
-    for (const scenario of ['rpc-timeout', 'requester-stops', 'routing-timeout'] as const) {
+    for (const scenario of ['rpc-timeout', 'requester-stops', 'routing-timeout', 'acknowledged-timeout'] as const) {
         it(`applies the owner timeout policy across processes: ${scenario}`, { timeout: MeshProcessTestTimeoutMs }, async () => {
             const originalPodIp = process.env.POD_IP;
             process.env.POD_IP = '127.0.0.1';
@@ -202,7 +202,15 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                 child = await startMeshNode(meshKey, true);
                 const owner = child;
                 const clientId = `timeout-${scenario}`;
-                client = createClient(`ws://127.0.0.1:${owner.port}${clientPath}`, clientId, 'owner');
+                client = createClient(`ws://127.0.0.1:${owner.port}${clientPath}`, clientId, 'owner', 4);
+                if (scenario === 'rpc-timeout' || scenario === 'requester-stops') {
+                    // Simulate a v4 runtime whose transport fails to acknowledge
+                    // receipt; keep the socket and handler dispatch alive.
+                    const runtime = client as any;
+                    const writeMessage = runtime.writeMessage.bind(runtime);
+                    runtime.writeMessage = (message: BaseMessage, generation: number) =>
+                        message.requestAck ? true : writeMessage(message, generation);
+                }
                 const dispatched = deferred<void>();
                 let agentCalls = 0;
                 client.registerMessageHandler('dEcho', data => {
@@ -257,6 +265,15 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                     await dispatched.promise;
                     if (scenario === 'requester-stops') await server.meshStop();
                     await rejection;
+                    if (scenario === 'acknowledged-timeout') {
+                        const record = await server.clientRegistry.getClient(clientId);
+                        assert.equal(record?.connectionId, connection.id);
+                        const current = await server.resolveClient(clientId);
+                        assert.equal(current?.id, connection.id);
+                        assert.deepEqual(owner.disconnected, []);
+                        assert.equal(agentCalls, 1);
+                        return;
+                    }
                     await waitFor(() => owner.disconnected.some(item => item.clientId === clientId), 2_000);
                     await waitFor(async () => {
                         const record = await server.clientRegistry.getClient(clientId);
@@ -282,7 +299,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
     }
 });
 
-function createClient(url: string, clientId: string, node: string): SrpcClient<MeshClientMessage, MeshServerMessage> {
+function createClient(url: string, clientId: string, node: string, protocolVersion: 3 | 4 = 3): SrpcClient<MeshClientMessage, MeshServerMessage> {
     const client = new SrpcClient<MeshClientMessage, MeshServerMessage>(
         createLogger(`MeshSrpcProcessClient-${clientId}`),
         url,
@@ -291,7 +308,7 @@ function createClient(url: string, clientId: string, node: string): SrpcClient<M
         clientId,
         { role: node, secret: `${node}-only` },
         'unused',
-        { enableReconnect: false, connectTimeoutMs: 5_000 }
+        { enableReconnect: false, connectTimeoutMs: 5_000, protocolVersion }
     );
     client.registerMessageHandler('dEcho', data => ({ value: data.value, node }));
     return client;
