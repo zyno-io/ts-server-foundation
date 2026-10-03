@@ -176,6 +176,8 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     httpServer?: import('node:http').Server;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
+    /** Revoke the exact client stream when a server-to-client RPC expires. Defaults to false; also applies on a mesh owner. */
+    disconnectOnRequestTimeout?: boolean;
     /** Maximum client requests buffered before a stream is activated. */
     maxPendingClientRequests?: number;
     /** Maximum decoded client-request bytes buffered before a stream is activated. */

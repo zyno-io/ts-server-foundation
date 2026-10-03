@@ -1191,6 +1191,10 @@ export class SrpcServer<
                             this.addLateReplyTombstone(stream, requestId);
                             releaseRetainedBytes();
                             reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
+                            if (this.options.disconnectOnRequestTimeout === true) {
+                                this.logger.warn('Revoking SRPC stream after request timeout', { srpc: { ...logMeta, timeoutMs } });
+                                this.cleanupStream(stream, 'timeout');
+                            }
                         }, timeoutMs);
 
                         const queueItem: IQueuedRequest = {

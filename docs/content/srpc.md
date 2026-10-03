@@ -399,3 +399,21 @@ and byte-stream frames as well as inbound frames. A definitive WebSocket send
 throw or callback error also revokes before closing. Normal graceful
 disconnects retain their ordinary close-event semantics and carry the supplied
 bounded close reason.
+
+For server-to-client calls, `SrpcServer` accepts the optional
+`disconnectOnRequestTimeout` policy, which defaults to `false`. Enable it when
+an unanswered RPC makes that client connection unusable. The existing request
+timer synchronously revokes the exact stream generation with cause `timeout`
+and WebSocket close code `4003`, without waiting for the close handshake or
+transport inactivity. Other pending calls are rejected and normal disconnect
+callbacks run once; a replacement connection is preserved.
+
+The policy also applies to `MeshSrpcServer`: the node that owns the physical
+client stream enforces its local RPC deadline and removes that generation from
+the mesh registry through the existing ownership-safe cleanup. A routing or
+peer-link timeout on another node does not itself revoke the client. Owner-side
+expiry continues even if the requesting node disconnects. Calls that receive a
+response or remote error before their deadline do not trigger this policy.
+
+A timeout still means delivery is indeterminate. Revoking the connection does
+not prove the operation did not run, and does not automatically retry it.

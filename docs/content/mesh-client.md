@@ -338,6 +338,14 @@ new MeshSrpcServer(options: ISrpcServerOptions & MeshSrpcServerOptions)
 
 `MeshSrpcServerOptions`:
 
+The inherited `ISrpcServerOptions.disconnectOnRequestTimeout` policy defaults
+to `false`. If enabled on a client-owning node, an unanswered server-to-client
+RPC revokes its exact local stream at the request deadline and triggers the
+normal registry cleanup. Local, forwarded typed, and service invocations share
+that policy. It does not require a disconnect request from the caller, and a
+caller-side routing or peer-link timeout alone does not revoke the endpoint.
+See [Errors And Timeouts](./srpc#errors-and-timeouts) for delivery semantics.
+
 | Option                    | Type                             | Description                                                                                                       |
 | ------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `meshKey`                 | `string`                         | Mesh key                                                                                                          |
