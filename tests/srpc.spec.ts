@@ -115,7 +115,7 @@ describe('srpc', () => {
                 assert.equal((stream as SrpcStream).protocolVersion, 4);
                 const request =
                     direction === 'server-to-client'
-                        ? harness.server.invoke(stream as SrpcStream, 'dCompute', { number: 2, operation: 'square' }, 500)
+                        ? harness.server.invoke(stream as SrpcStream, 'dCompute', { number: 2, operation: 'square' }, 4_000)
                         : client.invoke('uSlow', { delayMs: 1_000 }, 500);
                 const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
                 await entered.promise;

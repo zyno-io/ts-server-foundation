@@ -65,13 +65,29 @@ function createHarness(context: TestContext, disconnectOnRequestTimeout?: boolea
 }
 
 describe('sRPC timeout disconnection policy', () => {
+    for (const timeoutMs of [1_000, 3_000]) {
+        it(`keeps v4 sessions when the ${timeoutMs}ms deadline leaves no receipt window`, async context => {
+            const { server, connect, disconnected } = createHarness(context);
+            const { stream, socket } = connect();
+            const request = server.invoke(stream, 'dEcho', { value: 'short' }, timeoutMs);
+            const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
+            context.mock.timers.tick(timeoutMs);
+            await rejection;
+            assert.equal(stream.connected, true);
+            assert.deepEqual(socket.closes, []);
+            assert.deepEqual(disconnected, []);
+            server.handleStreamDataReceived(stream, { requestId: socket.sent[0].requestId, requestAck: true });
+            assert.equal(stream.connected, true, 'a late receipt remains harmless');
+        });
+    }
+
     for (const option of [false]) {
         it(`keeps the stream usable for late replies when disconnectOnRequestTimeout is ${option}`, async context => {
             const { server, connect, disconnected } = createHarness(context, option);
             const { stream, socket } = connect();
-            const request = server.invoke(stream, 'dEcho', { value: 'late' }, 100);
+            const request = server.invoke(stream, 'dEcho', { value: 'late' }, 4_000);
             const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
-            context.mock.timers.tick(100);
+            context.mock.timers.tick(4_000);
             await rejection;
             server.handleStreamDataReceived(stream, { requestId: socket.sent[0].requestId, reply: true, dEchoResponse: { value: 'late' } });
 
@@ -85,9 +101,9 @@ describe('sRPC timeout disconnection policy', () => {
         it(`does not revoke legacy protocol v${protocolVersion} even when the policy is enabled`, async context => {
             const { server, connect, disconnected } = createHarness(context, true);
             const { stream, socket } = connect(protocolVersion);
-            const request = server.invoke(stream, 'dEcho', { value: 'legacy' }, 100);
+            const request = server.invoke(stream, 'dEcho', { value: 'legacy' }, 4_000);
             const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
-            context.mock.timers.tick(100);
+            context.mock.timers.tick(4_000);
             await rejection;
             assert.equal(stream.connected, true);
             assert.deepEqual(socket.closes, []);
@@ -98,12 +114,12 @@ describe('sRPC timeout disconnection policy', () => {
     it('revokes the exact generation before timeout is observed and settles other pending requests', async context => {
         const { server, connect, disconnected } = createHarness(context);
         const { stream, socket } = connect();
-        const expired = server.invoke(stream, 'dEcho', { value: 'expired' }, 100);
-        const pending = server.invoke(stream, 'dEcho', { value: 'pending' }, 1_000);
+        const expired = server.invoke(stream, 'dEcho', { value: 'expired' }, 4_000);
+        const pending = server.invoke(stream, 'dEcho', { value: 'pending' }, 10_000);
         const expiredRejection = assert.rejects(expired, error => {
             assert.ok(error instanceof SrpcIndeterminateDeliveryError);
             assert.ok(error.cause instanceof Error);
-            assert.match(error.cause.message, /Request timeout after 100ms/);
+            assert.match(error.cause.message, /Request timeout after 4000ms/);
             assert.equal(stream.connected, false);
             assert.equal(server.streamsByClientId.has(stream.clientId), false);
             return true;
@@ -114,7 +130,7 @@ describe('sRPC timeout disconnection policy', () => {
             assert.equal(error.cause.message, 'Stream disconnected');
             return true;
         });
-        context.mock.timers.tick(100);
+        context.mock.timers.tick(4_000);
         await Promise.all([expiredRejection, pendingRejection]);
 
         assert.equal(socket.readyState, 1, 'revocation must precede the socket close handshake');
@@ -125,7 +141,7 @@ describe('sRPC timeout disconnection policy', () => {
         assert.equal(resolved, undefined);
         assert.deepEqual(disconnected, [{ id: stream.id, cause: 'timeout' }]);
         server.handleStreamDisconnected(stream, 4003);
-        context.mock.timers.tick(1_000);
+        context.mock.timers.tick(10_000);
         assert.equal(socket.closes.length, 1);
         assert.equal(disconnected.length, 1);
     });
@@ -133,7 +149,7 @@ describe('sRPC timeout disconnection policy', () => {
     it('acknowledges receipt without resolving, releasing, or extending the request, and keeps the session after result timeout', async context => {
         const { server, connect, disconnected } = createHarness(context);
         const { stream, socket } = connect();
-        const request = server.invoke(stream, 'dEcho', { value: 'slow-handler' }, 100);
+        const request = server.invoke(stream, 'dEcho', { value: 'slow-handler' }, 4_000);
         const requestId = socket.sent[0].requestId;
         const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
         const bytes = server.pendingServerRequestBytes.get(stream);
@@ -142,7 +158,7 @@ describe('sRPC timeout disconnection policy', () => {
         server.handleStreamDataReceived(stream, { requestId, requestAck: true });
         assert.equal(stream.$queue.size, 1);
         assert.equal(server.pendingServerRequestBytes.get(stream), bytes);
-        context.mock.timers.tick(50);
+        context.mock.timers.tick(3_950);
         await rejection;
         assert.equal(stream.connected, true);
         assert.equal(stream.$queue.size, 0);
@@ -165,7 +181,7 @@ describe('sRPC timeout disconnection policy', () => {
         it(`rejects malformed or unknown acknowledgments: ${JSON.stringify(invalidAck)}`, async context => {
             const { server, connect } = createHarness(context);
             const { stream, socket } = connect();
-            const request = server.invoke(stream, 'dEcho', { value: 'pending' }, 100);
+            const request = server.invoke(stream, 'dEcho', { value: 'pending' }, 4_000);
             const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
             server.handleStreamDataReceived(stream, { requestId: socket.sent[0].requestId, ...invalidAck });
             await rejection;
@@ -176,10 +192,10 @@ describe('sRPC timeout disconnection policy', () => {
     it('leaves a replacement generation usable when an old request expires', async context => {
         const { server, connect, disconnected } = createHarness(context, true);
         const old = connect();
-        const request = server.invoke(old.stream, 'dEcho', { value: 'old' }, 100);
+        const request = server.invoke(old.stream, 'dEcho', { value: 'old' }, 4_000);
         const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
         const replacement = connect();
-        context.mock.timers.tick(100);
+        context.mock.timers.tick(4_000);
         await rejection;
 
         assert.equal(old.stream.connected, false);
@@ -194,12 +210,12 @@ describe('sRPC timeout disconnection policy', () => {
     it('keeps successful calls and ordinary remote or encoding failures from triggering the policy', async context => {
         const { server, connect, disconnected } = createHarness(context, true);
         const { stream, socket } = connect();
-        const success = server.invoke(stream, 'dEcho', { value: 'success' }, 100);
+        const success = server.invoke(stream, 'dEcho', { value: 'success' }, 4_000);
         server.handleStreamDataReceived(stream, { requestId: socket.sent[0].requestId, reply: true, dEchoResponse: { value: 'success' } });
         const response = await success;
         assert.equal(response.value, 'success');
 
-        const failure = server.invoke(stream, 'dEcho', { value: 'denied' }, 100);
+        const failure = server.invoke(stream, 'dEcho', { value: 'denied' }, 4_000);
         server.handleStreamDataReceived(stream, { requestId: socket.sent[1].requestId, reply: true, error: 'Denied', userError: true });
         await assert.rejects(failure, error => error instanceof SrpcError && error.message === 'Denied' && error.isUserError === true);
 
@@ -208,8 +224,8 @@ describe('sRPC timeout disconnection policy', () => {
                 throw new Error('encode failed');
             }
         };
-        await assert.rejects(server.invoke(stream, 'dEcho', { value: 'invalid' }, 100), /encode failed/);
-        context.mock.timers.tick(1_000);
+        await assert.rejects(server.invoke(stream, 'dEcho', { value: 'invalid' }, 4_000), /encode failed/);
+        context.mock.timers.tick(10_000);
         assert.equal(stream.connected, true);
         assert.equal(stream.$queue.size, 0);
         assert.deepEqual(socket.closes, []);
