@@ -39,6 +39,7 @@ async function start(): Promise<void> {
         clientMessage: JsonMessage,
         serverMessage: JsonMessage,
         wsPath: clientPath,
+        disconnectOnRequestTimeout: process.env.TSF_MESH_DISCONNECT_ON_REQUEST_TIMEOUT === '1',
         meshKey,
         meshOptions: {
             heartbeatIntervalMs: 500,
@@ -50,6 +51,9 @@ async function start(): Promise<void> {
         autoLifecycle: false
     });
     server.setClientAuthorizer(() => true);
+    server.registerDisconnectHandler((stream, cause) => {
+        send({ type: 'client-disconnected', clientId: stream.clientId, connectionId: stream.id, cause });
+    });
     const httpServer = await app.http.listen(0, '127.0.0.1');
     await server.meshStart();
     const address = httpServer.address() as AddressInfo;

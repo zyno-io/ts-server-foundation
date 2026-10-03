@@ -9,11 +9,13 @@ import {
     type BaseMessage,
     createApp,
     createLogger,
+    deferred,
     getMeshLinkProcessId,
     getSrpcRegistryMetadata,
     isLocalSrpcStream,
     MeshSrpcServer,
     SrpcClient,
+    SrpcOwnerUnavailableError,
     type SrpcMessageFns
 } from '../src';
 import type { MeshSrpcConnection, SrpcStream } from '../src';
@@ -174,9 +176,130 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             else process.env.POD_IP = originalPodIp;
         }
     });
+    for (const scenario of ['rpc-timeout', 'requester-stops', 'routing-timeout', 'acknowledged-timeout'] as const) {
+        it(`applies the owner timeout policy across processes: ${scenario}`, { timeout: MeshProcessTestTimeoutMs }, async () => {
+            const originalPodIp = process.env.POD_IP;
+            process.env.POD_IP = '127.0.0.1';
+            const meshKey = `mesh-timeout-${randomUUID()}`;
+            const app = createApp({ enableHealthcheck: false });
+            const server = new MeshSrpcServer<ClientMetadata, MeshClientMessage, MeshServerMessage, { role: string }>({
+                logger: createLogger('MeshTimeoutRequester'),
+                clientMessage: JsonMessage as SrpcMessageFns<MeshClientMessage>,
+                serverMessage: JsonMessage as SrpcMessageFns<MeshServerMessage>,
+                wsPath: clientPath,
+                disconnectOnRequestTimeout: scenario === 'routing-timeout',
+                meshKey,
+                meshLink: { secret: meshSecret, path: meshPath },
+                extractRegistryMetadata: stream => ({ role: stream.meta.role }),
+                autoLifecycle: false
+            });
+            server.setClientAuthorizer(() => true);
+            let child: MeshNode | undefined;
+            let client: SrpcClient<MeshClientMessage, MeshServerMessage> | undefined;
+            try {
+                await app.http.listen(0, '127.0.0.1');
+                await server.meshStart();
+                child = await startMeshNode(meshKey, true);
+                const owner = child;
+                const clientId = `timeout-${scenario}`;
+                client = createClient(`ws://127.0.0.1:${owner.port}${clientPath}`, clientId, 'owner', 4);
+                if (scenario === 'rpc-timeout' || scenario === 'requester-stops') {
+                    // Simulate a v4 runtime whose transport fails to acknowledge
+                    // receipt; keep the socket and handler dispatch alive.
+                    const runtime = client as any;
+                    const writeMessage = runtime.writeMessage.bind(runtime);
+                    runtime.writeMessage = (message: BaseMessage, generation: number) =>
+                        message.requestAck ? true : writeMessage(message, generation);
+                }
+                const dispatched = deferred<void>();
+                let agentCalls = 0;
+                client.registerMessageHandler('dEcho', data => {
+                    agentCalls++;
+                    dispatched.resolve();
+                    if (scenario === 'routing-timeout') return { value: data.value, node: 'owner' };
+                    return new Promise<{ value: string; node: string }>(() => {});
+                });
+                await client.connect();
+                await waitFor(async () => {
+                    const record = await server.getRegisteredClient(clientId);
+                    return record?.nodeId === owner.nodeId;
+                });
+                const connection = await server.resolveClient(clientId);
+                assert.ok(connection && !isLocalSrpcStream(connection));
+
+                if (scenario === 'routing-timeout') {
+                    // Spend the caller's deadline in routing without issuing an
+                    // agent RPC. A mesh deadline is not an agent timeout.
+                    const registry = server.clientRegistry;
+                    const getClient = registry.getClient.bind(registry);
+                    const releaseLookup = deferred<void>();
+                    let holdNextLookup = true;
+                    registry.getClient = async id => {
+                        if (id === clientId && holdNextLookup) {
+                            holdNextLookup = false;
+                            await releaseLookup.promise;
+                        }
+                        return getClient(id);
+                    };
+                    try {
+                        await assert.rejects(server.invoke(connection, 'dEcho', { value: 'not-dispatched' }, 100), error => {
+                            assert.ok(error instanceof SrpcOwnerUnavailableError);
+                            assert.ok(error.cause instanceof Error);
+                            assert.match(error.cause.message, /timed out/i);
+                            return true;
+                        });
+                    } finally {
+                        registry.getClient = getClient;
+                        releaseLookup.resolve();
+                    }
+                    assert.equal(agentCalls, 0);
+                    const response = await server.invoke(connection, 'dEcho', { value: 'healthy' }, 2_000);
+                    assert.equal(response.value, 'healthy');
+                    assert.equal(agentCalls, 1);
+                    assert.deepEqual(owner.disconnected, []);
+                    const record = await server.getRegisteredClient(clientId);
+                    assert.equal(record?.connectionId, connection.id);
+                } else {
+                    const request = server.invoke(connection, 'dEcho', { value: 'unanswered' }, 1_000);
+                    const rejection = assert.rejects(request);
+                    await dispatched.promise;
+                    if (scenario === 'requester-stops') await server.meshStop();
+                    await rejection;
+                    if (scenario === 'acknowledged-timeout') {
+                        const record = await server.clientRegistry.getClient(clientId);
+                        assert.equal(record?.connectionId, connection.id);
+                        const current = await server.resolveClient(clientId);
+                        assert.equal(current?.id, connection.id);
+                        assert.deepEqual(owner.disconnected, []);
+                        assert.equal(agentCalls, 1);
+                        return;
+                    }
+                    await waitFor(() => owner.disconnected.some(item => item.clientId === clientId), 2_000);
+                    await waitFor(async () => {
+                        const record = await server.clientRegistry.getClient(clientId);
+                        return record === undefined;
+                    }, 2_000);
+                    const disconnected = owner.disconnected.filter(item => item.clientId === clientId);
+                    assert.deepEqual(disconnected, [{ clientId, connectionId: connection.id, cause: 'timeout' }]);
+                    const resolved = await server.resolveClient(clientId);
+                    assert.equal(resolved, undefined);
+                    assert.equal(agentCalls, 1, 'an uncertain command must not be retried');
+                }
+            } finally {
+                client?.disconnect();
+                await child?.stop();
+                await server.meshStop().catch(() => {});
+                server.close();
+                await app.http.close();
+                await app.stop();
+                if (originalPodIp === undefined) delete process.env.POD_IP;
+                else process.env.POD_IP = originalPodIp;
+            }
+        });
+    }
 });
 
-function createClient(url: string, clientId: string, node: string): SrpcClient<MeshClientMessage, MeshServerMessage> {
+function createClient(url: string, clientId: string, node: string, protocolVersion: 3 | 4 = 3): SrpcClient<MeshClientMessage, MeshServerMessage> {
     const client = new SrpcClient<MeshClientMessage, MeshServerMessage>(
         createLogger(`MeshSrpcProcessClient-${clientId}`),
         url,
@@ -185,7 +308,7 @@ function createClient(url: string, clientId: string, node: string): SrpcClient<M
         clientId,
         { role: node, secret: `${node}-only` },
         'unused',
-        { enableReconnect: false, connectTimeoutMs: 5_000 }
+        { enableReconnect: false, connectTimeoutMs: 5_000, protocolVersion }
     );
     client.registerMessageHandler('dEcho', data => ({ value: data.value, node }));
     return client;
@@ -198,10 +321,11 @@ interface MeshNode {
     meshProcessId: string;
     osPid: number;
     exited: Promise<void>;
+    disconnected: { clientId: string; connectionId: string; cause: string }[];
     stop(): Promise<void>;
 }
 
-async function startMeshNode(meshKey: string): Promise<MeshNode> {
+async function startMeshNode(meshKey: string, disconnectOnRequestTimeout = false): Promise<MeshNode> {
     const fixture = join(__dirname, 'fixtures', 'mesh-srpc-node.js');
     const child = fork(fixture, [], {
         cwd: process.cwd(),
@@ -211,12 +335,14 @@ async function startMeshNode(meshKey: string): Promise<MeshNode> {
             ...process.env,
             POD_IP: '127.0.0.1',
             TSF_MESH_KEY: meshKey,
+            TSF_MESH_DISCONNECT_ON_REQUEST_TIMEOUT: disconnectOnRequestTimeout ? '1' : '0',
             TSF_MESH_SECRET: meshSecret,
             TSF_MESH_CLIENT_PATH: clientPath,
             TSF_MESH_LINK_PATH: meshPath
         }
     });
     const diagnostics: string[] = [];
+    const disconnected: MeshNode['disconnected'] = [];
     child.stdout?.on('data', chunk => diagnostics.push(String(chunk)));
     child.stderr?.on('data', chunk => diagnostics.push(String(chunk)));
     let resolveExit!: () => void;
@@ -251,6 +377,14 @@ async function startMeshNode(meshKey: string): Promise<MeshNode> {
             });
             child.on('message', message => {
                 if (!isRecord(message)) return;
+                if (message.type === 'client-disconnected') {
+                    disconnected.push({
+                        clientId: String(message.clientId),
+                        connectionId: String(message.connectionId),
+                        cause: String(message.cause)
+                    });
+                    return;
+                }
                 if (message.type === 'error') {
                     fail(new Error(String(message.error)));
                     return;
@@ -272,6 +406,7 @@ async function startMeshNode(meshKey: string): Promise<MeshNode> {
                     meshProcessId,
                     osPid,
                     exited,
+                    disconnected,
                     stop: async () => {
                         if (child.exitCode !== null || child.killed) return;
                         child.send({ type: 'stop' });

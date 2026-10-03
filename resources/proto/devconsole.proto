@@ -223,6 +223,7 @@ message DevConsoleClientMessage {
   optional string error = 3;
   optional bool userError = 4;
   optional TraceContext trace = 5;
+  optional bool requestAck = 9; // Transport v4 receipt; reply remains false.
 
   oneof request {
     // framework
@@ -261,6 +262,7 @@ message DevConsoleServerMessage {
   optional string error = 3;
   optional bool userError = 4;
   optional TraceContext trace = 5;
+  optional bool requestAck = 9; // Transport v4 receipt; reply remains false.
 
   oneof response {
     // framework

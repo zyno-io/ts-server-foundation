@@ -34,6 +34,8 @@ export interface BaseMessage {
     reply?: boolean;
     error?: string;
     userError?: boolean;
+    /** Protocol-v4 receipt acknowledgment; requestId identifies the call, and reply remains false. */
+    requestAck?: boolean;
     trace?: {
         traceId: string;
         spanId: string;
@@ -77,6 +79,7 @@ export type SrpcDisconnectCause = 'disconnect' | 'conflict' | 'supersede' | 'tim
 
 export interface IQueuedRequest {
     exp: number;
+    acknowledge?: () => void;
     resolve: (value: unknown) => void;
     reject: (err: unknown) => void;
 }
@@ -121,12 +124,39 @@ export interface SrpcTrafficLoggingOptions {
 
 export type SrpcTrafficLogging = boolean | SrpcTrafficLoggingOptions;
 
-const SrpcEnvelopeFields = new Set(['requestId', 'reply', 'error', 'userError', 'trace', 'pingPong', 'byteStreamOperation']);
+const SrpcEnvelopeFields = new Set(['requestId', 'reply', 'error', 'userError', 'requestAck', 'trace', 'pingPong', 'byteStreamOperation']);
+
+/** A receipt cannot carry a result, error, or application payload. */
+export function isSrpcRequestAcknowledgment(message: BaseMessage): boolean {
+    return (
+        message.requestAck === true &&
+        typeof message.requestId === 'string' &&
+        message.requestId.length > 0 &&
+        !message.reply &&
+        message.error === undefined &&
+        !message.userError &&
+        !message.pingPong &&
+        !message.byteStreamOperation &&
+        Object.entries(message).every(([key, value]) => SrpcEnvelopeFields.has(key) || value === undefined)
+    );
+}
+
+/** Refuse v4 negotiation when a consumer's codec silently drops the receipt field. */
+export function supportsSrpcRequestAcknowledgments<T extends BaseMessage>(codec: SrpcMessageFns<T>): boolean {
+    try {
+        const encoded = encodeSrpcMessage(codec, { requestId: 'srpc-ack-probe', requestAck: true } as T);
+        const decoded = codec.decode(encoded);
+        return isSrpcRequestAcknowledgment(decoded);
+    } catch {
+        return false;
+    }
+}
 
 /** Identifies heartbeat-only pings and pongs without hiding mixed payloads or errors. */
 export function isSrpcPingPongOnly(message: BaseMessage): boolean {
     return (
         !!message.pingPong &&
+        !message.requestAck &&
         message.byteStreamOperation === undefined &&
         message.error === undefined &&
         message.userError === undefined &&
@@ -136,6 +166,7 @@ export function isSrpcPingPongOnly(message: BaseMessage): boolean {
 
 /** Returns the application-level message fields carried by an sRPC envelope. */
 export function srpcMessageTypes(message: BaseMessage): string[] {
+    if (message.requestAck) return ['requestAck'];
     if (message.pingPong) return ['pingPong'];
     if (message.byteStreamOperation) return ['byteStreamOperation'];
     if (message.error !== undefined) return ['error'];
@@ -153,6 +184,7 @@ export function isSrpcNotification(message: BaseMessage): boolean {
         message.reply ||
         message.error !== undefined ||
         message.userError !== undefined ||
+        message.requestAck ||
         message.pingPong ||
         message.byteStreamOperation
     )
@@ -176,6 +208,8 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     httpServer?: import('node:http').Server;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
+    /** Revoke an unacknowledged protocol-v4 client stream at RPC expiry. Defaults to true; v1-v3 are unaffected. */
+    disconnectOnRequestTimeout?: boolean;
     /** Maximum client requests buffered before a stream is activated. */
     maxPendingClientRequests?: number;
     /** Maximum decoded client-request bytes buffered before a stream is activated. */
@@ -215,7 +249,7 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly clientId: string;
     readonly appVersion: string;
     readonly configureTs: number;
-    readonly protocolVersion: 1 | 2 | 3;
+    readonly protocolVersion: 1 | 2 | 3 | 4;
     /** Optional client capabilities negotiated during the WebSocket upgrade. */
     readonly capabilities?: ReadonlySet<string>;
     readonly supersede: boolean;

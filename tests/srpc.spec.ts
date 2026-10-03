@@ -30,7 +30,7 @@ import {
 } from '../src';
 import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
 import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
-import { isSrpcNotification, srpcMessageTypes } from '../src/srpc/types';
+import { isSrpcNotification, srpcMessageTypes, supportsSrpcRequestAcknowledgments } from '../src/srpc/types';
 import { DevConsoleClientMessage, DevConsoleServerMessage, PingPong, PingPongType } from '../src/devconsole/generated/devconsole';
 import { LegacyEnvelope } from './fixtures/generated/srpc-legacy';
 
@@ -92,6 +92,82 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    for (const direction of ['server-to-client', 'client-to-server'] as const) {
+        it(`exchanges v4 receipts before a slow ${direction} handler completes`, async () => {
+            const harness = await createHarness();
+            const client = harness.createClient(`v4-${direction}`, {}, secret, { protocolVersion: 4 });
+            const entered = deferred<void>();
+            const release = deferred<void>();
+            client.registerMessageHandler('dCompute', async () => {
+                entered.resolve();
+                await release.promise;
+                return { result: 1 };
+            });
+            harness.server.registerMessageHandler('uSlow', async () => {
+                entered.resolve();
+                await release.promise;
+                return { ok: true };
+            });
+            try {
+                await client.connect();
+                const stream = await harness.server.resolveClient(`v4-${direction}`);
+                assert.ok(stream);
+                assert.equal((stream as SrpcStream).protocolVersion, 4);
+                const request =
+                    direction === 'server-to-client'
+                        ? harness.server.invoke(stream as SrpcStream, 'dCompute', { number: 2, operation: 'square' }, 500)
+                        : client.invoke('uSlow', { delayMs: 1_000 }, 500);
+                const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
+                await entered.promise;
+                await rejection;
+                assert.equal(client.isConnected, true);
+                assert.equal(stream.connected, true);
+                release.resolve();
+                await delay(20);
+                assert.equal(client.isConnected, true, 'the late result must be ignored');
+                assert.equal(stream.connected, true);
+            } finally {
+                release.resolve();
+                await harness.close();
+            }
+        });
+    }
+
+    it('requires acknowledgment codecs before negotiating v4, without consuming handshake capacity', async () => {
+        assert.equal(supportsSrpcRequestAcknowledgments(DevConsoleClientMessage), true);
+        assert.equal(supportsSrpcRequestAcknowledgments(DevConsoleServerMessage), true);
+        assert.equal(supportsSrpcRequestAcknowledgments(LegacyEnvelope), false);
+        const harness = await createHarness({
+            clientMessage: withEnvelopeDefaults(LegacyEnvelope),
+            serverMessage: withEnvelopeDefaults(LegacyEnvelope)
+        });
+        try {
+            assert.throws(
+                () =>
+                    harness.createClient(
+                        'legacy-codec-v4',
+                        {},
+                        secret,
+                        { protocolVersion: 4 },
+                        {
+                            clientMessage: withEnvelopeDefaults(LegacyEnvelope),
+                            serverMessage: withEnvelopeDefaults(LegacyEnvelope)
+                        }
+                    ),
+                /acknowledgment codecs/
+            );
+            const client = harness.createClient('v4-on-old-codec', {}, secret, { protocolVersion: 4 });
+            await assert.rejects(client.connect(), /Connection failed/);
+            const url = (client as any).generateWsUrl();
+            await assertWebSocketRejected(url, 400);
+            assert.equal((harness.server as any).pendingHandshakeCount, 0);
+            const streams = await harness.server.getLocalStreams();
+            assert.deepEqual(streams, []);
+        } finally {
+            await harness.close();
+        }
+    });
+
     it('preserves optional pingPong type presence and compatibility with old protobuf codecs', () => {
         assert.equal(PingPong.decode(PingPong.encode({}).finish()).type, undefined);
         assert.equal(PingPong.decode(PingPong.encode({ type: PingPongType.PING_PONG_TYPE_UNSPECIFIED }).finish()).type, 0);
@@ -3039,8 +3115,12 @@ describe('srpc', () => {
             await assertWebSocketRejected(unspecified.toString(), 400);
 
             const unsupported = new URL(createSignedRawWebSocketUrl(harness.port, 'unsupported-protocol'));
-            unsupported.searchParams.set('pv', '4');
+            unsupported.searchParams.set('pv', '5');
             await assertWebSocketRejected(unsupported.toString(), 400);
+
+            const mismatchedSignature = new URL(createSignedRawWebSocketUrl(harness.port, 'v4-mismatched-signature'));
+            mismatchedSignature.searchParams.set('pv', '4');
+            await assertWebSocketRejected(mismatchedSignature.toString(), 403);
         } finally {
             await harness.close();
         }
