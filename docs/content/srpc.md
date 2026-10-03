@@ -401,14 +401,19 @@ disconnects retain their ordinary close-event semantics and carry the supplied
 bounded close reason.
 
 Protocol v4 adds receipt acknowledgments: `{ requestId, requestAck: true }`
-contains no reply, error, or application payload. Both peers acknowledge an
-admitted request before dispatching its handler. This confirms receipt by the
-transport; it does not establish authorization, success, or completion. Replies
-and errors continue to use `reply: true`. Notifications receive no acknowledgment.
+contains no reply, error, or application payload. Servers acknowledge admitted
+requests before dispatch. Clients race their final response against a three-second
+receipt delay: a result or error within that window suppresses the receipt;
+otherwise the client sends one receipt while the handler continues. Pending
+receipts are canceled when the connection ends. A receipt confirms transport
+admission, not authorization, success, or completion. Replies and errors continue
+to use `reply: true`. Notifications receive no acknowledgment.
 
 For server-to-client calls, `disconnectOnRequestTimeout` defaults to `true`,
-but applies only to an explicitly negotiated v4 stream. If the RPC deadline
-expires without either a receipt or a final response, the existing timer
+but applies only to explicitly negotiated v4 calls whose timeout budget exceeds
+the three-second receipt window. Shorter calls still time out normally, but cannot
+establish that a client has missed its receipt deadline. For eligible calls, if the
+RPC deadline expires without either a receipt or a final response, the existing timer
 synchronously revokes the exact stream with cause `timeout` and close code
 `4003`, before the close handshake or inactivity timer completes. Normal
 cleanup rejects other pending calls and runs disconnect callbacks once. A

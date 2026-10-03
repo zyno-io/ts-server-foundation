@@ -29,6 +29,9 @@ export enum SrpcPingPongType {
     PONG = 5
 }
 
+/** Clients give a final response priority over a receipt during this window. */
+export const SrpcClientRequestAckDelayMs = 3_000;
+
 export interface BaseMessage {
     requestId?: string;
     reply?: boolean;
@@ -208,7 +211,7 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     httpServer?: import('node:http').Server;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
-    /** Revoke an unacknowledged protocol-v4 client stream at RPC expiry. Defaults to true; v1-v3 are unaffected. */
+    /** Revoke an unacknowledged v4 stream at RPC expiry when its budget exceeds the 3s receipt window. Defaults to true. */
     disconnectOnRequestTimeout?: boolean;
     /** Maximum client requests buffered before a stream is activated. */
     maxPendingClientRequests?: number;

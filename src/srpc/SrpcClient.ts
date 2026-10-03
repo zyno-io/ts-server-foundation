@@ -28,6 +28,7 @@ import {
     SrpcMeta,
     SrpcPingPongType,
     SrpcTrafficLogging,
+    SrpcClientRequestAckDelayMs,
     encodeSrpcMessage,
     isSrpcNotification,
     isSrpcRequestAcknowledgment,
@@ -113,6 +114,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     private senderAnnouncements: boolean;
     private generation = 0;
     private readonly handlerPressureByGeneration = new Map<number, HandlerPressureState>();
+    private readonly requestAcknowledgmentsByGeneration = new Map<number, Set<ReturnType<typeof setTimeout>>>();
     private readonly byteStreamsByGeneration = new Map<number, IByteStream>();
     private readonly byteStreamPressureByGeneration = new Map<number, ByteStreamPressureState>();
     private readonly byteStreamDisconnectHandlersByGeneration = new Map<number, Set<() => void>>();
@@ -338,6 +340,8 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         this.awaitingActivation = undefined;
         this.ws = undefined;
         this.handlerPressureByGeneration?.delete(generation);
+        for (const timer of this.requestAcknowledgmentsByGeneration?.get(generation) ?? []) clearTimeout(timer);
+        this.requestAcknowledgmentsByGeneration?.delete(generation);
         this.revokeByteStreamGeneration(generation);
         this.rejectAllRequests(new SrpcIndeterminateDeliveryError(this.clientId ?? '', new Error('Disconnected')));
         if (wasConnected) {
@@ -465,9 +469,10 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             this.closeGenerationWithError(ws, generation, 'badArg', 'Too many in-flight server requests');
             return;
         }
-        if (!notification && this.clientOptions?.protocolVersion === 4) {
-            if (!this.writeMessage({ requestId: message.requestId, requestAck: true } as TClientInput, generation)) return;
-        }
+        const cancelAcknowledgment =
+            !notification && this.clientOptions?.protocolVersion === 4
+                ? this.scheduleRequestAcknowledgment(generation, message.requestId!)
+                : undefined;
         pressure.requests++;
         pressure.bytes += bytes;
         this.handlerPressureByGeneration.set(generation, pressure);
@@ -475,6 +480,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             if (notification) await this.handleServerNotification(generation, message);
             else await this.handleServerRequest(generation, message.requestId!, message);
         } finally {
+            cancelAcknowledgment?.();
             if (this.handlerPressureByGeneration.get(generation) === pressure) {
                 pressure.requests = Math.max(0, pressure.requests - 1);
                 pressure.bytes = Math.max(0, pressure.bytes - bytes);
@@ -545,6 +551,27 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         this.requestBytes.delete(requestId);
         if (message.error !== undefined) queueItem.reject(new SrpcError(message.error, message.userError));
         else queueItem.resolve(message);
+    }
+
+    private scheduleRequestAcknowledgment(generation: number, requestId: string): () => void {
+        const timers = this.requestAcknowledgmentsByGeneration.get(generation) ?? new Set<ReturnType<typeof setTimeout>>();
+        const forget = () => {
+            timers.delete(timer);
+            if (!timers.size && this.requestAcknowledgmentsByGeneration.get(generation) === timers) {
+                this.requestAcknowledgmentsByGeneration.delete(generation);
+            }
+        };
+        const timer = setTimeout(() => {
+            forget();
+            this.writeMessage({ requestId, requestAck: true } as TClientInput, generation);
+        }, SrpcClientRequestAckDelayMs);
+        timer.unref?.();
+        timers.add(timer);
+        this.requestAcknowledgmentsByGeneration.set(generation, timers);
+        return () => {
+            clearTimeout(timer);
+            forget();
+        };
     }
 
     private async handleServerRequest(generation: number, requestId: string, message: TServerOutput & BaseMessage): Promise<void> {

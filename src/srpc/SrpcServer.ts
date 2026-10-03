@@ -32,6 +32,7 @@ import {
     SrpcMeta,
     SrpcPingPongType,
     SrpcStream,
+    SrpcClientRequestAckDelayMs,
     TSrpcMessageHandlerFnOrClass,
     encodeSrpcMessage,
     isSrpcMessageHandlerClass,
@@ -1220,7 +1221,12 @@ export class SrpcServer<
                             this.addLateReplyTombstone(stream, requestId);
                             releaseRetainedBytes();
                             reject(new SrpcIndeterminateDeliveryError(stream.clientId, new Error(`Request timeout after ${timeoutMs}ms`)));
-                            if (this.options.disconnectOnRequestTimeout !== false && stream.protocolVersion >= 4 && !acknowledged) {
+                            if (
+                                this.options.disconnectOnRequestTimeout !== false &&
+                                stream.protocolVersion >= 4 &&
+                                timeoutMs > SrpcClientRequestAckDelayMs &&
+                                !acknowledged
+                            ) {
                                 this.logger.warn('Revoking SRPC stream after an unacknowledged request timed out', {
                                     srpc: { ...logMeta, timeoutMs }
                                 });

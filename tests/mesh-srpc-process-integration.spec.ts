@@ -260,7 +260,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                     const record = await server.getRegisteredClient(clientId);
                     assert.equal(record?.connectionId, connection.id);
                 } else {
-                    const request = server.invoke(connection, 'dEcho', { value: 'unanswered' }, 1_000);
+                    const request = server.invoke(connection, 'dEcho', { value: 'unanswered' }, 5_000);
                     const rejection = assert.rejects(request);
                     await dispatched.promise;
                     if (scenario === 'requester-stops') await server.meshStop();
@@ -274,7 +274,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                         assert.equal(agentCalls, 1);
                         return;
                     }
-                    await waitFor(() => owner.disconnected.some(item => item.clientId === clientId), 2_000);
+                    await waitFor(() => owner.disconnected.some(item => item.clientId === clientId), 7_000);
                     await waitFor(async () => {
                         const record = await server.clientRegistry.getClient(clientId);
                         return record === undefined;
