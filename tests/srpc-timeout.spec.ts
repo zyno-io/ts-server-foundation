@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { describe, it, type TestContext } from 'node:test';
 
-import { createLogger, SrpcError, SrpcIndeterminateDeliveryError, SrpcServer, type BaseMessage } from '../src';
+import { createLogger, SrpcError, SrpcStreamDisconnectedError, SrpcIndeterminateDeliveryError, SrpcServer, type BaseMessage } from '../src';
 
 interface Message extends BaseMessage {
     dEchoRequest?: { value: string };
@@ -125,7 +125,7 @@ describe('sRPC timeout disconnection policy', () => {
             return true;
         });
         const pendingRejection = assert.rejects(pending, error => {
-            assert.ok(error instanceof SrpcIndeterminateDeliveryError);
+            assert.ok(error instanceof SrpcStreamDisconnectedError);
             assert.ok(error.cause instanceof Error);
             assert.equal(error.cause.message, 'Stream disconnected');
             return true;
@@ -182,7 +182,7 @@ describe('sRPC timeout disconnection policy', () => {
             const { server, connect } = createHarness(context);
             const { stream, socket } = connect();
             const request = server.invoke(stream, 'dEcho', { value: 'pending' }, 4_000);
-            const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
+            const rejection = assert.rejects(request, SrpcStreamDisconnectedError);
             server.handleStreamDataReceived(stream, { requestId: socket.sent[0].requestId, ...invalidAck });
             await rejection;
             assert.equal(stream.connected, false);

@@ -20,6 +20,7 @@ import {
     SrpcConflictError,
     SrpcError,
     SrpcIndeterminateDeliveryError,
+    SrpcStreamDisconnectedError,
     SrpcMessageFns,
     SrpcMeta,
     SrpcPingPongType,
@@ -30,7 +31,13 @@ import {
 } from '../src';
 import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
 import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
-import { isSrpcNotification, srpcMessageTypes, supportsSrpcRequestAcknowledgments } from '../src/srpc/types';
+import {
+    serializeSrpcError,
+    deserializeSrpcError,
+    isSrpcNotification,
+    srpcMessageTypes,
+    supportsSrpcRequestAcknowledgments
+} from '../src/srpc/types';
 import { DevConsoleClientMessage, DevConsoleServerMessage, PingPong, PingPongType } from '../src/devconsole/generated/devconsole';
 import { LegacyEnvelope } from './fixtures/generated/srpc-legacy';
 
@@ -92,6 +99,17 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    it('preserves the stable disconnect code through an existing protobuf envelope', () => {
+        const serialized = serializeSrpcError(new SrpcStreamDisconnectedError('endpoint'));
+        const bytes = DevConsoleServerMessage.encode({ requestId: 'request', reply: true, ...serialized }).finish();
+        const decoded = DevConsoleServerMessage.decode(bytes);
+        assert.equal(decoded.error, 'srpc_stream_disconnected');
+        const error = deserializeSrpcError(decoded.error!, decoded.userError);
+        assert.ok(error instanceof SrpcStreamDisconnectedError);
+        assert.equal(error.code, 'srpc_stream_disconnected');
+        assert.equal(error.isUserError, false);
+    });
+
     for (const direction of ['server-to-client', 'client-to-server'] as const) {
         it(`exchanges v4 receipts before a slow ${direction} handler completes`, async () => {
             const harness = await createHarness();
@@ -1380,7 +1398,7 @@ describe('srpc', () => {
         revokedReceiver.on('error', () => {});
         const pendingAtDisconnect = intentional.client.invoke('uEcho', { message: 'pending' }, 1_000);
         intentional.client.disconnect();
-        await assert.rejects(pendingAtDisconnect, SrpcIndeterminateDeliveryError);
+        await assert.rejects(pendingAtDisconnect, SrpcStreamDisconnectedError);
         assert.equal(intentional.client.ws, undefined);
         assert.equal(intentional.client.isConnected, false);
         assert.equal(intentional.client.enableReconnect, false);
@@ -1426,7 +1444,7 @@ describe('srpc', () => {
             encodeServer({ requestId: 'valid-after-invalid', dNotifyRequest: { message: 'must-not-run' } })
         );
         await Promise.all([invalid, validAfterInvalid]);
-        await assert.rejects(pendingRequest, SrpcIndeterminateDeliveryError);
+        await assert.rejects(pendingRequest, SrpcStreamDisconnectedError);
         assert.equal(handlerCalls, 0);
         assert.deepEqual(decoded.closes, [[4000, 'Invalid message format']]);
         assert.equal(decoded.client.ws, undefined);
@@ -2336,6 +2354,85 @@ describe('srpc', () => {
             await harness.close();
         }
     });
+
+    for (const direction of ['server-to-client', 'client-to-server'] as const) {
+        it(`returns a stream-disconnected error for an in-flight ${direction} call on abnormal socket close`, async () => {
+            const harness = await createHarness();
+            const client = harness.createClient(`disconnect-${direction}`);
+            const entered = deferred<void>();
+            const release = deferred<void>();
+            client.registerMessageHandler('dCompute', async () => {
+                entered.resolve();
+                await release.promise;
+                return { result: 1 };
+            });
+            harness.server.registerMessageHandler('uSlow', async () => {
+                entered.resolve();
+                await release.promise;
+                return { ok: true };
+            });
+            try {
+                await client.connect();
+                const stream = harness.server.streamsByClientId.get(`disconnect-${direction}`)!;
+                const request =
+                    direction === 'server-to-client'
+                        ? harness.server.invoke(stream, 'dCompute', { number: 2, operation: 'square' })
+                        : client.invoke('uSlow', { delayMs: 1_000 });
+                const rejection = assert.rejects(request, error => {
+                    assert.ok(error instanceof SrpcStreamDisconnectedError);
+                    assert.ok(error instanceof SrpcError);
+                    assert.equal(error.name, 'SrpcStreamDisconnectedError');
+                    assert.equal(error.code, 'srpc_stream_disconnected');
+                    assert.equal(error.isUserError, false);
+                    assert.equal(error instanceof SrpcIndeterminateDeliveryError, false);
+                    return true;
+                });
+                await entered.promise;
+                stream.$ws.terminate();
+                await rejection;
+            } finally {
+                release.resolve();
+                await harness.close();
+            }
+        });
+
+        it(`preserves the disconnect class and code across a ${direction} error reply`, async () => {
+            const unexpectedLogs: unknown[][] = [];
+            const logger = {
+                info: () => {},
+                debug: () => {},
+                warn: (...args: unknown[]) => unexpectedLogs.push(args),
+                error: (...args: unknown[]) => unexpectedLogs.push(args)
+            };
+            const harness = await createHarness({ logger });
+            const client = harness.createClient(`relay-disconnect-${direction}`);
+            (client as any).logger = logger;
+            const fail = () => {
+                throw new SrpcStreamDisconnectedError('downstream-agent');
+            };
+            harness.server.registerMessageHandler('uError', fail);
+            client.registerMessageHandler('dNotify', fail);
+            try {
+                await client.connect();
+                const stream = harness.server.streamsByClientId.get(`relay-disconnect-${direction}`)!;
+                const request =
+                    direction === 'server-to-client'
+                        ? harness.server.invoke(stream, 'dNotify', { message: 'trigger' })
+                        : client.invoke('uError', { message: 'trigger' });
+                await assert.rejects(request, error => {
+                    assert.ok(error instanceof SrpcStreamDisconnectedError);
+                    assert.equal(error.name, 'SrpcStreamDisconnectedError');
+                    assert.equal(error.code, 'srpc_stream_disconnected');
+                    assert.equal(error.isUserError, false);
+                    return true;
+                });
+                assert.equal(client.isConnected, true, 'the forwarding socket stays connected');
+                assert.deepEqual(unexpectedLogs, [], 'a downstream disconnect is an expected transport failure');
+            } finally {
+                await harness.close();
+            }
+        });
+    }
 
     it('returns user errors and request timeouts', async () => {
         const harness = await createHarness();

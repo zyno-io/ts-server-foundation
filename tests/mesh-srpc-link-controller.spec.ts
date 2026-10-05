@@ -19,6 +19,8 @@ import {
     SrpcMeshAuthenticationError,
     SrpcOwnerUnavailableError,
     SrpcStaleConnectionError,
+    SrpcError,
+    SrpcStreamDisconnectedError,
     type BaseMessage,
     type IByteStreamable,
     type RegisteredClient,
@@ -78,6 +80,35 @@ afterEach(async () => {
 });
 
 describe('MeshSrpcLinkController', () => {
+    it('reconstructs a downstream socket disconnect reported by the remote owner', async () => {
+        const controller = Object.create(MeshSrpcLinkController.prototype) as any;
+        const record = { clientId: 'agent', connectionId: 'connection', nodeId: 2 };
+        controller.options = {
+            meshKey: 'disconnect-test',
+            service: {
+                clientRegistry: { getClient: async () => record },
+                mesh: { getNode: async () => ({ linkUrl: 'ws://owner' }) }
+            },
+            runtime: {
+                request: async () => {
+                    const error = new Error('srpc_stream_disconnected');
+                    error.name = 'SrpcStreamDisconnectedError';
+                    throw error;
+                }
+            }
+        };
+        controller.assertNodeCapability = () => {};
+        const connection = { clientId: 'agent', id: 'connection', ownerNodeId: 2, touch: () => {} };
+        await assert.rejects(controller.requestOwner(connection, { type: 'invoke' }, Buffer.alloc(0), 1_000), (error: unknown) => {
+            assert.ok(error instanceof SrpcStreamDisconnectedError);
+            assert.ok(error instanceof SrpcError);
+            assert.equal(error.name, 'SrpcStreamDisconnectedError');
+            assert.equal(error.code, 'srpc_stream_disconnected');
+            assert.equal(error.isUserError, false);
+            return true;
+        });
+    });
+
     it('can opt out of automatic App mesh lifecycle registration', async () => {
         let previousApp: ReturnType<typeof getCurrentApp> | undefined;
         try {

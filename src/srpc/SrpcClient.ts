@@ -23,6 +23,8 @@ import {
     SrpcDisconnectCause,
     SrpcBackpressureError,
     SrpcError,
+    SrpcStreamDisconnectedError,
+    deserializeSrpcError,
     SrpcIndeterminateDeliveryError,
     SrpcMessageFns,
     SrpcMeta,
@@ -343,7 +345,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         for (const timer of this.requestAcknowledgmentsByGeneration?.get(generation) ?? []) clearTimeout(timer);
         this.requestAcknowledgmentsByGeneration?.delete(generation);
         this.revokeByteStreamGeneration(generation);
-        this.rejectAllRequests(new SrpcIndeterminateDeliveryError(this.clientId ?? '', new Error('Disconnected')));
+        this.rejectAllRequests(new SrpcStreamDisconnectedError(this.clientId ?? '', new Error('Disconnected')));
         if (wasConnected) {
             for (const handler of this.streamDisconnectionHandlers ?? []) {
                 try {
@@ -549,7 +551,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
         this.requestQueue.delete(requestId);
         this.requestBytes.delete(requestId);
-        if (message.error !== undefined) queueItem.reject(new SrpcError(message.error, message.userError));
+        if (message.error !== undefined) queueItem.reject(deserializeSrpcError(message.error, message.userError));
         else queueItem.resolve(message);
     }
 
@@ -588,7 +590,11 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                         this.logger?.info('SRPC server request processed');
                         return { [handlerMeta.resultType]: result } as Partial<TClientInput>;
                     } catch (error) {
-                        if (error instanceof SrpcError && error.isUserError) {
+                        if (error instanceof SrpcStreamDisconnectedError) {
+                            this.logger?.info('SRPC request interrupted by socket disconnection', {
+                                srpc: { ...logMeta, errorCode: error.code }
+                            });
+                        } else if (error instanceof SrpcError && error.isUserError) {
                             this.logger?.info('SRPC server request returned a user error', {
                                 srpc: { ...logMeta, error: logSafeText(error.message) }
                             });
@@ -949,7 +955,11 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                     this.logger?.info('SRPC server invocation completed');
                     return result as ResponseData<TServerOutput, P>;
                 } catch (error) {
-                    if (error instanceof SrpcError) {
+                    if (error instanceof SrpcStreamDisconnectedError) {
+                        this.logger?.info('SRPC invocation interrupted by socket disconnection', {
+                            srpc: { ...logMeta, errorCode: error.code }
+                        });
+                    } else if (error instanceof SrpcError) {
                         this.logger?.[error.isUserError ? 'info' : 'warn']('SRPC server invocation returned a remote error', {
                             srpc: { ...logMeta, error: logSafeText(error.message), userError: error.isUserError === true }
                         });
