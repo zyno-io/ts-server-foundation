@@ -36,6 +36,10 @@ The default alert delay is 60 seconds. `warningAfterMs` is optional and defaults
 
 Sentinel connections keep one subscription to Sentinel's `+switch-master` notifications so they reconnect as soon as a failover is announced without opening a detector connection to every discovered Sentinel. A `READONLY` response also forces master resolution and retries the rejected command, covering promotions where the old master socket remains open after becoming a replica.
 
+Sentinel-mode TCP connections and Sentinel discovery commands each have a one-second timeout by default. This bounds attempts against retired pod addresses and Sentinels that accept connections but stop answering. Application commands retain their existing retry and timeout behavior; the mesh's five-second heartbeat and fifteen-second lease remain unchanged.
+
+When `REDIS_SENTINEL_HOST` is a highly available endpoint such as a Kubernetes Service backed by all Sentinels, set `REDIS_SENTINEL_DISCOVER_PEERS=false`. Reconnects then query that endpoint instead of accumulating discovered pod addresses. Keep peer discovery enabled when the configured host is an individual Sentinel whose peers provide redundancy. These settings allow fast recovery during planned handoffs; a genuine outage that outlasts the lease still fences mesh work.
+
 ## Cache
 
 Redis-backed cache with TTL support:
@@ -182,15 +186,18 @@ All Redis utilities support independent connection configuration via environment
 
 Common variables for each prefix:
 
-| Variable                  | Description                   | Default      |
-| ------------------------- | ----------------------------- | ------------ |
-| `*_REDIS_HOST`            | Redis host                    | unset        |
-| `*_REDIS_PORT`            | Redis port                    | `6379`       |
-| `*_REDIS_PASSWORD_SECRET` | Redis authentication password | unset        |
-| `*_REDIS_PREFIX`          | Key prefix                    | package name |
-| `*_REDIS_SENTINEL_HOST`   | Redis Sentinel host           | unset        |
-| `*_REDIS_SENTINEL_PORT`   | Redis Sentinel port           | `26379`      |
-| `*_REDIS_SENTINEL_NAME`   | Redis Sentinel master name    | unset        |
+| Variable                              | Description                                                               | Default      |
+| ------------------------------------- | ------------------------------------------------------------------------- | ------------ |
+| `*_REDIS_HOST`                        | Redis host                                                                | unset        |
+| `*_REDIS_PORT`                        | Redis port                                                                | `6379`       |
+| `*_REDIS_PASSWORD_SECRET`             | Redis authentication password                                             | unset        |
+| `*_REDIS_PREFIX`                      | Key prefix                                                                | package name |
+| `*_REDIS_SENTINEL_HOST`               | Redis Sentinel host                                                       | unset        |
+| `*_REDIS_SENTINEL_PORT`               | Redis Sentinel port                                                       | `26379`      |
+| `*_REDIS_SENTINEL_NAME`               | Redis Sentinel master name                                                | unset        |
+| `*_REDIS_SENTINEL_CONNECT_TIMEOUT_MS` | TCP connection timeout in Sentinel mode (including the master connection) | `1000`       |
+| `*_REDIS_SENTINEL_COMMAND_TIMEOUT_MS` | Per-command timeout for Sentinel discovery                                | `1000`       |
+| `*_REDIS_SENTINEL_DISCOVER_PEERS`     | Add discovered Sentinels to the reconnect list                            | `true`       |
 
 For the default shared connection, omit the utility prefix and use `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD_SECRET`, `REDIS_PREFIX`, and `REDIS_SENTINEL_*`.
 

@@ -44,6 +44,14 @@ export function createRedisOptions(configPrefix?: string): {
                 ...(password === undefined ? {} : { password }),
                 ...(sentinelUsername === undefined ? {} : { sentinelUsername }),
                 ...(sentinelPassword === undefined ? {} : { sentinelPassword }),
+                // Bound both unreachable addresses and connected Sentinels
+                // that stop answering during a pod handoff. Application
+                // commands keep their existing retry/timeout semantics.
+                connectTimeout: Number(config.REDIS_SENTINEL_CONNECT_TIMEOUT_MS ?? 1_000),
+                sentinelCommandTimeout: Number(config.REDIS_SENTINEL_COMMAND_TIMEOUT_MS ?? 1_000),
+                // An HA service already selects a live Sentinel. Importing
+                // retired pod IPs bypasses that service on later reconnects.
+                updateSentinels: Boolean(config.REDIS_SENTINEL_DISCOVER_PEERS ?? true),
                 failoverDetector: true,
                 sentinelMaxConnections: 1,
                 reconnectOnError: error => (error.message.startsWith('READONLY') ? 2 : false)
@@ -74,6 +82,9 @@ export function createRedis(configPrefix?: string): RedisConnection {
     allClients.add(client);
     const unregisterCleanup = registerAppCleanup(() => closeRedisClient(client));
     client.on('end', () => {
+        // QUIT closes the data socket, but ioredis's Sentinel detector owns
+        // a separate subscription/retry timer. Release that connector too.
+        client.disconnect();
         allClients.delete(client);
         unregisterCleanup();
     });
@@ -91,6 +102,8 @@ async function closeRedisClient(client: Redis): Promise<void> {
     try {
         await client.quit();
     } catch {
+        // A disconnected server cannot acknowledge QUIT.
+    } finally {
         client.disconnect();
     }
 }
