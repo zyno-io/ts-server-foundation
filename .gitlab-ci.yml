@@ -46,7 +46,8 @@ test-and-build:
         POSTGRES_USER: root
         POSTGRES_PASSWORD: secret
         POSTGRES_DB: default
-    - name: redis:alpine
+    - name: redis:8.8.3-trixie@sha256:b2ba68d56e7e7ea88b64f4eaf307bceafc012079f227ed795785f4283a592dc0
+      alias: redis
   variables:
     MYSQL_HOST: mysql
     MYSQL_PORT: 3306
@@ -134,4 +135,4 @@ mirror:
     echo $GITHUB_SSH_KEY_B64 | base64 -d > ~/.ssh/id_ed25519
     chmod 600 ~/.ssh/id_ed25519
     git remote add github git@github.com:zyno-io/ts-server-foundation.git
-    git push -u github HEAD:main --force
+    git push -u github HEAD:main

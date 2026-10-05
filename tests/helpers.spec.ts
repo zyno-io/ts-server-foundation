@@ -335,6 +335,9 @@ describe('helper utilities', () => {
         assert.equal(broadcastRedis.options.sentinelPassword, 'default-sentinel-password');
         assert.equal(broadcastRedis.options.failoverDetector, true);
         assert.equal(broadcastRedis.options.sentinelMaxConnections, 1);
+        assert.equal(broadcastRedis.options.connectTimeout, 1_000);
+        assert.equal(broadcastRedis.options.sentinelCommandTimeout, 1_000);
+        assert.equal(broadcastRedis.options.updateSentinels, true);
         assert.equal(broadcastRedis.options.reconnectOnError?.(new Error('READONLY replica')), 2);
         assert.equal(broadcastRedis.options.reconnectOnError?.(new Error('ERR unrelated')), false);
         assert.equal(meshRedis.options.host, 'redis-mesh');
