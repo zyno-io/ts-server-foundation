@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import { describe, it, mock } from 'node:test';
 
 import {
     ClientDisconnectedError,
@@ -1294,7 +1294,11 @@ describe('mesh client tracking', () => {
         });
         markRunning(persistent, 1, persistentBackend);
         assert.equal(await persistent.registerClient('client-1', { role: 'ghost' }, true, 'connection-old'), true);
+        let now = Date.now();
         persistentBackend.unregister = async () => {
+            // Expire between the loop's check and the deadline helper. The
+            // already-started rejection must still be observed after timeout.
+            now += 11;
             throw new Error('persistent unregister failure');
         };
         persistentBackend.getClientIncludingPending = async () => {
@@ -1313,10 +1317,15 @@ describe('mesh client tracking', () => {
             mesh.running = false;
             mesh._instanceId = 0;
         };
-        await assert.rejects(persistent.unregisterClient('client-1', 'connection-old'), AggregateError);
-        assert.equal(mutable.running, false);
-        assert.equal(mesh.leaseLost, true);
-        assert.equal(persistentBackend.clients.has('client-1'), false);
+        const clock = mock.method(Date, 'now', () => now);
+        try {
+            await assert.rejects(persistent.unregisterClient('client-1', 'connection-old'), AggregateError);
+            assert.equal(mutable.running, false);
+            assert.equal(mesh.leaseLost, true);
+            assert.equal(persistentBackend.clients.has('client-1'), false);
+        } finally {
+            clock.mock.restore();
+        }
     });
 
     it('repairs committed ownership and activation when the absolute mesh lease expires mid-mutation', async () => {

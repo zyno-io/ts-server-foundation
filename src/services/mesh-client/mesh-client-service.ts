@@ -1065,7 +1065,12 @@ export class MeshClientService<TMeta, TBroadcasts extends MeshBroadcastMap = {}>
 async function withinClientDeadline<T>(promise: Promise<T>, deadlineAt: number | undefined, clientId: string): Promise<T> {
     if (deadlineAt === undefined) return promise;
     const remaining = deadlineAt - Date.now();
-    if (remaining <= 0) throw new ClientInvocationError(`Client invocation timed out: ${clientId}`);
+    if (remaining <= 0) {
+        // The caller already started the operation. Observe its rejection
+        // even when the deadline expires before Promise.race can attach.
+        void promise.catch(() => {});
+        throw new ClientInvocationError(`Client invocation timed out: ${clientId}`);
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         return await Promise.race([
