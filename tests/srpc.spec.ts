@@ -99,16 +99,19 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
-    it('preserves the stable disconnect code through an existing protobuf envelope', () => {
-        const serialized = serializeSrpcError(new SrpcStreamDisconnectedError('endpoint'));
-        const bytes = DevConsoleServerMessage.encode({ requestId: 'request', reply: true, ...serialized }).finish();
-        const decoded = DevConsoleServerMessage.decode(bytes);
-        assert.equal(decoded.error, 'srpc_stream_disconnected');
-        const error = deserializeSrpcError(decoded.error!, decoded.userError);
-        assert.ok(error instanceof SrpcStreamDisconnectedError);
-        assert.equal(error.code, 'srpc_stream_disconnected');
-        assert.equal(error.isUserError, false);
-    });
+    for (const cause of ['disconnect', 'supersede', 'timeout', 'conflict', 'badArg'] as const) {
+        it(`preserves the disconnect code and ${cause} cause through an existing protobuf envelope`, () => {
+            const serialized = serializeSrpcError(new SrpcStreamDisconnectedError('endpoint', cause));
+            const bytes = DevConsoleServerMessage.encode({ requestId: 'request', reply: true, ...serialized }).finish();
+            const decoded = DevConsoleServerMessage.decode(bytes);
+            assert.equal(decoded.error, cause === 'disconnect' ? 'srpc_stream_disconnected' : `srpc_stream_disconnected:${cause}`);
+            const error = deserializeSrpcError(decoded.error!, decoded.userError);
+            assert.ok(error instanceof SrpcStreamDisconnectedError);
+            assert.equal(error.code, 'srpc_stream_disconnected');
+            assert.equal(error.disconnectCause, cause);
+            assert.equal(error.isUserError, false);
+        });
+    }
 
     for (const direction of ['server-to-client', 'client-to-server'] as const) {
         it(`exchanges v4 receipts before a slow ${direction} handler completes`, async () => {
@@ -2383,6 +2386,7 @@ describe('srpc', () => {
                     assert.ok(error instanceof SrpcError);
                     assert.equal(error.name, 'SrpcStreamDisconnectedError');
                     assert.equal(error.code, 'srpc_stream_disconnected');
+                    assert.equal(error.disconnectCause, 'disconnect');
                     assert.equal(error.isUserError, false);
                     assert.equal(error instanceof SrpcIndeterminateDeliveryError, false);
                     return true;
@@ -2390,6 +2394,46 @@ describe('srpc', () => {
                 await entered.promise;
                 stream.$ws.terminate();
                 await rejection;
+            } finally {
+                release.resolve();
+                await harness.close();
+            }
+        });
+
+        it(`reports supersession for an in-flight ${direction} call when another client replaces the session`, async () => {
+            const harness = await createHarness();
+            const client = harness.createClient(`supersede-${direction}`);
+            const replacement = harness.createClient(`supersede-${direction}`);
+            const entered = deferred<void>();
+            const release = deferred<void>();
+            client.registerMessageHandler('dCompute', async () => {
+                entered.resolve();
+                await release.promise;
+                return { result: 1 };
+            });
+            harness.server.registerMessageHandler('uSlow', async () => {
+                entered.resolve();
+                await release.promise;
+                return { ok: true };
+            });
+            try {
+                await client.connect();
+                const stream = harness.server.streamsByClientId.get(`supersede-${direction}`)!;
+                const request =
+                    direction === 'server-to-client'
+                        ? harness.server.invoke(stream, 'dCompute', { number: 2, operation: 'square' })
+                        : client.invoke('uSlow', { delayMs: 1_000 });
+                const rejection = assert.rejects(request, error => {
+                    assert.ok(error instanceof SrpcStreamDisconnectedError);
+                    assert.equal(error.disconnectCause, 'supersede');
+                    assert.equal(error.code, 'srpc_stream_disconnected');
+                    assert.equal(error.isUserError, false);
+                    return true;
+                });
+                await entered.promise;
+                await replacement.connect({ supersede: true });
+                await rejection;
+                assert.equal(replacement.isConnected, true);
             } finally {
                 release.resolve();
                 await harness.close();
@@ -2408,7 +2452,7 @@ describe('srpc', () => {
             const client = harness.createClient(`relay-disconnect-${direction}`);
             (client as any).logger = logger;
             const fail = () => {
-                throw new SrpcStreamDisconnectedError('downstream-agent');
+                throw new SrpcStreamDisconnectedError('downstream-agent', 'supersede');
             };
             harness.server.registerMessageHandler('uError', fail);
             client.registerMessageHandler('dNotify', fail);
@@ -2423,6 +2467,7 @@ describe('srpc', () => {
                     assert.ok(error instanceof SrpcStreamDisconnectedError);
                     assert.equal(error.name, 'SrpcStreamDisconnectedError');
                     assert.equal(error.code, 'srpc_stream_disconnected');
+                    assert.equal(error.disconnectCause, 'supersede');
                     assert.equal(error.isUserError, false);
                     return true;
                 });
@@ -3608,7 +3653,7 @@ describe('srpc', () => {
         }
     });
 
-    it('reports sent requests as indeterminate across disconnect and manual reconnect boundaries', async () => {
+    it('reports supersession when manual reconnect interrupts an in-flight request', async () => {
         const harness = await createHarness();
         const entered = deferred<void>();
         const release = deferred<void>();
@@ -3618,17 +3663,35 @@ describe('srpc', () => {
             return { ok: true };
         });
         const client = harness.createClient('indeterminate-boundary');
+        const serverEntered = deferred<void>();
+        client.registerMessageHandler('dNotify', async () => {
+            serverEntered.resolve();
+            await release.promise;
+            return { received: 1 };
+        });
         const disconnectCauses: string[] = [];
         client.registerDisconnectHandler(cause => disconnectCauses.push(cause));
 
         try {
             await client.connect();
+            const stream = harness.server.streamsByClientId.get('indeterminate-boundary')!;
+            const serverRequest = harness.server.invoke(stream, 'dNotify', { message: 'pending' });
+            const serverRejection = assert.rejects(serverRequest, error => {
+                assert.ok(error instanceof SrpcStreamDisconnectedError);
+                assert.equal(error.disconnectCause, 'supersede');
+                return true;
+            });
+            await serverEntered.promise;
             const request = client.invoke('uSlow', { delayMs: 1 }, 5_000);
             await entered.promise;
             const reconnect = client.connect({ supersede: true });
             assert.deepEqual(disconnectCauses, ['supersede']);
-            await assert.rejects(request, SrpcIndeterminateDeliveryError);
-            await reconnect;
+            await assert.rejects(request, error => {
+                assert.ok(error instanceof SrpcStreamDisconnectedError);
+                assert.equal(error.disconnectCause, 'supersede');
+                return true;
+            });
+            await Promise.all([reconnect, serverRejection]);
             assert.equal(client.isConnected, true);
             await delay(20);
             assert.deepEqual(disconnectCauses, ['supersede']);

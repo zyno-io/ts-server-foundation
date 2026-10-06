@@ -128,6 +128,7 @@ describe('sRPC timeout disconnection policy', () => {
             assert.ok(error instanceof SrpcStreamDisconnectedError);
             assert.ok(error.cause instanceof Error);
             assert.equal(error.cause.message, 'Stream disconnected');
+            assert.equal(error.disconnectCause, 'timeout');
             return true;
         });
         context.mock.timers.tick(4_000);

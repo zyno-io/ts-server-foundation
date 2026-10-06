@@ -91,7 +91,7 @@ describe('MeshSrpcLinkController', () => {
             },
             runtime: {
                 request: async () => {
-                    const error = new Error('srpc_stream_disconnected');
+                    const error = new Error('srpc_stream_disconnected:supersede');
                     error.name = 'SrpcStreamDisconnectedError';
                     throw error;
                 }
@@ -104,6 +104,7 @@ describe('MeshSrpcLinkController', () => {
             assert.ok(error instanceof SrpcError);
             assert.equal(error.name, 'SrpcStreamDisconnectedError');
             assert.equal(error.code, 'srpc_stream_disconnected');
+            assert.equal(error.disconnectCause, 'supersede');
             assert.equal(error.isUserError, false);
             return true;
         });

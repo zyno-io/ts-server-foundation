@@ -725,7 +725,7 @@ export class SrpcServer<
                     } catch (error) {
                         if (error instanceof SrpcStreamDisconnectedError) {
                             this.logger?.info('SRPC request interrupted by socket disconnection', {
-                                srpc: { ...logMeta, errorCode: error.code }
+                                srpc: { ...logMeta, errorCode: error.code, disconnectCause: error.disconnectCause }
                             });
                         } else if (error instanceof SrpcError && error.isUserError) {
                             this.logger?.info('SRPC client request returned a user error', {
@@ -795,7 +795,7 @@ export class SrpcServer<
         if (stream.lastPingAt < 0) return false;
         stream.lastPingAt = -1;
         for (const queueItem of stream.$queue?.values() ?? []) {
-            queueItem.reject(new SrpcStreamDisconnectedError(stream.clientId, new Error('Stream disconnected')));
+            queueItem.reject(new SrpcStreamDisconnectedError(stream.clientId, cause, new Error('Stream disconnected')));
         }
         stream.$queue?.clear();
         this.blockedClientRequests?.delete(stream);
@@ -1282,7 +1282,7 @@ export class SrpcServer<
                 } catch (error) {
                     if (error instanceof SrpcStreamDisconnectedError) {
                         this.logger?.info('SRPC invocation interrupted by socket disconnection', {
-                            srpc: { ...logMeta, errorCode: error.code }
+                            srpc: { ...logMeta, errorCode: error.code, disconnectCause: error.disconnectCause }
                         });
                     } else if (error instanceof SrpcError) {
                         this.logger?.[error.isUserError ? 'info' : 'warn']('SRPC client invocation returned a remote error', {

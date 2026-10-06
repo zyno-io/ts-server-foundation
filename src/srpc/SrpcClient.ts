@@ -155,7 +155,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         const wasConnected = this.isConnected;
         this.clearConnectTimeout?.();
         this.connectReject?.(new Error('Connection superseded by new connect() call'));
-        this.rejectAllRequests(new SrpcIndeterminateDeliveryError(this.clientId, new Error('Connection superseded by new connect() call')));
+        this.rejectAllRequests(new SrpcStreamDisconnectedError(this.clientId, 'supersede', new Error('Connection superseded by new connect() call')));
         this.connectResolve = undefined;
         this.connectReject = undefined;
         this.isConnected = false;
@@ -178,7 +178,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         this.revokeByteStreamGeneration(previousGeneration);
         if (this.ws) {
             this.intentionalDisconnect = true;
-            this.ws.close();
+            this.ws.close(closeCodeForCause('supersede'), 'Connection superseded by new connect() call');
             this.ws = undefined;
         }
 
@@ -345,7 +345,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         for (const timer of this.requestAcknowledgmentsByGeneration?.get(generation) ?? []) clearTimeout(timer);
         this.requestAcknowledgmentsByGeneration?.delete(generation);
         this.revokeByteStreamGeneration(generation);
-        this.rejectAllRequests(new SrpcStreamDisconnectedError(this.clientId ?? '', new Error('Disconnected')));
+        this.rejectAllRequests(new SrpcStreamDisconnectedError(this.clientId ?? '', cause, new Error('Disconnected')));
         if (wasConnected) {
             for (const handler of this.streamDisconnectionHandlers ?? []) {
                 try {
@@ -592,7 +592,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                     } catch (error) {
                         if (error instanceof SrpcStreamDisconnectedError) {
                             this.logger?.info('SRPC request interrupted by socket disconnection', {
-                                srpc: { ...logMeta, errorCode: error.code }
+                                srpc: { ...logMeta, errorCode: error.code, disconnectCause: error.disconnectCause }
                             });
                         } else if (error instanceof SrpcError && error.isUserError) {
                             this.logger?.info('SRPC server request returned a user error', {
@@ -957,7 +957,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                 } catch (error) {
                     if (error instanceof SrpcStreamDisconnectedError) {
                         this.logger?.info('SRPC invocation interrupted by socket disconnection', {
-                            srpc: { ...logMeta, errorCode: error.code }
+                            srpc: { ...logMeta, errorCode: error.code, disconnectCause: error.disconnectCause }
                         });
                     } else if (error instanceof SrpcError) {
                         this.logger?.[error.isUserError ? 'info' : 'warn']('SRPC server invocation returned a remote error', {
