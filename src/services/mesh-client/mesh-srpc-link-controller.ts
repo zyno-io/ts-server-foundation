@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { byteStreamDestroyReason, type SrpcByteStream } from '../../srpc/SrpcByteStream';
 import {
     SrpcError,
+    SrpcStreamDisconnectedError,
+    deserializeSrpcError,
     SrpcBackpressureError,
     SrpcClientNotFoundError,
     SrpcIndeterminateDeliveryError,
@@ -2217,6 +2219,14 @@ async function pauseForDrain(deadlineAt: number): Promise<void> {
 function reconstructRemoteError(error: unknown, clientId: string): Error {
     if (!(error instanceof Error)) return new Error(String(error));
     switch (error.name) {
+        case 'SrpcStreamDisconnectedError': {
+            const remote = deserializeSrpcError(error.message);
+            return new SrpcStreamDisconnectedError(
+                clientId,
+                remote instanceof SrpcStreamDisconnectedError ? remote.disconnectCause : 'disconnect',
+                error
+            );
+        }
         case 'SrpcError':
             return new SrpcError(error.message, 'isUserError' in error && typeof error.isUserError === 'boolean' ? error.isUserError : undefined);
         case 'SrpcClientNotFoundError':

@@ -97,10 +97,46 @@ export class SrpcError extends Error {
     }
 }
 
+/** The socket disconnected during an in-flight request; its outcome is unknown. */
+export class SrpcStreamDisconnectedError extends SrpcError {
+    readonly code = 'srpc_stream_disconnected';
+
+    constructor(
+        clientId: string,
+        public readonly disconnectCause: SrpcDisconnectCause = 'disconnect',
+        cause?: unknown
+    ) {
+        super(`sRPC socket disconnected while the request was in flight; outcome is unknown: ${clientId}`, false);
+        this.name = 'SrpcStreamDisconnectedError';
+        this.cause = cause;
+    }
+}
+
+/** Restore transport errors from the stable code carried by existing envelope codecs. */
+export function deserializeSrpcError(message: string, userError?: boolean): SrpcError {
+    if (message === 'srpc_stream_disconnected') return new SrpcStreamDisconnectedError('');
+    // Non-default causes use a reserved machine token in the same protobuf
+    // field. Only accept the existing lifecycle causes, never message text.
+    for (const cause of ['supersede', 'timeout', 'conflict', 'badArg'] as const) {
+        if (message === `srpc_stream_disconnected:${cause}`) return new SrpcStreamDisconnectedError('', cause);
+    }
+    return new SrpcError(message, userError);
+}
+
 /** Preserve the explicit sRPC error contract without promoting ordinary errors. */
 export function serializeSrpcError(error: unknown): { error: string; userError?: boolean } {
     const isSrpcError = error instanceof SrpcError;
-    const message = isSrpcError ? error.message : String(error);
+    // Reserve a machine code in the existing error field so protobuf codecs do
+    // not silently discard the identity. Callers receive the class and code,
+    // and never need to inspect English messages.
+    const message =
+        error instanceof SrpcStreamDisconnectedError
+            ? error.disconnectCause === 'disconnect'
+                ? error.code
+                : `${error.code}:${error.disconnectCause}`
+            : isSrpcError
+              ? error.message
+              : String(error);
     const userError = isSrpcError && typeof error.isUserError === 'boolean' ? error.isUserError : undefined;
     return {
         error: message,

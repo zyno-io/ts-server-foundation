@@ -33,5 +33,6 @@ export {
     SrpcOwnerUnavailableError,
     SrpcPingPongType,
     SrpcStaleConnectionError,
+    SrpcStreamDisconnectedError,
     SrpcStreamClosedError
 } from './types';
