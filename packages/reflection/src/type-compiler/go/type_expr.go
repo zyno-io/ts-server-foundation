@@ -299,9 +299,12 @@ func genericTypeExpr(info *fileInfo, reg *registry, name string, args []string, 
 			for i := range alias.params {
 				out = replaceTypeParameter(out, aliasParamName(alias, i), aliasArg(alias, args, i))
 			}
-			if hasUnresolvedTypeParameters(out, alias.params) || isUnsupportedTypeSyntax(out) {
+			if hasUnresolvedTypeParameters(out, alias.params) {
 				return "{kind: 2, typeName: " + quote(name) + ", typeArguments: [" + mapJoin(args, func(arg string) string { return typeExprCtx(info, reg, arg, ctx) }) + "]}"
 			}
+			// Let the type encoder classify the instantiated body. Its supported
+			// object, tuple, array, and generic syntax also contains brackets and
+			// colons; the unsupported-syntax fallback runs after those cases.
 			return withTypeName(typeExprCtx(owner, reg, out, ctx), name)
 		}
 		if decl, owner, _, ok := resolveInterfaceDeclRefAt(info, reg, name, ctx.pos); ok {

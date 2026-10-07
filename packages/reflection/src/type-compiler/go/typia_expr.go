@@ -838,9 +838,6 @@ func hasPreferredTypiaBlockerSyntaxDeep(info *fileInfo, reg *registry, raw strin
 		}
 		return false
 	}
-	if strings.Contains(raw, "[") || strings.Contains(raw, "]") {
-		return false
-	}
 	if name, args, ok := generic(raw); ok {
 		if (name == "Pattern" || name == "Validate") && (len(args) == 0 || !isLiteralStringType(args[0])) {
 			return true
@@ -890,6 +887,12 @@ func hasPreferredTypiaBlockerSyntaxDeep(info *fileInfo, reg *registry, raw strin
 				return true
 			}
 		}
+		return false
+	}
+	// Inspect the generic itself before treating brackets as checker-resolved
+	// indexed access. A tuple in its options must not erase runtime metadata
+	// (for example FileUpload<{ allowedTypes: ['image/png'] }>).
+	if strings.Contains(raw, "[") || strings.Contains(raw, "]") {
 		return false
 	}
 	if isIdentifierName(raw) {
