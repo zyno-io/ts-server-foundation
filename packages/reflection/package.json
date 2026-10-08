@@ -3,6 +3,11 @@
     "version": "0.0.0-dev",
     "description": "Browser-neutral TypeScript reflection and runtime metadata",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/zyno-io/ts-server-foundation.git",
+        "directory": "packages/reflection"
+    },
     "files": [
         "dist/",
         "package.json",

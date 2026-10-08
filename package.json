@@ -3,6 +3,10 @@
     "version": "0.0.0-dev",
     "description": "TypeScript server foundation with reflected type metadata",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/zyno-io/ts-server-foundation.git"
+    },
     "bin": {
         "ts-server-foundation": "dist/src/cli/tsf.js",
         "tsf": "dist/src/cli/tsf.js",

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: npm-publish-${{ github.sha }}
@@ -16,15 +17,6 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Check publishing secret
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::Set the GitHub Actions secret NPM_PUBLISH_TOKEN before publishing to npm."
-            exit 1
-          fi
-
       - name: Checkout mirrored commit
         uses: actions/checkout@v7
         with:
@@ -36,6 +28,10 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
+
+      - name: Setup npm for trusted publishing
+        # Trusted publishing requires npm 11.5.1 or newer.
+        run: npm install --global npm@11 --registry https://registry.npmjs.org/
 
       - name: Enable Corepack
         run: corepack enable
@@ -59,9 +55,7 @@ jobs:
 
           node scripts/prepare-release-packages.cjs "${BUILD_VERSION}"
 
-      - name: Publish reflection and foundation to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+      - name: Publish reflection and foundation with OIDC
         run: |
           (cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)
           npm publish --registry https://registry.npmjs.org/ --access public
