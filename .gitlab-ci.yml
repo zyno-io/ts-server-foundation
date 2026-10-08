@@ -118,10 +118,6 @@ deploy:
       (cd packages/reflection && npm publish --registry https://${PRIVATE_NPM_HOST}/)
       npm publish --registry https://${PRIVATE_NPM_HOST}/
 
-      npm config set //registry.npmjs.org/:_authToken="${NPM_PUBLISH_TOKEN}"
-      (cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)
-      npm publish --registry https://registry.npmjs.org/ --access public
-
 mirror:
   stage: mirror
   rules:

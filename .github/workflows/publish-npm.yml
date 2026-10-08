@@ -1,0 +1,67 @@
+name: Publish npm Packages
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ !contains(github.event.head_commit.message, '[skip deploy]') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check publishing secret
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::Set the GitHub Actions secret NPM_PUBLISH_TOKEN before publishing to npm."
+            exit 1
+          fi
+
+      - name: Checkout mirrored commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Build release packages
+        run: yarn build
+
+      - name: Prepare package versions
+        run: |
+          # Keep the commit-time version identical to GitLab's test-and-build job.
+          BUILD_VERSION=$(TZ=UTC0 git show -s --format=%cd --date=format-local:'%y.%-m%d.%-H%M' HEAD)
+          BUILD_VERSION=$(printf '%s\n' "$BUILD_VERSION" | sed 's/\.[0]*\([0-9][0-9]*\)$/.\1/')
+
+          if [ "$GITHUB_REF_NAME" != "main" ]; then
+            SHORT_SHA=$(echo "$GITHUB_SHA" | head -c 7)
+            BUILD_VERSION="${BUILD_VERSION}-canary.${SHORT_SHA}"
+          fi
+
+          node scripts/prepare-release-packages.cjs "${BUILD_VERSION}"
+
+      - name: Publish reflection and foundation to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+        run: |
+          (cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)
+          npm publish --registry https://registry.npmjs.org/ --access public
