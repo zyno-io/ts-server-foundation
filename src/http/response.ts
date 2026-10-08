@@ -2,6 +2,8 @@ import type { ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
 
+import { guardNodeResponseErrors, isClosedClientError, writeToNodeResponse } from './node-response-write';
+
 export type HttpHeaderOutput = Record<string, string | number | readonly string[]>;
 export type HttpWriteHeadHeaders = HttpHeaderOutput | [string, string | number | readonly string[]][];
 
@@ -101,6 +103,10 @@ export class NodeHttpResponse extends HttpResponse {
     constructor(readonly outgoing: ServerResponse) {
         super();
         this.statusCode = outgoing.statusCode || 200;
+        guardNodeResponseErrors(outgoing);
+        outgoing.on('error', error => {
+            if (!isClosedClientError(error)) this.destroy(error);
+        });
         outgoing.once('finish', () => this.emit('finish'));
         outgoing.once('close', () => {
             // A client disconnect destroys the native response without ending this wrapper.
@@ -130,10 +136,16 @@ export class NodeHttpResponse extends HttpResponse {
 
         // writeHead() is the controller's explicit hand-off to Node's response. Commit it now so
         // the router does not interpret an otherwise void result as an empty response and end it.
-        this.outgoing.statusCode = this.statusCode;
-        for (const [name, value] of Object.entries(this.rawHeaders)) this.outgoing.setHeader(name, value);
-        if (typeof statusMessageOrHeaders === 'string') this.outgoing.writeHead(statusCode, statusMessageOrHeaders);
-        else this.outgoing.writeHead(statusCode);
+        const written = writeToNodeResponse(this.outgoing, () => {
+            this.outgoing.statusCode = this.statusCode;
+            for (const [name, value] of Object.entries(this.rawHeaders)) this.outgoing.setHeader(name, value);
+            if (typeof statusMessageOrHeaders === 'string') this.outgoing.writeHead(statusCode, statusMessageOrHeaders);
+            else this.outgoing.writeHead(statusCode);
+        });
+        if (!written) {
+            this.destroy();
+            return this;
+        }
         this.committed = true;
         this.streaming = true;
         return this;
@@ -142,8 +154,13 @@ export class NodeHttpResponse extends HttpResponse {
     override write(chunk: any, encoding?: BufferEncoding | ((error?: Error | null) => void), callback?: (error?: Error | null) => void): boolean {
         this.streaming = true;
         if (this.chunks.length) {
-            this.commitHeaders();
-            for (const buffered of this.chunks.splice(0)) this.outgoing.write(buffered);
+            for (const buffered of this.chunks.splice(0)) {
+                const written = writeToNodeResponse(this.outgoing, () => {
+                    this.commitHeaders();
+                    this.outgoing.write(buffered);
+                });
+                if (!written) break;
+            }
         }
         return super.write(chunk, encoding as BufferEncoding, callback);
     }
@@ -159,8 +176,14 @@ export class NodeHttpResponse extends HttpResponse {
             callback();
             return;
         }
-        this.commitHeaders();
-        this.outgoing.write(chunk, encoding, callback);
+        const written = writeToNodeResponse(this.outgoing, () => {
+            this.commitHeaders();
+            this.outgoing.write(chunk, encoding, error => this.completeWrite(callback, error));
+        });
+        if (!written) {
+            this.destroy();
+            callback();
+        }
     }
 
     override _final(callback: (error?: Error | null) => void): void {
@@ -172,11 +195,18 @@ export class NodeHttpResponse extends HttpResponse {
             callback();
             return;
         }
-        this.commitHeaders();
-        this.outgoing.end(callback);
+        const written = writeToNodeResponse(this.outgoing, () => {
+            this.commitHeaders();
+            this.outgoing.end((error?: Error | null) => this.completeWrite(callback, error));
+        });
+        if (!written) callback();
     }
 
     override destroy(error?: Error): this {
+        if (isClosedClientError(error)) {
+            this.outgoing.destroy();
+            return super.destroy();
+        }
         if (error && !this.outgoing.destroyed) this.outgoing.destroy(error);
         return super.destroy(error);
     }
@@ -189,15 +219,29 @@ export class NodeHttpResponse extends HttpResponse {
 
     flush(): void {
         if (this.headersSent) return;
-        this.commitHeaders();
-        this.outgoing.end(this.body);
+        writeToNodeResponse(this.outgoing, () => {
+            this.commitHeaders();
+            this.outgoing.end(this.body);
+        });
     }
 
     override flushHeaders(): void {
         if (this.headersSent) return;
         this.streaming = true;
-        this.commitHeaders();
-        this.outgoing.flushHeaders();
+        writeToNodeResponse(this.outgoing, () => {
+            this.commitHeaders();
+            this.outgoing.flushHeaders();
+        });
+    }
+
+    private completeWrite(callback: (error?: Error | null) => void, error?: Error | null): void {
+        if (isClosedClientError(error)) {
+            this.outgoing.destroy();
+            this.destroy();
+            callback();
+            return;
+        }
+        callback(error);
     }
 
     private commitHeaders(): void {
