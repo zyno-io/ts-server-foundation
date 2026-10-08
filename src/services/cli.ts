@@ -10,8 +10,16 @@ export abstract class CliServiceCommand {
         const app = r(App);
         const hasRunService = this.runService !== CliServiceCommand.prototype.runService;
         let serviceStarted = false;
-        const removeShutdownListener = app.on(onServerShutdown, () => {
+        let serviceFinished: Promise<void> | undefined;
+        let finishService: (() => void) | undefined;
+        let requestShutdown!: () => void;
+        const shutdownRequested = new Promise<void>(resolve => {
+            requestShutdown = resolve;
+        });
+        const removeShutdownListener = app.on(onServerShutdown, async () => {
             this.shouldRun = false;
+            requestShutdown();
+            await serviceFinished;
         });
 
         this.stop = () => {
@@ -22,16 +30,25 @@ export abstract class CliServiceCommand {
         try {
             app.configureForCliService();
             await app.http.listen();
+            if (!this.shouldRun) return;
+            serviceFinished = new Promise<void>(resolve => {
+                finishService = resolve;
+            });
             await this.startService();
             serviceStarted = true;
 
             if (hasRunService) await this.runService();
-            else await new Promise<void>(resolve => app.on(onServerShutdown, () => resolve()));
+            else await shutdownRequested;
         } finally {
             this.shouldRun = false;
-            removeShutdownListener();
-            if (serviceStarted) await this.shutdownService();
-            await app.stop();
+            try {
+                if (serviceStarted) await this.shutdownService();
+            } finally {
+                // Release the shutdown listener before joining stop(), or each would await the other.
+                finishService?.();
+                removeShutdownListener();
+                await app.stop();
+            }
         }
     }
 

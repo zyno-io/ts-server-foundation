@@ -95,6 +95,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly commandModuleIds: Map<ClassType, number>;
     private started = false;
     private starting?: Promise<void>;
+    private stopping?: Promise<void>;
     private signalHandlers?: Partial<Record<NodeJS.Signals, () => void>>;
     private forceWorkerRunner = false;
     private readonly devConsole?: DevConsoleRuntime;
@@ -273,6 +274,16 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async stop(): Promise<void> {
+        // Install the shared promise before dispatching listeners, which can trigger another stop.
+        this.stopping ??= Promise.resolve()
+            .then(() => this.stopInternal())
+            .finally(() => {
+                this.stopping = undefined;
+            });
+        await this.stopping;
+    }
+
+    private async stopInternal(): Promise<void> {
         const errors: unknown[] = [];
         const runStep = async (step: () => void | Promise<void>) => {
             try {

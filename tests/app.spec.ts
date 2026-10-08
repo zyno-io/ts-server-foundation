@@ -520,6 +520,50 @@ describe('app lifecycle', () => {
         await app.stop();
     });
 
+    it('coalesces concurrent stops through lifecycle dispatch and resource cleanup', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({});
+        let shutdownCalls = 0;
+        let cleanupCalls = 0;
+        let releaseShutdown!: () => void;
+        const shutdownGate = new Promise<void>(resolve => {
+            releaseShutdown = resolve;
+        });
+        let releaseCleanup!: () => void;
+        const cleanupGate = new Promise<void>(resolve => {
+            releaseCleanup = resolve;
+        });
+        app.on(onServerShutdown, async () => {
+            shutdownCalls++;
+            await shutdownGate;
+        });
+        app.registerCleanup(async () => {
+            cleanupCalls++;
+            await cleanupGate;
+        });
+        await app.start();
+
+        const completed: number[] = [];
+        const first = app.stop().then(() => completed.push(1));
+        const second = app.stop().then(() => completed.push(2));
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(shutdownCalls, 1);
+        assert.equal(cleanupCalls, 0);
+        assert.deepStrictEqual(completed, []);
+
+        releaseShutdown();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(cleanupCalls, 1);
+        assert.deepStrictEqual(completed, []);
+
+        releaseCleanup();
+        await Promise.all([first, second]);
+        await app.stop();
+        assert.equal(shutdownCalls, 1);
+        assert.equal(cleanupCalls, 1);
+        assert.deepStrictEqual(completed, [1, 2]);
+    });
+
     it('auto-constructs registered decorated providers only', async () => {
         process.env.APP_ENV = 'test';
         const constructed: string[] = [];
