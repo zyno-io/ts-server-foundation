@@ -16,10 +16,15 @@ export abstract class CliServiceCommand {
         const shutdownRequested = new Promise<void>(resolve => {
             requestShutdown = resolve;
         });
-        const removeShutdownListener = app.on(onServerShutdown, async () => {
+        const requestServiceShutdown = () => {
             this.shouldRun = false;
             requestShutdown();
-            await serviceFinished;
+        };
+        const removeShutdownListener = app.on(onServerShutdown, requestServiceShutdown);
+        const removeShutdownDrain = app.registerShutdownDrain(() => {
+            // Lifecycle dispatch may stop at an earlier failing listener.
+            requestServiceShutdown();
+            return serviceFinished;
         });
 
         this.stop = () => {
@@ -37,15 +42,16 @@ export abstract class CliServiceCommand {
             await this.startService();
             serviceStarted = true;
 
-            if (hasRunService) await this.runService();
-            else await shutdownRequested;
+            if (hasRunService && this.shouldRun) await this.runService();
+            else if (!hasRunService) await shutdownRequested;
         } finally {
             this.shouldRun = false;
             try {
                 if (serviceStarted) await this.shutdownService();
             } finally {
-                // Release the shutdown listener before joining stop(), or each would await the other.
+                // Release the drain before joining stop(), or each would await the other.
                 finishService?.();
+                removeShutdownDrain();
                 removeShutdownListener();
                 await app.stop();
             }

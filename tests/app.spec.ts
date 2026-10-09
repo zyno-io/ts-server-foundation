@@ -564,6 +564,57 @@ describe('app lifecycle', () => {
         assert.deepStrictEqual(completed, [1, 2]);
     });
 
+    for (const started of [false, true]) {
+        it(`waits for all shutdown drains before cleanup after ${started ? 'a shutdown listener failure' : 'partial startup'}`, async () => {
+            process.env.APP_ENV = 'test';
+            const app = createApp({});
+            const shutdownError = new Error('shutdown listener failed');
+            const drainError = new Error('drain failed');
+            let cleanupCalls = 0;
+            let drainCalls = 0;
+            let finishDrain!: () => void;
+            const drainGate = new Promise<void>(resolve => {
+                finishDrain = resolve;
+            });
+            app.on(onServerShutdown, () => {
+                throw shutdownError;
+            });
+            const unregister = app.registerShutdownDrain(() => {
+                throw new Error('Unregistered drain must not run');
+            });
+            unregister();
+            app.registerShutdownDrain(async () => {
+                drainCalls++;
+                await drainGate;
+            });
+            app.registerShutdownDrain(() => {
+                drainCalls++;
+                throw drainError;
+            });
+            app.registerCleanup(() => {
+                cleanupCalls++;
+            });
+            if (started) await app.start();
+
+            const stopping = app.stop();
+            const rejected = assert.rejects(stopping, error => {
+                if (started) {
+                    assert.ok(error instanceof AggregateError);
+                    assert.deepStrictEqual(error.errors, [shutdownError, drainError]);
+                } else assert.equal(error, drainError);
+                return true;
+            });
+            await new Promise<void>(resolve => setImmediate(resolve));
+            assert.equal(drainCalls, 2);
+            assert.equal(cleanupCalls, 0);
+            finishDrain();
+            await rejected;
+            await app.stop();
+            assert.equal(drainCalls, 2);
+            assert.equal(cleanupCalls, 1);
+        });
+    }
+
     it('auto-constructs registered decorated providers only', async () => {
         process.env.APP_ENV = 'test';
         const constructed: string[] = [];

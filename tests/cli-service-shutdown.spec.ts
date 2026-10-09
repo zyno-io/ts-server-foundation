@@ -167,6 +167,122 @@ describe('CLI service shutdown', () => {
         await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
     });
 
+    it('drains even when an earlier shutdown listener throws', { timeout: 5000 }, async () => {
+        const taskStarted = deferred();
+        const finishTask = deferred();
+        const shutdownEntered = deferred();
+        const order: string[] = [];
+        const app = createServiceApp();
+        const pool = createPool(order);
+        const driver = new MySQLDriver(pool.pool);
+        const error = new Error('shutdown listener failed');
+        app.on(
+            onServerShutdown,
+            () => {
+                shutdownEntered.resolve();
+                throw error;
+            },
+            10
+        );
+        class Service extends CliServiceCommand {
+            protected async runService(): Promise<void> {
+                taskStarted.resolve();
+                await finishTask.promise;
+                assert.equal(this.shouldRun, false);
+                const connection = await driver.acquire();
+                await connection.release();
+                order.push('task-finished');
+            }
+        }
+
+        const execution = new Service().execute();
+        const executionRejected = assert.rejects(execution, error);
+        await taskStarted.promise;
+        const stopping = app.stop();
+        const stopRejected = assert.rejects(stopping, error);
+        try {
+            await shutdownEntered.promise;
+            await setImmediate();
+            assert.equal(pool.ended, false);
+        } finally {
+            finishTask.resolve();
+            await Promise.all([executionRejected, stopRejected]);
+        }
+        assert.deepStrictEqual(order, ['task-finished', 'pool-closed']);
+        await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
+    });
+
+    it('allows later shutdown listeners to release service work before draining', { timeout: 5000 }, async () => {
+        const taskStarted = deferred();
+        const finishTask = deferred();
+        const order: string[] = [];
+        const app = createServiceApp();
+        const pool = createPool(order);
+        let driver!: MySQLDriver;
+        app.on(onServerShutdown, () => finishTask.resolve(), -10);
+        class Service extends CliServiceCommand {
+            protected async startService(): Promise<void> {
+                // Pools can be created after the CLI command registers its drain.
+                driver = new MySQLDriver(pool.pool);
+            }
+
+            protected async runService(): Promise<void> {
+                taskStarted.resolve();
+                await finishTask.promise;
+                assert.equal(this.shouldRun, false);
+                const connection = await driver.acquire();
+                await connection.release();
+                order.push('task-finished');
+            }
+        }
+
+        const execution = new Service().execute();
+        await taskStarted.promise;
+        await Promise.all([app.stop(), execution]);
+        assert.deepStrictEqual(order, ['task-finished', 'pool-closed']);
+        await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
+    });
+
+    it('does not start a new service turn when shutdown arrives during startup', { timeout: 5000 }, async () => {
+        const startupEntered = deferred();
+        const finishStartup = deferred();
+        const shutdownEntered = deferred();
+        const order: string[] = [];
+        const app = createServiceApp();
+        const pool = createPool(order);
+        const driver = new MySQLDriver(pool.pool);
+        app.on(onServerShutdown, () => shutdownEntered.resolve());
+        let turns = 0;
+        class Service extends CliServiceCommand {
+            protected async startService(): Promise<void> {
+                startupEntered.resolve();
+                await finishStartup.promise;
+            }
+
+            protected async runService(): Promise<void> {
+                turns++;
+            }
+
+            protected async shutdownService(): Promise<void> {
+                const connection = await driver.acquire();
+                await connection.release();
+                order.push('service-finished');
+            }
+        }
+
+        const execution = new Service().execute();
+        await startupEntered.promise;
+        const stopping = app.stop();
+        await shutdownEntered.promise;
+        await setImmediate();
+        assert.equal(pool.ended, false);
+        finishStartup.resolve();
+        await Promise.all([stopping, execution]);
+        assert.equal(turns, 0);
+        assert.deepStrictEqual(order, ['service-finished', 'pool-closed']);
+        await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
+    });
+
     for (const failure of ['runService', 'shutdownService'] as const) {
         it(`releases the drain barrier when ${failure} fails`, { timeout: 5000 }, async () => {
             const taskStarted = deferred();

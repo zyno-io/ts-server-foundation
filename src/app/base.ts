@@ -101,6 +101,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly devConsole?: DevConsoleRuntime;
     private openApiDumpTimer?: NodeJS.Timeout;
     private readonly registeredCleanups: RegisteredAppCleanup[] = [];
+    private readonly shutdownDrains = new Set<AppCleanup>();
     private cliServiceMode = false;
     private replMode = false;
 
@@ -225,6 +226,19 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         };
     }
 
+    /**
+     * Register work that must finish before application resources are released.
+     *
+     * Drains run after shutdown events, even if a listener failed or startup was incomplete. All
+     * drains are requested before waiting for them. The returned function unregisters completed work.
+     */
+    registerShutdownDrain(drain: AppCleanup): () => void {
+        this.shutdownDrains.add(drain);
+        return () => {
+            this.shutdownDrains.delete(drain);
+        };
+    }
+
     async start(): Promise<void> {
         if (this.started) return;
         if (this.starting) {
@@ -296,6 +310,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         if (!this.started) {
             this.clearOpenApiDumpTimer();
             await runStep(() => this.devConsole?.close());
+            await runStep(() => this.runShutdownDrains());
             await runStep(() => this.runRegisteredCleanups());
             if (errors.length === 1) throw errors[0];
             if (errors.length > 1) throw new AggregateError(errors, 'Application shutdown failed');
@@ -312,6 +327,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         await runStep(() => this.devConsole?.close());
         await runStep(() => this.http.close());
         await runStep(() => this.events.dispatch(onServerShutdown, undefined));
+        await runStep(() => this.runShutdownDrains());
         await runStep(() => this.runRegisteredCleanups());
         await runStep(() => this.shutdownTelemetryIfInstalled());
         this.started = false;
@@ -552,6 +568,21 @@ Examples:
         if (!OtelState.tracerProvider && !OtelState.meterProvider) return;
         const { shutdownTelemetry } = await import('../telemetry/otel/index');
         await shutdownTelemetry();
+    }
+
+    private async runShutdownDrains(): Promise<void> {
+        const errors: unknown[] = [];
+        while (this.shutdownDrains.size) {
+            const drains = [...this.shutdownDrains];
+            this.shutdownDrains.clear();
+            const results = await Promise.allSettled(drains.map(drain => Promise.resolve().then(drain)));
+            for (const result of results) {
+                if (result.status === 'rejected') errors.push(result.reason);
+            }
+        }
+
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'Application shutdown drain failed');
     }
 
     private async runRegisteredCleanups(): Promise<void> {
