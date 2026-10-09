@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import type { ServerResponse } from 'node:http';
 import { describe, it } from 'node:test';
 
@@ -184,6 +184,86 @@ describe('HTTP response disconnects', () => {
         assert.equal(actual, error);
     });
 
+    it('preserves native errors after the wrapper has already closed', async () => {
+        const outgoing = nativeResponse();
+        const response = new NodeHttpResponse(outgoing);
+        const closed = once(response, 'close');
+        response.destroy();
+        await closed;
+        const error = writeError('EIO');
+        assert.throws(
+            () => outgoing.emit('error', error),
+            candidate => candidate === error
+        );
+    });
+
+    it('keeps unrelated native errors visible to an existing owner after the wrapper closes', async () => {
+        const outgoing = nativeResponse();
+        const response = new NodeHttpResponse(outgoing);
+        const closed = once(response, 'close');
+        response.destroy();
+        await closed;
+        const error = writeError('EIO');
+        let observed: Error | undefined;
+        response.once('error', actual => {
+            observed = actual;
+        });
+        outgoing.emit('error', error);
+        assert.equal(observed, error);
+    });
+
+    for (const operation of ['write', 'end'] as const) {
+        it(`preserves a late ${operation} callback error after the wrapper closes`, async () => {
+            const outgoing = nativeResponse();
+            const response = new NodeHttpResponse(outgoing);
+            response.writeHead(200);
+            let complete!: (error: Error) => void;
+            if (operation === 'write') {
+                outgoing.write = ((_chunk: unknown, _encoding: unknown, callback: (error: Error) => void) => {
+                    complete = callback;
+                    return true;
+                }) as ServerResponse['write'];
+                response.write('data');
+            } else {
+                outgoing.end = ((callback: (error: Error) => void) => {
+                    complete = callback;
+                    return outgoing;
+                }) as ServerResponse['end'];
+                response.end();
+            }
+            const closed = once(response, 'close');
+            response.destroy();
+            await closed;
+            const error = writeError('EIO');
+            assert.throws(
+                () => complete(error),
+                candidate => candidate === error
+            );
+        });
+    }
+
+    it('preserves an existing one-time native error owner', () => {
+        const outgoing = nativeResponse();
+        let observed: Error | undefined;
+        outgoing.once('error', error => {
+            observed = error;
+        });
+        writeNodeResponse(outgoing, new MemoryHttpResponse());
+        const error = writeError('EIO');
+        assert.doesNotThrow(() => outgoing.emit('error', error));
+        assert.equal(observed, error);
+    });
+
+    it('preserves connection errors explicitly supplied by the response owner', async () => {
+        const outgoing = nativeResponse();
+        const response = new NodeHttpResponse(outgoing);
+        const error = writeError('ECONNRESET');
+        const observed = new Promise<Error>(resolve => response.once('error', resolve));
+        response.destroy(error);
+        const actual = await observed;
+        assert.equal(actual, error);
+    });
+
     it('does not attempt a fallback response after the client has disconnected', () => {
         const outgoing = nativeResponse();
         Object.defineProperty(outgoing, 'destroyed', { value: true });
@@ -212,9 +292,60 @@ describe('HTTP response disconnects', () => {
             const { once } = require('node:events');
             const { createServer, get } = require('node:http');
             const { connect } = require('node:net');
-            const { writeNodeResponse, writeUnhandledNodeError } = require(${JSON.stringify(require.resolve('../src/http/base'))});
+            const { HttpServerRuntime, writeNodeResponse, writeUnhandledNodeError } = require(${JSON.stringify(require.resolve('../src/http/base'))});
             const { MemoryHttpResponse, NodeHttpResponse } = require(${JSON.stringify(require.resolve('../src/http/response'))});
             async function run() {
+                // Keep the server side in the close race, and deterministically inject the native
+                // write failure. This exercises the real request listener and fallback catch path.
+                for (const code of ['EPIPE', 'ECONNRESET']) {
+                    for (const mode of ['response', 'fallback']) {
+                        let accept, release, finish;
+                        const accepted = new Promise(resolve => accept = resolve);
+                        const released = new Promise(resolve => release = resolve);
+                        const ended = new Promise(resolve => finish = resolve);
+                        let writes = 0;
+                        const runtime = new HttpServerRuntime({
+                            config: { APP_ENV: 'test', HTTP_REQUEST_LOGGING_MODE: 'none', HTTP_KEEP_ALIVE_TIMEOUT_MS: 70000 },
+                            logger: { scoped() { return this; } },
+                            router: {
+                                hasFallbackController() { return false; },
+                                async handle(request, response) {
+                                    if (request.path === '/health') { response.end('alive'); return response; }
+                                    response.outgoing.once('close', finish);
+                                    response.outgoing.end = () => {
+                                        writes++;
+                                        throw Object.assign(new Error('write ' + code), { code, syscall: 'write' });
+                                    };
+                                    accept();
+                                    await released;
+                                    if (mode === 'fallback') throw new Error('controller failed');
+                                    response.end('late body');
+                                    return response;
+                                }
+                            }
+                        });
+                        const server = await runtime.listen(0, '127.0.0.1');
+                        const port = server.address().port;
+                        const client = connect(port, '127.0.0.1');
+                        await once(client, 'connect');
+                        client.write('GET /disconnect HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n');
+                        await accepted;
+                        client.destroy();
+                        release();
+                        await ended;
+                        const body = await new Promise((resolve, reject) => {
+                            get({ host: '127.0.0.1', port, path: '/health', agent: false }, response => {
+                                let body = '';
+                                response.on('data', chunk => body += chunk);
+                                response.on('end', () => resolve(body));
+                                response.on('error', reject);
+                            }).on('error', reject);
+                        });
+                        assert.equal(body, 'alive');
+                        assert.equal(writes, 1, 'the failed response must not be ended again');
+                        await runtime.close();
+                    }
+                }
                 for (const mode of ['memory', 'fallback', 'buffered', 'stream']) {
                     let received;
                     const accepted = new Promise(resolve => received = resolve);

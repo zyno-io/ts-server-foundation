@@ -105,7 +105,10 @@ export class NodeHttpResponse extends HttpResponse {
         this.statusCode = outgoing.statusCode || 200;
         guardNodeResponseErrors(outgoing);
         outgoing.on('error', error => {
-            if (!isClosedClientError(error)) this.destroy(error);
+            if (isClosedClientError(error)) return;
+            // Buffered responses can finish and destroy the wrapper before the native write fails.
+            if (!this.destroyed) this.destroy(error);
+            else if (this.errored !== error) this.emit('error', error);
         });
         outgoing.once('finish', () => this.emit('finish'));
         outgoing.once('close', () => {
@@ -203,10 +206,6 @@ export class NodeHttpResponse extends HttpResponse {
     }
 
     override destroy(error?: Error): this {
-        if (isClosedClientError(error)) {
-            this.outgoing.destroy();
-            return super.destroy();
-        }
         if (error && !this.outgoing.destroyed) this.outgoing.destroy(error);
         return super.destroy(error);
     }
@@ -241,6 +240,7 @@ export class NodeHttpResponse extends HttpResponse {
             callback();
             return;
         }
+        if (error && this.destroyed && this.errored !== error) this.emit('error', error);
         callback(error);
     }
 

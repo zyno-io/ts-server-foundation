@@ -12,7 +12,7 @@ export function isClosedClientError(error: unknown): boolean {
 export function guardNodeResponseErrors(outgoing: ServerResponse): void {
     if (guardedResponses.has(outgoing)) return;
     guardedResponses.add(outgoing);
-    outgoing.on('error', error => {
+    outgoing.prependListener('error', error => {
         if (isClosedClientError(error)) {
             outgoing.destroy();
             return;
