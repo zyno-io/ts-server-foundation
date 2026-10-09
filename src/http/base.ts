@@ -17,6 +17,7 @@ import {
 } from './cors';
 import { applyHttpContext } from './context';
 import { HttpRequest, type HttpMethod } from './request';
+import { writeToNodeResponse } from './node-response-write';
 import { getHttpRequestErrorState } from './request-error-state';
 import { MemoryHttpResponse, NodeHttpResponse, type HttpResponse } from './response';
 import { HttpRouter } from './router';
@@ -323,19 +324,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function writeNodeResponse(outgoing: ServerResponse, response: MemoryHttpResponse): void {
-    outgoing.statusCode = response.statusCode;
-    for (const [name, value] of Object.entries(response.headers)) outgoing.setHeader(name, value);
-    outgoing.end(response.body);
+    writeToNodeResponse(outgoing, () => {
+        outgoing.statusCode = response.statusCode;
+        for (const [name, value] of Object.entries(response.headers)) outgoing.setHeader(name, value);
+        outgoing.end(response.body);
+    });
 }
 
 export function writeUnhandledNodeError(outgoing: ServerResponse, error: unknown): void {
     void error;
-    if (!outgoing.headersSent) {
-        outgoing.writeHead(500, { 'content-type': 'application/json' });
-        if (!outgoing.writableEnded) outgoing.end(JSON.stringify({ error: 'Internal Server Error' }));
-        return;
-    }
-    if (!outgoing.writableEnded) outgoing.end();
+    writeToNodeResponse(outgoing, () => {
+        if (!outgoing.headersSent) {
+            outgoing.writeHead(500, { 'content-type': 'application/json' });
+            outgoing.end(JSON.stringify({ error: 'Internal Server Error' }));
+            return;
+        }
+        outgoing.end();
+    });
 }
 
 function normalizeMethod(method: string | undefined): HttpMethod {
