@@ -10,8 +10,21 @@ export abstract class CliServiceCommand {
         const app = r(App);
         const hasRunService = this.runService !== CliServiceCommand.prototype.runService;
         let serviceStarted = false;
-        const removeShutdownListener = app.on(onServerShutdown, () => {
+        let serviceFinished: Promise<void> | undefined;
+        let finishService: (() => void) | undefined;
+        let requestShutdown!: () => void;
+        const shutdownRequested = new Promise<void>(resolve => {
+            requestShutdown = resolve;
+        });
+        const requestServiceShutdown = () => {
             this.shouldRun = false;
+            requestShutdown();
+        };
+        const removeShutdownListener = app.on(onServerShutdown, requestServiceShutdown);
+        const removeShutdownDrain = app.registerShutdownDrain(() => {
+            // Lifecycle dispatch may stop at an earlier failing listener.
+            requestServiceShutdown();
+            return serviceFinished;
         });
 
         this.stop = () => {
@@ -22,16 +35,26 @@ export abstract class CliServiceCommand {
         try {
             app.configureForCliService();
             await app.http.listen();
+            if (!this.shouldRun) return;
+            serviceFinished = new Promise<void>(resolve => {
+                finishService = resolve;
+            });
             await this.startService();
             serviceStarted = true;
 
-            if (hasRunService) await this.runService();
-            else await new Promise<void>(resolve => app.on(onServerShutdown, () => resolve()));
+            if (hasRunService && this.shouldRun) await this.runService();
+            else if (!hasRunService) await shutdownRequested;
         } finally {
             this.shouldRun = false;
-            removeShutdownListener();
-            if (serviceStarted) await this.shutdownService();
-            await app.stop();
+            try {
+                if (serviceStarted) await this.shutdownService();
+            } finally {
+                // Release the drain before joining stop(), or each would await the other.
+                finishService?.();
+                removeShutdownDrain();
+                removeShutdownListener();
+                await app.stop();
+            }
         }
     }
 

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { Container, getProviderToken, isStructuredProvider } from '../di';
 import { normalizeModule } from '../di';
 import { BaseDatabase } from '../database';
@@ -95,11 +97,14 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly commandModuleIds: Map<ClassType, number>;
     private started = false;
     private starting?: Promise<void>;
+    private stopping?: { completion: Promise<void>; context: object };
+    private readonly shutdownContext = new AsyncLocalStorage<object>();
     private signalHandlers?: Partial<Record<NodeJS.Signals, () => void>>;
     private forceWorkerRunner = false;
     private readonly devConsole?: DevConsoleRuntime;
     private openApiDumpTimer?: NodeJS.Timeout;
     private readonly registeredCleanups: RegisteredAppCleanup[] = [];
+    private readonly shutdownDrains = new Set<AppCleanup>();
     private cliServiceMode = false;
     private replMode = false;
 
@@ -224,6 +229,26 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         };
     }
 
+    /**
+     * Register work that must finish before registered application cleanups run.
+     *
+     * Drains run after shutdown events, even if a listener failed or startup was incomplete. All
+     * drains are requested before waiting for them. The returned function unregisters completed work.
+     */
+    registerShutdownDrain(drain: AppCleanup): () => void {
+        let active = true;
+        const registered: AppCleanup = () => {
+            if (!active) return;
+            active = false;
+            return drain();
+        };
+        this.shutdownDrains.add(registered);
+        return () => {
+            active = false;
+            this.shutdownDrains.delete(registered);
+        };
+    }
+
     async start(): Promise<void> {
         if (this.started) return;
         if (this.starting) {
@@ -273,6 +298,25 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async stop(): Promise<void> {
+        let stopping = this.stopping;
+        // Shutdown callbacks cannot join their own stop; external callers still wait for completion.
+        if (stopping && this.shutdownContext.getStore() === stopping.context) return;
+        if (!stopping) {
+            const context = {};
+            const completion = Promise.resolve()
+                .then(() => this.shutdownContext.run(context, () => this.stopInternal()))
+                .finally(() => {
+                    this.stopping = undefined;
+                    this.shutdownContext.disable();
+                });
+            // Install the shared operation before dispatching listeners, which can trigger another stop.
+            stopping = { completion, context };
+            this.stopping = stopping;
+        }
+        await stopping.completion;
+    }
+
+    private async stopInternal(): Promise<void> {
         const errors: unknown[] = [];
         const runStep = async (step: () => void | Promise<void>) => {
             try {
@@ -285,6 +329,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         if (!this.started) {
             this.clearOpenApiDumpTimer();
             await runStep(() => this.devConsole?.close());
+            await runStep(() => this.runShutdownDrains());
             await runStep(() => this.runRegisteredCleanups());
             if (errors.length === 1) throw errors[0];
             if (errors.length > 1) throw new AggregateError(errors, 'Application shutdown failed');
@@ -301,6 +346,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         await runStep(() => this.devConsole?.close());
         await runStep(() => this.http.close());
         await runStep(() => this.events.dispatch(onServerShutdown, undefined));
+        await runStep(() => this.runShutdownDrains());
         await runStep(() => this.runRegisteredCleanups());
         await runStep(() => this.shutdownTelemetryIfInstalled());
         this.started = false;
@@ -543,6 +589,21 @@ Examples:
         await shutdownTelemetry();
     }
 
+    private async runShutdownDrains(): Promise<void> {
+        const errors: unknown[] = [];
+        while (this.shutdownDrains.size) {
+            const drains = [...this.shutdownDrains];
+            this.shutdownDrains.clear();
+            const results = await Promise.allSettled(drains.map(drain => Promise.resolve().then(drain)));
+            for (const result of results) {
+                if (result.status === 'rejected') errors.push(result.reason);
+            }
+        }
+
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'Application shutdown drain failed');
+    }
+
     private async runRegisteredCleanups(): Promise<void> {
         const errors: unknown[] = [];
         while (this.registeredCleanups.length) {
@@ -567,7 +628,9 @@ Examples:
         this.signalHandlers = {};
         for (const signal of signals) {
             const handler = () => {
-                this.stop()
+                // Signals always wait for full shutdown, including signals emitted by a shutdown callback.
+                const stopping = this.shutdownContext.exit(() => this.stop());
+                stopping
                     .catch(error => {
                         console.error(error);
                         process.exit(1);
