@@ -565,6 +565,145 @@ describe('app lifecycle', () => {
     });
 
     for (const started of [false, true]) {
+        it(
+            `allows shutdown callbacks to reenter stop while external callers wait (${started ? 'started' : 'partial startup'})`,
+            { timeout: 5000 },
+            async () => {
+                process.env.APP_ENV = 'test';
+                const app = createApp({});
+                const order: string[] = [];
+                let finishCleanup!: () => void;
+                const cleanupGate = new Promise<void>(resolve => {
+                    finishCleanup = resolve;
+                });
+                app.on(onServerShutdownRequested, async () => {
+                    await app.stop();
+                    order.push('requested');
+                });
+                app.on(onServerShutdown, async () => {
+                    await app.stop();
+                    order.push('shutdown');
+                });
+                app.registerShutdownDrain(async () => {
+                    await app.stop();
+                    order.push('drain');
+                });
+                app.registerCleanup(async () => {
+                    await app.stop();
+                    order.push('cleanup-started');
+                    await cleanupGate;
+                    order.push('cleanup-finished');
+                });
+                if (started) await app.start();
+
+                const completed: number[] = [];
+                const first = app.stop().then(() => completed.push(1));
+                const second = app.stop().then(() => completed.push(2));
+                await new Promise<void>(resolve => setImmediate(resolve));
+                assert.deepStrictEqual(order, started ? ['requested', 'shutdown', 'drain', 'cleanup-started'] : ['drain', 'cleanup-started']);
+                assert.deepStrictEqual(completed, []);
+                finishCleanup();
+                await Promise.all([first, second]);
+                assert.deepStrictEqual(completed, [1, 2]);
+                assert.equal(order.filter(step => step === 'cleanup-finished').length, 1);
+            }
+        );
+    }
+
+    it('keeps independent registrations of the same shutdown drain', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({});
+        let drainCalls = 0;
+        let cleanupCalls = 0;
+        let finishDrain!: () => void;
+        const drainGate = new Promise<void>(resolve => {
+            finishDrain = resolve;
+        });
+        const drain = async () => {
+            drainCalls++;
+            await drainGate;
+        };
+        const unregisterFirst = app.registerShutdownDrain(drain);
+        const unregisterSecond = app.registerShutdownDrain(drain);
+        unregisterFirst();
+        app.registerCleanup(() => {
+            cleanupCalls++;
+        });
+
+        const stopping = app.stop();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(drainCalls, 1);
+        assert.equal(cleanupCalls, 0);
+        // Removing an already-running drain cannot release the wait on its work.
+        unregisterSecond();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(cleanupCalls, 0);
+        finishDrain();
+        await stopping;
+        assert.equal(drainCalls, 1);
+        assert.equal(cleanupCalls, 1);
+    });
+
+    it('makes callbacks from an earlier shutdown wait for the current shutdown', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({});
+        let wakeEarlierCallback!: () => void;
+        const callbackGate = new Promise<void>(resolve => {
+            wakeEarlierCallback = resolve;
+        });
+        let earlierCallback!: Promise<void>;
+        let earlierCallbackFinished = false;
+        app.registerShutdownDrain(() => {
+            earlierCallback = callbackGate.then(async () => {
+                await app.stop();
+                earlierCallbackFinished = true;
+            });
+        });
+        await app.start();
+        await app.stop();
+
+        let finishCleanup!: () => void;
+        const cleanupGate = new Promise<void>(resolve => {
+            finishCleanup = resolve;
+        });
+        let cleanupStarted = false;
+        app.registerCleanup(async () => {
+            cleanupStarted = true;
+            await cleanupGate;
+        });
+        await app.start();
+        const stopping = app.stop();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(cleanupStarted, true);
+        wakeEarlierCallback();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(earlierCallbackFinished, false);
+        finishCleanup();
+        await Promise.all([stopping, earlierCallback]);
+        assert.equal(earlierCallbackFinished, true);
+    });
+
+    it('honors drain unregistration before a snapshotted callback starts', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({});
+        const order: string[] = [];
+        let unregisterLater!: () => void;
+        app.registerShutdownDrain(() => {
+            unregisterLater();
+            order.push('first');
+        });
+        unregisterLater = app.registerShutdownDrain(() => {
+            order.push('unregistered');
+        });
+        app.registerCleanup(() => {
+            order.push('cleanup');
+        });
+
+        await app.stop();
+        assert.deepStrictEqual(order, ['first', 'cleanup']);
+    });
+
+    for (const started of [false, true]) {
         it(`waits for all shutdown drains before cleanup after ${started ? 'a shutdown listener failure' : 'partial startup'}`, async () => {
             process.env.APP_ENV = 'test';
             const app = createApp({});

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 import { Container, getProviderToken, isStructuredProvider } from '../di';
 import { normalizeModule } from '../di';
 import { BaseDatabase } from '../database';
@@ -95,7 +97,8 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly commandModuleIds: Map<ClassType, number>;
     private started = false;
     private starting?: Promise<void>;
-    private stopping?: Promise<void>;
+    private stopping?: { completion: Promise<void>; context: object };
+    private readonly shutdownContext = new AsyncLocalStorage<object>();
     private signalHandlers?: Partial<Record<NodeJS.Signals, () => void>>;
     private forceWorkerRunner = false;
     private readonly devConsole?: DevConsoleRuntime;
@@ -227,15 +230,22 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     /**
-     * Register work that must finish before application resources are released.
+     * Register work that must finish before registered application cleanups run.
      *
      * Drains run after shutdown events, even if a listener failed or startup was incomplete. All
      * drains are requested before waiting for them. The returned function unregisters completed work.
      */
     registerShutdownDrain(drain: AppCleanup): () => void {
-        this.shutdownDrains.add(drain);
+        let active = true;
+        const registered: AppCleanup = () => {
+            if (!active) return;
+            active = false;
+            return drain();
+        };
+        this.shutdownDrains.add(registered);
         return () => {
-            this.shutdownDrains.delete(drain);
+            active = false;
+            this.shutdownDrains.delete(registered);
         };
     }
 
@@ -288,13 +298,22 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     }
 
     async stop(): Promise<void> {
-        // Install the shared promise before dispatching listeners, which can trigger another stop.
-        this.stopping ??= Promise.resolve()
-            .then(() => this.stopInternal())
-            .finally(() => {
-                this.stopping = undefined;
-            });
-        await this.stopping;
+        let stopping = this.stopping;
+        // Shutdown callbacks cannot join their own stop; external callers still wait for completion.
+        if (stopping && this.shutdownContext.getStore() === stopping.context) return;
+        if (!stopping) {
+            const context = {};
+            const completion = Promise.resolve()
+                .then(() => this.shutdownContext.run(context, () => this.stopInternal()))
+                .finally(() => {
+                    this.stopping = undefined;
+                    this.shutdownContext.disable();
+                });
+            // Install the shared operation before dispatching listeners, which can trigger another stop.
+            stopping = { completion, context };
+            this.stopping = stopping;
+        }
+        await stopping.completion;
     }
 
     private async stopInternal(): Promise<void> {
@@ -609,7 +628,9 @@ Examples:
         this.signalHandlers = {};
         for (const signal of signals) {
             const handler = () => {
-                this.stop()
+                // Signals always wait for full shutdown, including signals emitted by a shutdown callback.
+                const stopping = this.shutdownContext.exit(() => this.stop());
+                stopping
                     .catch(error => {
                         console.error(error);
                         process.exit(1);

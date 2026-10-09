@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 
-import { CliServiceCommand, createApp, MySQLDriver, type MySQLPoolLike, onServerShutdown } from '../src';
+import { CliServiceCommand, createApp, MySQLDriver, type MySQLPoolLike, onServerShutdown, onServerShutdownRequested } from '../src';
 
 const originalEnv = { ...process.env };
 
@@ -58,7 +58,7 @@ function createPool(order: string[]) {
 }
 
 describe('CLI service shutdown', () => {
-    for (const shutdown of ['SIGTERM', 'command.stop'] as const) {
+    for (const shutdown of ['SIGTERM', 'command.stop', 'shutdown callback SIGTERM'] as const) {
         it(`drains an in-flight MySQL task before closing its pool on ${shutdown}`, { timeout: 5000 }, async t => {
             const order: string[] = [];
             const taskStarted = deferred();
@@ -105,8 +105,13 @@ describe('CLI service shutdown', () => {
             const execution = command.execute();
             try {
                 await taskStarted.promise;
+                if (shutdown === 'shutdown callback SIGTERM') {
+                    app.on(onServerShutdownRequested, () => {
+                        process.emit('SIGTERM');
+                    });
+                }
                 if (shutdown === 'SIGTERM') process.emit('SIGTERM');
-                else command.stop();
+                else if (shutdown === 'command.stop') command.stop();
                 const concurrentStop = app.stop();
                 let stopFinished = false;
                 void concurrentStop.then(() => {
@@ -128,8 +133,8 @@ describe('CLI service shutdown', () => {
 
                 finishShutdownHook.resolve();
                 await Promise.all([execution, concurrentStop]);
-                if (shutdown === 'SIGTERM') await exited.promise;
-                assert.deepStrictEqual(exits, shutdown === 'SIGTERM' ? [0] : []);
+                if (shutdown !== 'command.stop') await exited.promise;
+                assert.deepStrictEqual(exits, shutdown === 'command.stop' ? [] : [0]);
                 assert.equal(pool.acquisitions, 3);
                 assert.deepStrictEqual(order, ['task-finished', 'service-finished', 'pool-closed']);
                 await assert.rejects(() => driver.acquire(), /MySQL pool is closed/);
