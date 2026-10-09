@@ -1,6 +1,10 @@
 import type { ServerResponse } from 'node:http';
 
-const guardedResponses = new WeakSet<ServerResponse>();
+interface ResponseErrorGuard {
+    onUnhandledError?: (error: Error) => void;
+}
+
+const guardedResponses = new WeakMap<ServerResponse, ResponseErrorGuard>();
 
 /** @internal Only transport errors caused by a disconnected HTTP client are benign. */
 export function isClosedClientError(error: unknown): boolean {
@@ -9,16 +13,24 @@ export function isClosedClientError(error: unknown): boolean {
 }
 
 /** @internal Cover asynchronous errors as well as synchronous write failures. */
-export function guardNodeResponseErrors(outgoing: ServerResponse): void {
-    if (guardedResponses.has(outgoing)) return;
-    guardedResponses.add(outgoing);
+export function guardNodeResponseErrors(outgoing: ServerResponse, onUnhandledError?: (error: Error) => void): void {
+    const existing = guardedResponses.get(outgoing);
+    if (existing) {
+        if (onUnhandledError) existing.onUnhandledError = onUnhandledError;
+        return;
+    }
+    const guard: ResponseErrorGuard = { onUnhandledError };
+    guardedResponses.set(outgoing, guard);
     outgoing.prependListener('error', error => {
         if (isClosedClientError(error)) {
             outgoing.destroy();
             return;
         }
         // Preserve EventEmitter's unhandled-error behavior, or let an existing owner handle it.
-        if (outgoing.listenerCount('error') === 1) throw error;
+        if (outgoing.listenerCount('error') === 1) {
+            if (guard.onUnhandledError) guard.onUnhandledError(error);
+            else throw error;
+        }
     });
 }
 

@@ -103,8 +103,7 @@ export class NodeHttpResponse extends HttpResponse {
     constructor(readonly outgoing: ServerResponse) {
         super();
         this.statusCode = outgoing.statusCode || 200;
-        guardNodeResponseErrors(outgoing);
-        outgoing.on('error', error => {
+        guardNodeResponseErrors(outgoing, error => {
             if (isClosedClientError(error)) return;
             // Buffered responses can finish and destroy the wrapper before the native write fails.
             if (!this.destroyed) this.destroy(error);

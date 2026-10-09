@@ -254,6 +254,41 @@ describe('HTTP response disconnects', () => {
         assert.equal(observed, error);
     });
 
+    for (const timing of ['before', 'after'] as const) {
+        for (const persistent of [true, false]) {
+            it(`preserves a ${persistent ? 'persistent' : 'one-time'} native error owner installed ${timing} the wrapper`, async () => {
+                const outgoing = nativeResponse();
+                const error = writeError('EIO');
+                const nativeErrors: Error[] = [];
+                const wrapperErrors: Error[] = [];
+                const ownError = () => {
+                    if (persistent) outgoing.on('error', actual => nativeErrors.push(actual));
+                    else outgoing.once('error', actual => nativeErrors.push(actual));
+                };
+                if (timing === 'before') ownError();
+                const response = new NodeHttpResponse(outgoing);
+                response.on('error', actual => wrapperErrors.push(actual));
+                if (timing === 'after') ownError();
+                outgoing.emit('error', error);
+                await new Promise<void>(resolve => setImmediate(resolve));
+                assert.deepEqual(nativeErrors, [error]);
+                assert.deepEqual(wrapperErrors, []);
+            });
+        }
+    }
+
+    it('surfaces the next native error after a one-time owner has been consumed', async () => {
+        const outgoing = nativeResponse();
+        outgoing.once('error', () => {});
+        const response = new NodeHttpResponse(outgoing);
+        outgoing.emit('error', writeError('EIO'));
+        const error = writeError('ENOSPC');
+        const observed = new Promise<Error>(resolve => response.once('error', resolve));
+        outgoing.emit('error', error);
+        const actual = await observed;
+        assert.equal(actual, error);
+    });
+
     it('preserves connection errors explicitly supplied by the response owner', async () => {
         const outgoing = nativeResponse();
         const response = new NodeHttpResponse(outgoing);
