@@ -47,7 +47,7 @@ async function start(): Promise<void> {
             leaderOptions: { ttlMs: 1_000, renewalIntervalMs: 250, retryDelayMs: 150 }
         },
         meshLink: { secret: meshSecret, path: meshPath },
-        extractRegistryMetadata: stream => ({ role: stream.meta.role }),
+        extractRegistryMetadata: stream => ({ role: stream.meta.role, activeCalls: [] }),
         autoLifecycle: false
     });
     server.setClientAuthorizer(() => true);

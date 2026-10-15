@@ -55,7 +55,12 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
         process.env.POD_IP = '127.0.0.1';
         const meshKey = `mesh-process-${randomUUID()}`;
         const app = createApp({ enableHealthcheck: false });
-        const server = new MeshSrpcServer<ClientMetadata, MeshClientMessage, MeshServerMessage, { role: string }>({
+        const server = new MeshSrpcServer<
+            ClientMetadata,
+            MeshClientMessage,
+            MeshServerMessage,
+            { role: string; activeCalls?: Array<{ callId: string }> }
+        >({
             logger: createLogger('MeshSrpcProcessParent'),
             clientMessage: JsonMessage as SrpcMessageFns<MeshClientMessage>,
             serverMessage: JsonMessage as SrpcMessageFns<MeshServerMessage>,
@@ -84,10 +89,20 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             localClient = createClient(`ws://127.0.0.1:${parentPort}${clientPath}`, 'parent-client', 'parent');
             const meshChildClient = createClient(`ws://127.0.0.1:${meshNode.port}${clientPath}`, 'child-client', 'child');
             childClient = meshChildClient;
-            const orphaned: Array<{ nodeId: number; clientId: string; connectionId: string; role: string }> = [];
+            const orphaned: Array<{ nodeId: number; clientId: string; connectionId: string; role: string; activeCalls: string[] }> = [];
             server.onNodeClientsOrphaned((nodeId, clients) => {
                 orphaned.push(
-                    ...clients.map(client => ({ nodeId, clientId: client.clientId, connectionId: client.connectionId, role: client.metadata.role }))
+                    ...clients.map(client => {
+                        const activeCalls = client.metadata.activeCalls;
+                        assert.ok(Array.isArray(activeCalls));
+                        return {
+                            nodeId,
+                            clientId: client.clientId,
+                            connectionId: client.connectionId,
+                            role: client.metadata.role,
+                            activeCalls: activeCalls.map(call => call.callId)
+                        };
+                    })
                 );
             });
 
@@ -111,7 +126,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
             );
             assert.deepEqual(
                 getSrpcRegistryMetadata(remote, stream => ({ role: stream.meta.role })),
-                { role: 'child' }
+                { role: 'child', activeCalls: [] }
             );
 
             const remoteConnection = remote as Exclude<MeshSrpcConnection<ClientMetadata, { role: string }>, SrpcStream<ClientMetadata>>;
@@ -145,6 +160,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                 const orphan = orphaned.find(client => client.nodeId === meshNode.nodeId && client.clientId === 'orphan-client');
                 assert.ok(orphan);
                 assert.equal(orphan.role, 'orphan');
+                assert.deepEqual(orphan.activeCalls, []);
                 assert.equal(orphan.connectionId, orphanRecord.connectionId);
                 assert.equal(await server.getRegisteredClient('orphan-client'), undefined);
                 assert.equal(
