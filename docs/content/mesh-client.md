@@ -392,6 +392,10 @@ An exact remote takeover fence defers its offline lifecycle transition through t
 
 ## Resource limits and orphan delivery
 
+The Redis registry preserves the JSON representation of application metadata, including empty arrays versus empty objects and nested values. Lua scripts handle ownership fields but carry application metadata as opaque JSON; TypeScript decodes it at registry and orphan-delivery boundaries. Undefined metadata remains distinct from JSON null. Readers accept legacy records without the opaque representation. During rolling upgrades, records retain the legacy metadata field for older readers; only updated readers can guarantee exact JSON shape. Data already changed by a legacy writer cannot be reconstructed generically.
+
+Explicit orphan snapshots also retain an opaque JSON representation of their client list through enqueue, claim, NACK, and redelivery. Both legacy and opaque representations count toward the existing durable queue byte limits. The public metadata types, exact ownership fences, and callback retry/acknowledgement rules are unchanged.
+
 The built-in Redis registry defaults to 1,024 UTF-8 bytes per client ID, 64 KiB of JSON metadata, 10,000 clients per node, 256-entry listing and cleanup batches, 4,096 authentication principals, and 256 live nonces per principal. Configure these through `registryOptions`. Core `SrpcServer` also defaults to 128 pending handshakes, 10,000 live streams, 1,024 client-ID bytes, 64 KiB merged client metadata, and 256 local replay principals.
 
 Registry listing uses incremental Redis scans. Dead-node cleanup removes fenced records in bounded batches and persists active clients in bounded durable orphan chunks; pending reservations do not produce offline callbacks. Each mesh heartbeat refreshes the registry safety TTL for the node's client set and shared client hash, so a healthy quiet node retains its registrations.

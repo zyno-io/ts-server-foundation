@@ -98,7 +98,8 @@ local value = cjson.encode({
     connectionId = connectionId,
     processId = processId,
     hasMetadata = hasMetadata,
-    metadata = cjson.decode(metadataJson)
+    metadata = cjson.decode(metadataJson),
+    metadataJson = metadataJson
 })
 redis.call("hset", clientsKey, clientId, value)
 redis.call("sadd", newSetKey, clientId)
@@ -149,7 +150,8 @@ local value = cjson.encode({
     connectionId = parsed.connectionId,
     processId = parsed.processId,
     hasMetadata = hasMetadata,
-    metadata = cjson.decode(metadataJson)
+    metadata = cjson.decode(metadataJson),
+    metadataJson = metadataJson
 })
 redis.call("hset", clientsKey, clientId, value)
 redis.call("sadd", setKey, clientId)
@@ -236,7 +238,8 @@ local value = cjson.encode({
     connectionId = parsed.connectionId,
     processId = parsed.processId,
     hasMetadata = hasMetadata,
-    metadata = cjson.decode(metadataJson)
+    metadata = cjson.decode(metadataJson),
+    metadataJson = metadataJson
 })
 redis.call("hset", clientsKey, clientId, value)
 redis.call("expire", clientsKey, ttl)
@@ -472,7 +475,7 @@ if redis.call("sismember", newSetKey, clientId) == 0
     return { "node-capacity", "", "" }
 end
 redis.call("hset", claimsKey, clientId, cjson.encode({
-    claimId = claimId, nodeId = tonumber(nodeId), metadata = cjson.decode(metadataJson),
+    claimId = claimId, nodeId = tonumber(nodeId), metadata = cjson.decode(metadataJson), metadataJson = metadataJson,
     hasMetadata = hasMetadata, state = state, connectionId = connectionId,
     processId = processId, connectedAt = connectedAt, expiresAt = nowMs + ${CLAIM_TTL_MS},
     previous = previous, preimage = preimage, expectCurrent = expectCurrent,
@@ -558,7 +561,7 @@ if redis.call("sismember", newSetKey, clientId) == 0 and redis.call("scard", new
     return 0
 end
 local value = cjson.encode({ nodeId = claim.nodeId, connectedAt = claim.connectedAt, state = claim.state, claimId = claim.claimId,
-    connectionId = claim.connectionId, processId = claim.processId, hasMetadata = claim.hasMetadata, metadata = claim.metadata })
+    connectionId = claim.connectionId, processId = claim.processId, hasMetadata = claim.hasMetadata, metadata = claim.metadata, metadataJson = claim.metadataJson })
 redis.call("hset", clientsKey, clientId, value)
 redis.call("sadd", newSetKey, clientId)
 redis.call("hdel", claimsKey, clientId)
@@ -745,6 +748,7 @@ end
 local itemTable = {
     nodeId = tonumber(ARGV[2]),
     clients = cjson.decode(ARGV[3]),
+    clientsJson = ARGV[3],
     expiresAt = now + ${ORPHAN_TTL_SECONDS * 1000},
     claimedUntil = 0,
     claimToken = ""
@@ -1129,6 +1133,7 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
                 connectedAt: number;
                 hasMetadata?: boolean;
                 metadata: TMeta;
+                metadataJson?: string;
                 state?: MeshClientRegistrationState;
                 connectionId?: string;
                 processId?: string;
@@ -1140,7 +1145,12 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
                 connectionId: parsed.connectionId,
                 processId: parsed.processId,
                 connectedAt: parsed.connectedAt,
-                metadata: parsed.hasMetadata === false ? (undefined as TMeta) : parsed.metadata,
+                metadata:
+                    parsed.hasMetadata === false
+                        ? (undefined as TMeta)
+                        : typeof parsed.metadataJson === 'string'
+                          ? (JSON.parse(parsed.metadataJson) as TMeta)
+                          : parsed.metadata,
                 state: parsed.state ?? 'active',
                 claimId: parsed.claimId
             };
@@ -1487,9 +1497,13 @@ export class MeshClientRedisRegistry<TMeta> implements MeshClientRegistryBackend
         const item = JSON.parse(raw) as {
             nodeId: number;
             clients?: RegisteredClient<TMeta>[];
+            clientsJson?: string;
             records?: string[];
         };
-        const clients = item.clients ?? this.decodeRemovedRecords(item.records ?? []);
+        const clients =
+            typeof item.clientsJson === 'string'
+                ? (JSON.parse(item.clientsJson) as RegisteredClient<TMeta>[])
+                : (item.clients ?? this.decodeRemovedRecords(item.records ?? []));
         return { id, nodeId: item.nodeId, clients, claimToken: token };
     }
 

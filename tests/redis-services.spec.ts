@@ -339,6 +339,120 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
         assert.equal(await first.unregister('fenced-client', 'connection-old'), true);
     });
 
+    it('preserves JSON metadata shapes through Redis ownership and durable cleanup', async () => {
+        const values: unknown[] = [
+            undefined,
+            null,
+            false,
+            0,
+            '[]',
+            [],
+            {},
+            { activeCalls: [], nested: [{ empty: [], object: {} }], calls: [{ callId: 'live' }], text: 'quotes " and unicode ☎' }
+        ];
+        for (const metadata of values) {
+            const backend = new MeshClientRedisRegistry<unknown>(`metadata-shapes-${randomUUID()}`);
+            await backend.register('direct', 1, metadata, false, 'direct-connection');
+            const direct = await backend.getClient('direct');
+            assert.deepEqual(direct?.metadata, metadata);
+
+            await backend.reserve('pending', 1, metadata, false, 'pending-connection');
+            const pending = await backend.getClientIncludingPending('pending');
+            assert.deepEqual(pending?.metadata, metadata);
+            assert.equal(await backend.activate('pending', 1, metadata, 'pending-connection'), true);
+            assert.equal(await backend.updateMetadata('direct', 1, metadata, 'direct-connection'), true);
+
+            const claim = await backend.claim('claimed', 1, metadata, 'active', false, 'claimed-connection');
+            assert.equal(claim.status, 'ok');
+            if (claim.status !== 'ok') throw new Error('claim failed');
+            assert.equal(await backend.commitClaim('claimed', 1, claim.claimId), true);
+            const replacement = await backend.claim('claimed', 2, metadata, 'active', true, 'replacement-connection');
+            assert.equal(replacement.status, 'ok');
+            if (replacement.status !== 'ok') throw new Error('replacement claim failed');
+            assert.deepEqual(replacement.previous?.metadata, metadata);
+            assert.equal(await backend.removeClaimPrevious('claimed', 2, replacement.claimId), true);
+            assert.equal(await backend.commitClaim('claimed', 2, replacement.claimId), true);
+
+            const listed = await backend.listClients();
+            assert.equal(listed.length, 3);
+            for (const client of listed) assert.deepEqual(client.metadata, metadata);
+            const local = await backend.listClientsForNode(1);
+            assert.equal(local.length, 2);
+            for (const client of local) assert.deepEqual(client.metadata, metadata);
+
+            const removed = await backend.cleanupNodeAndEnqueueOrphaned(1);
+            assert.equal(removed.length, 2);
+            for (const client of removed) assert.deepEqual(client.metadata, metadata);
+            const delivery = await backend.claimOrphaned('first-worker');
+            assert.ok(delivery);
+            for (const client of delivery.clients) assert.deepEqual(client.metadata, metadata);
+            assert.equal(await backend.nackOrphaned(delivery.id, delivery.claimToken), true);
+            const retry = await backend.claimOrphaned('second-worker');
+            assert.ok(retry);
+            for (const client of retry.clients) assert.deepEqual(client.metadata, metadata);
+            assert.equal(await backend.ackOrphaned(retry.id, retry.claimToken), true);
+            assert.equal(await backend.claimOrphaned('final-worker'), undefined);
+        }
+    });
+
+    it('preserves JSON metadata in explicitly enqueued orphan snapshots and redelivery', async () => {
+        const backend = new MeshClientRedisRegistry<unknown>(`explicit-metadata-shapes-${randomUUID()}`);
+        const values: unknown[] = [null, [], {}, { activeCalls: [], nested: [[], {}] }];
+        const clients = values.map((metadata, index) => ({
+            clientId: `client-${index}`,
+            nodeId: 7,
+            connectionId: `connection-${index}`,
+            connectedAt: 1,
+            metadata
+        }));
+        await backend.enqueueOrphaned(7, clients);
+        const first = await backend.claimOrphaned('first-worker');
+        assert.ok(first);
+        assert.deepEqual(first.clients, clients);
+        assert.equal(await backend.nackOrphaned(first.id, first.claimToken), true);
+        const retry = await backend.claimOrphaned('second-worker');
+        assert.ok(retry);
+        assert.deepEqual(retry.clients, clients);
+        assert.equal(await backend.ackOrphaned(retry.id, retry.claimToken), true);
+    });
+
+    it('reads legacy metadata records and accepts legacy writers during rolling upgrades', async () => {
+        const key = `legacy-metadata-${randomUUID()}`;
+        const backend = new MeshClientRedisRegistry<unknown>(key);
+        const metadata = { role: 'new-writer', activeCalls: [] };
+        await backend.register('client', 1, metadata, false, 'connection');
+        const { client, prefix } = createRedis('MESH');
+        const clientsKey = `${prefix}:mesh:${key}:clients`;
+        const raw = await client.hget(clientsKey, 'client');
+        assert.ok(raw);
+        const record = JSON.parse(raw) as Record<string, unknown>;
+        // Older readers still find their metadata field. Older writers replace
+        // the entire record, dropping the optional opaque representation.
+        assert.deepEqual(record.metadata, { role: 'new-writer', activeCalls: {} });
+        delete record.metadataJson;
+        record.metadata = { role: 'legacy-writer', activeCalls: {} };
+        await client.hset(clientsKey, 'client', JSON.stringify(record));
+        const legacy = await backend.getClient('client');
+        assert.deepEqual(legacy?.metadata, record.metadata);
+        assert.equal(await backend.updateMetadata('client', 1, metadata, 'connection'), true);
+        const updated = await backend.getClient('client');
+        assert.deepEqual(updated?.metadata, metadata);
+
+        await backend.enqueueOrphaned(1, [{ clientId: 'legacy-orphan', nodeId: 1, connectionId: 'old', connectedAt: 1, metadata: { role: 'old' } }]);
+        const orphanKey = `${prefix}:mesh:${key}:orphaned`;
+        const entries = await client.hgetall(orphanKey);
+        for (const [id, encoded] of Object.entries(entries)) {
+            const item = JSON.parse(encoded) as Record<string, unknown>;
+            delete item.clientsJson;
+            await client.hset(orphanKey, id, JSON.stringify(item));
+        }
+        assert.equal(Object.keys(entries).length, 1);
+        const orphan = await backend.claimOrphaned('new-worker');
+        assert.ok(orphan);
+        assert.deepEqual(orphan.clients[0].metadata, { role: 'old' });
+        assert.equal(await backend.ackOrphaned(orphan.id, orphan.claimToken), true);
+    });
+
     it('commits a takeover after the fenced owner unregisters before claim commit', async () => {
         const backend = new MeshClientRedisRegistry<{ role: string }>(`claim-unregister-${Date.now()}-${process.pid}`);
         const oldOwner = new MeshClientRegistry(31, backend);
@@ -523,7 +637,8 @@ describe('Redis-backed services', { skip: redisSkip }, () => {
 
     it('bounds durable orphan admission globally and resumes after acknowledgement', async () => {
         const key = `bounded-orphans-${Date.now()}-${process.pid}`;
-        const maxOrphanBytes = 1_024;
+        // Includes the opaque JSON plus the compatibility representation.
+        const maxOrphanBytes = 1_600;
         const backend = new MeshClientRedisRegistry<{ role: string }>(key, {
             maxOrphanItems: 2,
             maxOrphanBytes
