@@ -79,7 +79,7 @@ describe('database real CRUD integration', () => {
                 await createMySQLSchema(db);
                 await runCrudFlow(db, MySQLCrudUser);
                 await runTransactionFlow(db, MySQLCrudUser, 'mysql');
-                await runCommitFinalizerFlow(db, MySQLCrudUser, 'mysql');
+                await runWeightedCommitHookFlow(db, MySQLCrudUser, 'mysql');
                 await runJsonFlow(db, MySQLJsonRow);
                 await runMySQLDateFlow(db);
             } finally {
@@ -103,7 +103,7 @@ describe('database real CRUD integration', () => {
                 await createPostgresSchema(db);
                 await runCrudFlow(db, PostgresCrudUser);
                 await runTransactionFlow(db, PostgresCrudUser, 'postgres');
-                await runCommitFinalizerFlow(db, PostgresCrudUser, 'postgres');
+                await runWeightedCommitHookFlow(db, PostgresCrudUser, 'postgres');
                 await runJsonFlow(db, PostgresJsonRow);
             } finally {
                 await resetPostgresSchema(db);
@@ -313,14 +313,13 @@ async function runTransactionFlow<T extends BaseEntity & { id: number; name: str
     );
 }
 
-async function runCommitFinalizerFlow<T extends BaseEntity & { id: number; name: string; email: string | null; score: number }>(
+async function runWeightedCommitHookFlow<T extends BaseEntity & { id: number; name: string; email: string | null; score: number }>(
     db: BaseDatabase,
     Entity: new () => T,
     dialect: 'mysql' | 'postgres'
 ): Promise<void> {
     const source = sql.identifier(getTableName(Entity));
     const projection = sql.identifier(`${getTableName(Entity)}_search`);
-    const key = {};
     await db.rawExecute(sql`DROP TABLE IF EXISTS ${projection}`);
     await db.rawExecute(sql`CREATE TABLE ${projection} (id integer PRIMARY KEY, name varchar(255) NOT NULL)`);
     try {
@@ -329,13 +328,10 @@ async function runCommitFinalizerFlow<T extends BaseEntity & { id: number; name:
             session.addPreCommitHook(async () => {
                 user.name = `${dialect}-index-final`;
             });
-            session.addCommitFinalizer(key, async () => {
+            session.addPreCommitHook(async () => {
                 await session.rawExecute(sql`INSERT INTO ${projection} (id, name)
                     SELECT id, display_name FROM ${source} WHERE id = ${user.id}`);
-            });
-            session.addCommitFinalizer(key, async () => {
-                assert.fail('duplicate finalizer ran');
-            });
+            }, 100);
             return user;
         });
         const indexed = await db.rawFindOne<{ name: string }>(sql`SELECT name FROM ${projection} WHERE id = ${committed.id}`);
@@ -348,13 +344,13 @@ async function runCommitFinalizerFlow<T extends BaseEntity & { id: number; name:
                     { name: `${dialect}-index-rollback`, email: null, score: 80 } as Partial<T>,
                     session
                 );
-                session.addCommitFinalizer(key, async () => {
+                session.addPreCommitHook(async () => {
                     await session.rawExecute(sql`INSERT INTO ${projection} (id, name)
                     SELECT id, display_name FROM ${source} WHERE id = ${user.id}`);
-                    throw new Error('index finalizer failed');
-                });
+                    throw new Error('index hook failed');
+                }, 100);
             }),
-            /index finalizer failed/
+            /index hook failed/
         );
         const rolledBackSource = await db
             .query(Entity)
@@ -365,12 +361,12 @@ async function runCommitFinalizerFlow<T extends BaseEntity & { id: number; name:
         assert.deepStrictEqual(projectionRows, [{ name: `${dialect}-index-final` }]);
 
         await db.transaction(async session => {
-            session.addCommitFinalizer(key, async () => {
-                await session.rawExecute(sql`UPDATE ${projection} SET name = ${`${dialect}-raw-finalized`} WHERE id = ${committed.id}`);
+            session.addPreCommitHook(async () => {
+                await session.rawExecute(sql`UPDATE ${projection} SET name = ${`${dialect}-raw-indexed`} WHERE id = ${committed.id}`);
             });
         });
-        const rawFinalized = await db.rawFindOne<{ name: string }>(sql`SELECT name FROM ${projection} WHERE id = ${committed.id}`);
-        assert.equal(rawFinalized?.name, `${dialect}-raw-finalized`);
+        const rawIndexed = await db.rawFindOne<{ name: string }>(sql`SELECT name FROM ${projection} WHERE id = ${committed.id}`);
+        assert.equal(rawIndexed?.name, `${dialect}-raw-indexed`);
     } finally {
         await db.rawExecute(sql`DROP TABLE IF EXISTS ${projection}`);
     }

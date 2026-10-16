@@ -7,7 +7,7 @@ import type { EntityClass } from './metadata';
 import type { QueryBuilder } from './query';
 import type { SqlInput } from './sql';
 import type { MutexKey } from './database';
-import { getEntitySnapshot, hasEntitySnapshot, isEntityDirty, markEntityClean, markEntityNew } from './entity';
+import { getEntitySnapshot, hasEntitySnapshot, markEntityClean, markEntityNew } from './entity';
 import type { EntityMetadata } from './metadata';
 import { DatabaseMutationAccumulator, type DatabaseEntitySnapshot, type DatabaseMutation, type DatabaseQueryMutation } from './mutation';
 
@@ -21,6 +21,71 @@ interface TransactionStateEntry {
     restore(value: unknown, checkpoint: unknown): void;
 }
 
+interface CommitHook {
+    readonly callback: () => Promise<void>;
+    readonly weight: number;
+}
+
+class CommitHookQueue {
+    private hooks: CommitHook[] = [];
+    private state: 'pending' | 'running' | 'finished' = 'pending';
+    private currentWeight?: number;
+
+    constructor(private readonly name: string) {}
+
+    add(callback: () => Promise<void>, weight: number): void {
+        if (!Number.isFinite(weight)) throw new RangeError('Commit hook weight must be finite');
+        if (this.state === 'finished') throw new Error(`Database ${this.name} hooks have already finished`);
+        if (this.currentWeight !== undefined && weight < this.currentWeight) {
+            throw new RangeError(`Cannot register a database ${this.name} hook below the current weight`);
+        }
+        this.hooks.push({ callback, weight });
+    }
+
+    checkpoint(): CommitHook[] {
+        return [...this.hooks];
+    }
+
+    restore(hooks: readonly CommitHook[]): void {
+        this.hooks = [...hooks];
+    }
+
+    assertCanRun(): void {
+        if (this.state !== 'pending') throw new Error(`Database ${this.name} hooks have already started`);
+    }
+
+    async run(settle?: () => Promise<void>): Promise<void> {
+        this.assertCanRun();
+        this.state = 'running';
+        const executed = new Set<CommitHook>();
+        try {
+            while (true) {
+                let next = this.next(executed);
+                if (settle && (!next || (this.currentWeight !== undefined && next.weight > this.currentWeight))) {
+                    await settle();
+                    // Pending work or a flush can register another hook at the current weight.
+                    next = this.next(executed);
+                }
+                if (!next) break;
+                this.currentWeight = next.weight;
+                executed.add(next);
+                await next.callback();
+            }
+        } finally {
+            this.state = 'finished';
+        }
+    }
+
+    private next(executed: ReadonlySet<CommitHook>): CommitHook | undefined {
+        let next: CommitHook | undefined;
+        for (const hook of this.hooks) {
+            if (executed.has(hook)) continue;
+            if (!next || hook.weight < next.weight) next = hook;
+        }
+        return next;
+    }
+}
+
 interface DatabaseSessionCheckpoint {
     sequence: number;
     queued: Set<object>;
@@ -30,9 +95,8 @@ interface DatabaseSessionCheckpoint {
     touchedEntitySnapshots: Map<object, EntityInstanceCheckpointState>;
     mutationEntitySnapshots: EntityMutationCheckpointState[];
     insertedEntities: Map<object, InsertedEntityState>;
-    preCommitHookCount: number;
-    postCommitHookCount: number;
-    commitFinalizers: Map<object, () => Promise<void>>;
+    preCommitHooks: CommitHook[];
+    postCommitHooks: CommitHook[];
     pendingOperationErrorCount: number;
     mutations: ReturnType<DatabaseMutationAccumulator['checkpoint']>;
     transactionStates: Map<object, { entry: TransactionStateEntry; checkpoint: unknown }>;
@@ -62,11 +126,8 @@ export class DatabaseSession {
     private removed = new Set<object>();
     private pendingOperations = new Set<Promise<unknown>>();
     private pendingOperationErrors: unknown[] = [];
-    private preCommitHooks: (() => Promise<void>)[] = [];
-    private postCommitHooks: (() => Promise<void>)[] = [];
-    private commitFinalizers = new Map<object, () => Promise<void>>();
-    private commitFinalizationStarted = false;
-    private finalizingCommit = false;
+    private readonly preCommitHooks = new CommitHookQueue('pre-commit');
+    private readonly postCommitHooks = new CommitHookQueue('post-commit');
     private flushing = false;
     private autoFlushSuppressionDepth = 0;
     private readonly mutationAccumulator = new DatabaseMutationAccumulator();
@@ -99,7 +160,6 @@ export class DatabaseSession {
     }
 
     add(...entities: object[]): void {
-        this.assertOrmWritesAllowed();
         for (const entity of entities) {
             this.removed.delete(entity);
             this.queued.add(entity);
@@ -111,12 +171,10 @@ export class DatabaseSession {
     }
 
     removeQueued(...entities: object[]): void {
-        this.assertOrmWritesAllowed();
         for (const entity of entities) this.queued.delete(entity);
     }
 
     unmanage(...entities: object[]): void {
-        this.assertOrmWritesAllowed();
         for (const entity of entities) {
             this.queued.delete(entity);
             this.managed.delete(entity);
@@ -125,7 +183,6 @@ export class DatabaseSession {
     }
 
     remove(...entities: object[]): void {
-        this.assertOrmWritesAllowed();
         for (const entity of entities) {
             const wasQueued = this.queued.delete(entity);
             if (!wasQueued || this.managed.has(entity) || hasEntitySnapshot(entity)) {
@@ -226,7 +283,6 @@ export class DatabaseSession {
     }
 
     async savepoint(name: string): Promise<void> {
-        this.assertOrmWritesAllowed();
         this.assertTransactional('savepoints');
         await this.waitForPendingOperations();
         await this.flush();
@@ -235,7 +291,6 @@ export class DatabaseSession {
     }
 
     async rollbackToSavepoint(name: string): Promise<void> {
-        this.assertOrmWritesAllowed();
         this.assertTransactional('savepoints');
         const checkpoint = this.savepointCheckpoints.get(name);
         if (!checkpoint) throw new Error(`Unknown database savepoint ${name}`);
@@ -276,10 +331,6 @@ export class DatabaseSession {
     }
 
     async flush(): Promise<void> {
-        if (this.finalizingCommit) {
-            this.assertNoPendingOrmChanges();
-            return;
-        }
         if (this.flushing) return;
         this.flushing = true;
         try {
@@ -306,20 +357,14 @@ export class DatabaseSession {
         }
     }
 
-    addPreCommitHook(hook: () => Promise<void>): void {
-        this.assertCommitWorkRegistrationAllowed();
-        this.preCommitHooks.push(hook);
+    /** Lower weights run first; equal weights retain registration order. */
+    addPreCommitHook(hook: () => Promise<void>, weight = 0): void {
+        this.preCommitHooks.add(hook, weight);
     }
 
-    /** Registers raw-SQL derived maintenance after hooks, mutation interceptors, and their flushes. */
-    addCommitFinalizer(key: object, callback: () => Promise<void>): void {
-        this.assertTransactional('commit finalizers');
-        this.assertCommitWorkRegistrationAllowed();
-        if (!this.commitFinalizers.has(key)) this.commitFinalizers.set(key, callback);
-    }
-
-    addPostCommitHook(hook: () => Promise<void>): void {
-        this.postCommitHooks.push(hook);
+    /** Orders callbacks after commit without flushing the committed session. */
+    addPostCommitHook(hook: () => Promise<void>, weight = 0): void {
+        this.postCommitHooks.add(hook, weight);
     }
 
     recordEntityMutation(
@@ -349,34 +394,11 @@ export class DatabaseSession {
     }
 
     async runPreCommitHooks(): Promise<void> {
-        for (const hook of this.preCommitHooks) await hook();
-    }
-
-    async runPostCommitHooks(): Promise<void> {
-        for (const hook of this.postCommitHooks) await hook();
-    }
-
-    /** @internal ORM writes cannot bypass the interceptors that have already run. */
-    assertOrmWritesAllowed(): void {
-        if (this.finalizingCommit) throw new Error('Cannot change ORM entities during database commit finalization');
-    }
-
-    /** @internal Called once by BaseDatabase, including for raw-only transactions. */
-    async runCommitFinalizers(): Promise<void> {
-        this.assertTransactional('commit finalizers');
-        this.assertCommitWorkRegistrationAllowed();
-        this.commitFinalizationStarted = true;
-        if (!this.commitFinalizers.size) return;
-
-        this.assertNoPendingOrmChanges();
-        this.finalizingCommit = true;
+        this.preCommitHooks.assertCanRun();
         try {
-            await this.withoutAutoFlush(async () => {
-                for (const finalizer of this.commitFinalizers.values()) {
-                    await finalizer();
-                    await this.waitForPendingOperations();
-                    this.assertNoPendingOrmChanges();
-                }
+            await this.preCommitHooks.run(async () => {
+                await this.waitForPendingOperations();
+                await this.flush();
             });
         } catch (error) {
             // A callback can throw while tracked work still holds this connection. Drain it before rollback.
@@ -385,14 +407,8 @@ export class DatabaseSession {
         }
     }
 
-    private assertCommitWorkRegistrationAllowed(): void {
-        if (this.commitFinalizationStarted) throw new Error('Database commit finalization has already started');
-    }
-
-    private assertNoPendingOrmChanges(): void {
-        if (this.queued.size || this.removed.size || [...this.managed].some(entity => isEntityDirty(entity))) {
-            throw new Error('Cannot change ORM entities during database commit finalization');
-        }
+    async runPostCommitHooks(): Promise<void> {
+        await this.postCommitHooks.run();
     }
 
     private createCheckpoint(): DatabaseSessionCheckpoint {
@@ -424,9 +440,8 @@ export class DatabaseSession {
             touchedEntitySnapshots,
             mutationEntitySnapshots,
             insertedEntities: new Map(this.insertedEntities),
-            preCommitHookCount: this.preCommitHooks.length,
-            postCommitHookCount: this.postCommitHooks.length,
-            commitFinalizers: new Map(this.commitFinalizers),
+            preCommitHooks: this.preCommitHooks.checkpoint(),
+            postCommitHooks: this.postCommitHooks.checkpoint(),
             pendingOperationErrorCount: this.pendingOperationErrors.length,
             mutations: this.mutationAccumulator.checkpoint(),
             transactionStates: new Map([...this.transactionStates].map(([key, entry]) => [key, { entry, checkpoint: entry.checkpoint(entry.value) }]))
@@ -486,9 +501,8 @@ export class DatabaseSession {
             Object.assign(entity, snapshot);
             markEntityClean(entity);
         }
-        this.preCommitHooks.length = checkpoint.preCommitHookCount;
-        this.postCommitHooks.length = checkpoint.postCommitHookCount;
-        this.commitFinalizers = new Map(checkpoint.commitFinalizers);
+        this.preCommitHooks.restore(checkpoint.preCommitHooks);
+        this.postCommitHooks.restore(checkpoint.postCommitHooks);
         this.pendingOperationErrors.length = checkpoint.pendingOperationErrorCount;
         this.mutationAccumulator.restore(checkpoint.mutations);
 

@@ -328,9 +328,8 @@ Session methods:
 | `rollbackToSavepoint(name)`                                   | Rolls back the database and restores the matching complete session checkpoint.          |
 | `withSavepoint(name, fn)`                                     | Runs a block and performs the same complete rollback if the block throws.               |
 | `getTransactionState(key, create, checkpoint, restore)`       | Stores interceptor policy state that participates in savepoint rollback.                |
-| `addPreCommitHook(fn)`                                        | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
-| `addCommitFinalizer(key, fn)`                                 | Runs once per key after mutation interceptors and their flushes, before commit.         |
-| `addPostCommitHook(fn)`                                       | Runs serially after successful commit; it is skipped on rollback.                       |
+| `addPreCommitHook(fn, weight = 0)`                            | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
+| `addPostCommitHook(fn, weight = 0)`                           | Runs serially after successful commit; it is skipped on rollback.                       |
 | `acquireSessionLock(key)`                                     | Acquires a transaction-scoped database lock.                                            |
 
 Use `db.withTransaction(existingSession, fn)` when helper functions should reuse a caller-provided session if one exists, or open a transaction otherwise.
@@ -376,32 +375,35 @@ Observed existing-entity updates and deletes lock and load the persisted row imm
 
 Mutation interceptors should only validate changes or write transaction-local derived artifacts. External side effects belong in a post-commit hook.
 
-### Commit finalizers
+### Weighted commit hooks
 
-Use `session.addCommitFinalizer(key, callback)` for raw-SQL maintenance of rebuildable derived data that needs the final persisted source state. Finalizers run after ordinary pre-commit hooks, mutation interceptors, and the flush of interceptor artifacts, before the SQL commit. They also run in raw-only transactions with no ORM mutations.
+`addPreCommitHook(callback, weight = 0)` and `addPostCommitHook(callback, weight = 0)` run callbacks serially in ascending weight order. Equal weights retain registration order. Existing callers use weight `0`, preserving FIFO order; weights must be finite numbers. Every registration runs independently, even when the same callback is registered twice.
+
+Use a later pre-commit weight for derived data that must see earlier hooks' persisted changes:
 
 ```ts
-const searchIndexFinalizer = {};
-
 await db.transaction(async session => {
     const user = await session.query(User).filter({ id: userId }).findOne();
-    user.name = newName;
 
-    session.addCommitFinalizer(searchIndexFinalizer, async () => {
+    session.addPreCommitHook(async () => {
         await session.rawExecute(sql`DELETE FROM user_search WHERE userId = ${userId}`);
         await session.rawExecute(sql`INSERT INTO user_search (userId, name)
             SELECT id, name FROM users WHERE id = ${userId}`);
+    }, 100);
+
+    session.addPreCommitHook(async () => {
+        user.name = newName;
     });
 });
 ```
 
-The first callback registered for a key wins; distinct keys execute serially in registration order. Registration requires an active transaction and is allowed from ordinary hooks and mutation interceptors. Store accumulated work in `getTransactionState()` when multiple callers register the same key. Savepoint rollback restores both finalizer registrations and transaction-local state, so rolled-back work cannot leak into finalization.
+The transaction drains tracked pending work and flushes ORM changes before starting pre-commit hooks, before advancing to a higher weight, and after the final weight. Hooks registered while draining or flushing are included. Mutation interceptors then receive the net ORM changes from all pre-commit weights, their artifacts are flushed, and the SQL transaction commits. A pre-commit failure rolls back source and derived changes and skips post-commit hooks. Tracked work is drained before rolling back a failed pre-commit callback; its original error is preserved.
 
-Finalizers must await their operations. Tracked pending work is drained before the next callback and before rollback if a callback fails. A finalizer failure rolls back both source and derived SQL changes and skips post-commit hooks.
+A running hook may register another callback at its current or a higher weight. Registering below the active weight, after that phase has finished, or recursively running the same phase throws. Pre-commit registration is closed before mutation interceptors run. Post-commit hooks follow the same ordering rules after a successful commit; advancing their weights does not flush the committed session or drain unawaited operations. Await callback work explicitly. Post-commit failure cannot undo the commit.
 
-The ORM/audit pass is complete when finalization starts. ORM writes, dirty managed entities, savepoints, recursive finalization, and late pre-commit/finalizer registration are rejected. Session raw APIs remain available without persisting another ORM flush; clean ORM reads are allowed. Finalizers cannot unmanage entities to hide dirty changes. Raw SQL remains a trusted low-level API: write only derived data through the supplied session, and keep source changes in ordinary business work. These guards do not sandbox separate sessions or parse raw SQL for business or transaction-control statements.
+Savepoint rollback restores the registered callbacks and transaction-local state, preserving weights and FIFO order. Execution history and the active weight do not rewind: callbacks that already ran are never replayed automatically. If a later hook rolls back earlier hooks' database work, the caller must compensate or register replacement work at the current or a higher weight. Store application-specific accumulated work and deduplication in `getTransactionState()` when needed.
 
-Finalizers add no locks or automatic retries. Acquire application mutexes before opening the transaction and hold them through commit. External side effects belong after commit.
+Weights provide ordering within each phase, without adding locks or retries. Acquire application mutexes before opening the transaction and hold them through commit. External side effects belong in post-commit hooks.
 
 ## Session Locks
 
