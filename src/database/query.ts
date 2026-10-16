@@ -442,7 +442,11 @@ export class QueryBuilder<T extends object> {
             if (observed && !this.session.isTransactional) {
                 throw new Error(`Observed entity ${metadata.classType.name} requires a transactional database session`);
             }
-            return this.session.trackOperation(() => worker(this.session));
+            const session = this.session;
+            return session.trackOperation(() => {
+                session.assertOrmWritesAllowed();
+                return worker(session);
+            });
         }
         if (observed) return this.db.transaction(session => session.trackOperation(() => worker(session)));
         return worker();

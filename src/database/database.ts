@@ -104,6 +104,7 @@ export class BaseDatabase {
             await this.runMutationInterceptors(session);
             await session.waitForPendingOperations();
             await session.flush();
+            await session.runCommitFinalizers();
             await connection.commit();
             committed = true;
             await session.runPostCommitHooks();
@@ -298,6 +299,7 @@ export class BaseDatabase {
     }
 
     async saveEntity(entity: object, session?: DatabaseSession): Promise<void> {
+        session?.assertOrmWritesAllowed();
         const metadata = getEntityMetadata(entity.constructor as EntityClass);
         const observed = this.hasMutationInterceptorFor(metadata);
         if (session && session.db !== this) throw new Error(`Cannot save ${metadata.classType.name} through a session owned by another database`);
@@ -399,6 +401,7 @@ export class BaseDatabase {
     }
 
     async deleteEntity(entity: object, session?: DatabaseSession): Promise<void> {
+        session?.assertOrmWritesAllowed();
         const metadata = getEntityMetadata(entity.constructor as EntityClass);
         const observed = this.hasMutationInterceptorFor(metadata);
         if (session && session.db !== this) throw new Error(`Cannot delete ${metadata.classType.name} through a session owned by another database`);

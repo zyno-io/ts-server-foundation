@@ -1469,6 +1469,361 @@ describe('database query builder and persistence', () => {
         assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'pre', 'commit', 'post', 'release']);
     });
 
+    it('finalizes after ordinary hooks and interceptor artifacts are flushed', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User, ApiToken]);
+        const order: string[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: ({ session, mutations }) => {
+                order.push('intercept');
+                const mutation = mutations[0];
+                assert(mutation.kind === 'entity');
+                assert.equal(mutation.after?.name, 'From hook');
+                session.add(createEntity(ApiToken, { token: 'audit', label: 'artifact' }));
+                session.addCommitFinalizer({}, async () => {
+                    order.push('registered by interceptor');
+                });
+            }
+        });
+
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Before hook', email: null });
+            session.add(user);
+            session.addPreCommitHook(async () => {
+                order.push('pre');
+                user.name = 'From hook';
+                session.addCommitFinalizer({}, async () => {
+                    order.push('registered by hook');
+                });
+            });
+            session.addCommitFinalizer({}, async () => {
+                order.push('finalize');
+                assert.equal(driver.executes.length, 3);
+                assert.match(driver.executes[2].sql, /INSERT INTO `api_tokens`/);
+                await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${user.id})`);
+            });
+            session.addPostCommitHook(async () => {
+                order.push('post');
+            });
+        });
+
+        assert.deepStrictEqual(order, ['pre', 'intercept', 'finalize', 'registered by hook', 'registered by interceptor', 'post']);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'execute', 'execute', 'execute', 'commit', 'release']);
+    });
+
+    it('deduplicates finalizer keys in registration order for raw-only transactions', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7 }];
+        const db = new BaseDatabase(driver, []);
+        const key = {};
+        const order: string[] = [];
+        await db.transaction(async session => {
+            session.addCommitFinalizer(key, async () => {
+                order.push('first');
+                const rows = await session.rawFindUnsafe<{ id: number }>('SELECT id FROM source');
+                assert.equal(rows[0].id, 7);
+                await session.rawExecuteUnsafe('INSERT INTO search_index (id) VALUES (?)', [rows[0].id]);
+            });
+            session.addCommitFinalizer({}, async () => {
+                order.push('second');
+                await db.rawExecute(sql`UPDATE search_index SET refreshed = ${true}`, session);
+            });
+            session.addCommitFinalizer(key, async () => {
+                assert.fail('duplicate callback ran');
+            });
+        });
+        assert.deepStrictEqual(order, ['first', 'second']);
+        assert.equal(driver.connections.length, 1);
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'execute', 'execute', 'commit', 'release']);
+    });
+
+    it('restores finalizer registrations and pending state across savepoint rollback', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const stateKey = {};
+        const finalizerKey = {};
+        const replacedKey = {};
+        const order: string[] = [];
+        await db.transaction(async session => {
+            const state = session.getTransactionState(
+                stateKey,
+                () => new Set(['original']),
+                value => new Set(value),
+                (value, saved) => {
+                    value.clear();
+                    for (const item of saved) value.add(item);
+                }
+            );
+            session.addCommitFinalizer(finalizerKey, async () => {
+                order.push(...state);
+            });
+            await session.savepoint('finalizer_state');
+            state.add('rolled back');
+            session.addCommitFinalizer(finalizerKey, async () => {
+                assert.fail('duplicate replaced original');
+            });
+            session.addCommitFinalizer(replacedKey, async () => {
+                assert.fail('rolled-back callback ran');
+            });
+            await session.rollbackToSavepoint('finalizer_state');
+            session.addCommitFinalizer(replacedKey, async () => {
+                order.push('replacement');
+            });
+        });
+        assert.deepStrictEqual(order, ['original', 'replacement']);
+    });
+
+    it('does not run registrations rolled back by withSavepoint', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        await db.transaction(async session => {
+            await assert.rejects(
+                session.withSavepoint('temporary_finalizer', async () => {
+                    session.addCommitFinalizer({}, async () => {
+                        assert.fail('rolled-back finalizer ran');
+                    });
+                    throw new Error('discard registration');
+                }),
+                /discard registration/
+            );
+        });
+        assert.deepStrictEqual(driver.connections[0].commands, [
+            'begin',
+            'savepoint:temporary_finalizer',
+            'rollbackToSavepoint:temporary_finalizer',
+            'commit',
+            'release'
+        ]);
+    });
+
+    it('requires an active transaction when registering finalizers', () => {
+        const db = new BaseDatabase(new FakeDriver(), []);
+        const session = new DatabaseSession(db);
+        assert.throws(() => session.addCommitFinalizer({}, async () => {}), /require an active transaction/);
+    });
+
+    it('rolls back finalizer writes on failure and skips post-commit hooks', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const error = new Error('projection failed');
+        await assert.rejects(
+            db.transaction(async session => {
+                session.add(createEntity(User, { name: 'Source', email: null }));
+                session.addCommitFinalizer({}, async () => {
+                    await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${10})`);
+                    throw error;
+                });
+                session.addPostCommitHook(async () => {
+                    assert.fail('post-commit hook ran');
+                });
+            }),
+            error
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'execute', 'rollback', 'release']);
+    });
+
+    it('skips registered finalizers when business work fails', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const error = new Error('business failed');
+        await assert.rejects(
+            db.transaction(async session => {
+                session.addCommitFinalizer({}, async () => {
+                    assert.fail('finalizer ran');
+                });
+                session.addPreCommitHook(async () => {
+                    throw error;
+                });
+            }),
+            error
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
+    });
+
+    it('drains tracked work before rolling back an early finalizer failure', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const error = new Error('callback failed first');
+        let release!: () => void;
+        let started!: () => void;
+        const gate = new Promise<void>(resolve => {
+            release = resolve;
+        });
+        const ready = new Promise<void>(resolve => {
+            started = resolve;
+        });
+        const transaction = db.transaction(async session => {
+            session.addCommitFinalizer({}, async () => {
+                void session.trackOperation(async () => {
+                    await gate;
+                    await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${7})`);
+                    throw new Error('tracked failure must not replace original');
+                });
+                started();
+                throw error;
+            });
+        });
+        const rejected = assert.rejects(transaction, error);
+        await ready;
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin']);
+        assert.equal(driver.connections[0].released, false);
+        release();
+        await rejected;
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'rollback', 'release']);
+    });
+
+    it('fails the commit on a tracked rejection even when the finalizer returns normally', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const error = new Error('tracked finalizer failure');
+        await assert.rejects(
+            db.transaction(async session => {
+                session.addCommitFinalizer({}, async () => {
+                    void session.trackOperation(async () => {
+                        throw error;
+                    });
+                });
+            }),
+            error
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
+    });
+
+    for (const [name, mutate] of [
+        [
+            'queued insert',
+            (session: DatabaseSession, user: User) => {
+                session.add(user);
+            }
+        ],
+        [
+            'queued delete',
+            (session: DatabaseSession, user: User) => {
+                session.remove(user);
+            }
+        ],
+        [
+            'unmanage',
+            (session: DatabaseSession, user: User) => {
+                session.unmanage(user);
+            }
+        ],
+        [
+            'removeQueued',
+            (session: DatabaseSession, user: User) => {
+                session.removeQueued(user);
+            }
+        ],
+        ['direct save', (session: DatabaseSession, user: User) => user.save(session)],
+        ['direct delete', (session: DatabaseSession, user: User) => user.delete(session)],
+        ['patchOne', (session: DatabaseSession) => session.query(User).filter({ id: 7 }).patchOne({ name: 'Unaudited' })],
+        ['patchMany', (session: DatabaseSession) => session.query(User).filter({ id: 7 }).patchMany({ name: 'Unaudited' })],
+        ['deleteOne', (session: DatabaseSession) => session.query(User).filter({ id: 7 }).deleteOne()],
+        ['deleteMany', (session: DatabaseSession) => session.query(User).filter({ id: 7 }).deleteMany()]
+    ] as const) {
+        it(`rejects ${name} during finalization even without mutation interceptors`, async () => {
+            const driver = new FakeDriver('mysql');
+            const db = new BaseDatabase(driver, [User]);
+            const user = createEntity(User, { id: 7, name: 'Original', email: null });
+            markEntityClean(user);
+            await assert.rejects(
+                db.transaction(async session => {
+                    session.addCommitFinalizer({}, async () => {
+                        await mutate(session, user);
+                    });
+                }),
+                /Cannot change ORM entities during database commit finalization/
+            );
+            assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
+            assert.equal(driver.executes.length, 0);
+        });
+    }
+
+    it('tracks rejected query writes when their returned promise is ignored', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        await assert.rejects(
+            db.transaction(async session => {
+                session.addCommitFinalizer({}, async () => {
+                    void session
+                        .query(User)
+                        .filter({ id: 7 })
+                        .patchOne({ name: 'Unaudited' })
+                        .catch(() => {});
+                });
+            }),
+            /commit finalization/
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
+    });
+
+    it('allows clean ORM reads and subsequent raw writes during finalization', async () => {
+        const driver = new FakeDriver('mysql');
+        driver.rows = [{ id: 7, name: 'Original', email: null }];
+        const db = new BaseDatabase(driver, [User]);
+        await db.transaction(async session => {
+            session.addCommitFinalizer({}, async () => {
+                const user = await session.query(User).filter({ id: 7 }).findOne();
+                assert.equal(user.name, 'Original');
+                await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${user.id})`);
+            });
+        });
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'execute', 'commit', 'release']);
+    });
+
+    for (const loadDuringFinalizer of [false, true]) {
+        it(`rejects dirty managed entities ${loadDuringFinalizer ? 'loaded during' : 'loaded before'} finalization`, async () => {
+            const driver = new FakeDriver('mysql');
+            driver.rows = [{ id: 7, name: 'Original', email: null }];
+            const db = new BaseDatabase(driver, [User]);
+            await assert.rejects(
+                db.transaction(async session => {
+                    const existing = loadDuringFinalizer ? undefined : await session.query(User).filter({ id: 7 }).findOne();
+                    session.addCommitFinalizer({}, async () => {
+                        const user = existing ?? (await session.query(User).filter({ id: 7 }).findOne());
+                        user.name = 'After audit';
+                    });
+                }),
+                /commit finalization/
+            );
+            assert.equal(driver.executes.length, 0);
+            assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'query', 'rollback', 'release']);
+        });
+    }
+
+    for (const [name, operation] of [
+        [
+            'finalizer registration',
+            (session: DatabaseSession) => {
+                session.addCommitFinalizer({}, async () => {});
+            }
+        ],
+        [
+            'pre-commit registration',
+            (session: DatabaseSession) => {
+                session.addPreCommitHook(async () => {});
+            }
+        ],
+        ['savepoint', (session: DatabaseSession) => session.savepoint('late')],
+        ['savepoint rollback', (session: DatabaseSession) => session.rollbackToSavepoint('before')],
+        ['recursive finalization', (session: DatabaseSession) => session.runCommitFinalizers()]
+    ] as const) {
+        it(`rejects ${name} once finalization starts`, async () => {
+            const driver = new FakeDriver('mysql');
+            const db = new BaseDatabase(driver, []);
+            await assert.rejects(
+                db.transaction(async session => {
+                    await session.savepoint('before');
+                    session.addCommitFinalizer({}, async () => {
+                        await operation(session);
+                    });
+                }),
+                /commit finalization/
+            );
+            assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'savepoint:before', 'rollback', 'release']);
+        });
+    }
+
     it('delivers consolidated entity mutations to database interceptors before commit', async () => {
         const driver = new FakeDriver('mysql');
         const db = new BaseDatabase(driver, [User]);

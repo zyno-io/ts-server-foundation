@@ -329,6 +329,7 @@ Session methods:
 | `withSavepoint(name, fn)`                                     | Runs a block and performs the same complete rollback if the block throws.               |
 | `getTransactionState(key, create, checkpoint, restore)`       | Stores interceptor policy state that participates in savepoint rollback.                |
 | `addPreCommitHook(fn)`                                        | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
+| `addCommitFinalizer(key, fn)`                                 | Runs once per key after mutation interceptors and their flushes, before commit.         |
 | `addPostCommitHook(fn)`                                       | Runs serially after successful commit; it is skipped on rollback.                       |
 | `acquireSessionLock(key)`                                     | Acquires a transaction-scoped database lock.                                            |
 
@@ -374,6 +375,33 @@ Both the public `savepoint()`/`rollbackToSavepoint()` pair and `withSavepoint()`
 Observed existing-entity updates and deletes lock and load the persisted row immediately before writing, so interceptors receive the real prior snapshot rather than a stale load or caller-supplied defaults. Updates merge only the caller's dirty fields into that authoritative row for the final snapshot and synchronize untouched concurrent values back to the entity instance. Entity update/delete and query mutations with zero affected rows are omitted. Raw SQL cannot be mapped reliably to ORM entities and is therefore outside mutation interception; applications that enforce entity-level policies should constrain or wrap raw writes separately.
 
 Mutation interceptors should only validate changes or write transaction-local derived artifacts. External side effects belong in a post-commit hook.
+
+### Commit finalizers
+
+Use `session.addCommitFinalizer(key, callback)` for raw-SQL maintenance of rebuildable derived data that needs the final persisted source state. Finalizers run after ordinary pre-commit hooks, mutation interceptors, and the flush of interceptor artifacts, before the SQL commit. They also run in raw-only transactions with no ORM mutations.
+
+```ts
+const searchIndexFinalizer = {};
+
+await db.transaction(async session => {
+    const user = await session.query(User).filter({ id: userId }).findOne();
+    user.name = newName;
+
+    session.addCommitFinalizer(searchIndexFinalizer, async () => {
+        await session.rawExecute(sql`DELETE FROM user_search WHERE userId = ${userId}`);
+        await session.rawExecute(sql`INSERT INTO user_search (userId, name)
+            SELECT id, name FROM users WHERE id = ${userId}`);
+    });
+});
+```
+
+The first callback registered for a key wins; distinct keys execute serially in registration order. Registration requires an active transaction and is allowed from ordinary hooks and mutation interceptors. Store accumulated work in `getTransactionState()` when multiple callers register the same key. Savepoint rollback restores both finalizer registrations and transaction-local state, so rolled-back work cannot leak into finalization.
+
+Finalizers must await their operations. Tracked pending work is drained before the next callback and before rollback if a callback fails. A finalizer failure rolls back both source and derived SQL changes and skips post-commit hooks.
+
+The ORM/audit pass is complete when finalization starts. ORM writes, dirty managed entities, savepoints, recursive finalization, and late pre-commit/finalizer registration are rejected. Session raw APIs remain available without persisting another ORM flush; clean ORM reads are allowed. Finalizers cannot unmanage entities to hide dirty changes. Raw SQL remains a trusted low-level API: write only derived data through the supplied session, and keep source changes in ordinary business work. These guards do not sandbox separate sessions or parse raw SQL for business or transaction-control statements.
+
+Finalizers add no locks or automatic retries. Acquire application mutexes before opening the transaction and hold them through commit. External side effects belong after commit.
 
 ## Session Locks
 
