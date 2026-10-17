@@ -79,6 +79,7 @@ describe('database real CRUD integration', () => {
                 await createMySQLSchema(db);
                 await runCrudFlow(db, MySQLCrudUser);
                 await runTransactionFlow(db, MySQLCrudUser, 'mysql');
+                await runWeightedCommitHookFlow(db, MySQLCrudUser, 'mysql');
                 await runJsonFlow(db, MySQLJsonRow);
                 await runMySQLDateFlow(db);
             } finally {
@@ -102,6 +103,7 @@ describe('database real CRUD integration', () => {
                 await createPostgresSchema(db);
                 await runCrudFlow(db, PostgresCrudUser);
                 await runTransactionFlow(db, PostgresCrudUser, 'postgres');
+                await runWeightedCommitHookFlow(db, PostgresCrudUser, 'postgres');
                 await runJsonFlow(db, PostgresJsonRow);
             } finally {
                 await resetPostgresSchema(db);
@@ -309,6 +311,65 @@ async function runTransactionFlow<T extends BaseEntity & { id: number; name: str
             .count(),
         0
     );
+}
+
+async function runWeightedCommitHookFlow<T extends BaseEntity & { id: number; name: string; email: string | null; score: number }>(
+    db: BaseDatabase,
+    Entity: new () => T,
+    dialect: 'mysql' | 'postgres'
+): Promise<void> {
+    const source = sql.identifier(getTableName(Entity));
+    const projection = sql.identifier(`${getTableName(Entity)}_search`);
+    await db.rawExecute(sql`DROP TABLE IF EXISTS ${projection}`);
+    await db.rawExecute(sql`CREATE TABLE ${projection} (id integer PRIMARY KEY, name varchar(255) NOT NULL)`);
+    try {
+        const committed = await db.transaction(async session => {
+            const user = await createPersistedEntity(Entity, { name: `${dialect}-index-source`, email: null, score: 70 } as Partial<T>, session);
+            session.addPreCommitHook(async () => {
+                user.name = `${dialect}-index-final`;
+            });
+            session.addPreCommitHook(async () => {
+                await session.rawExecute(sql`INSERT INTO ${projection} (id, name)
+                    SELECT id, display_name FROM ${source} WHERE id = ${user.id}`);
+            }, 100);
+            return user;
+        });
+        const indexed = await db.rawFindOne<{ name: string }>(sql`SELECT name FROM ${projection} WHERE id = ${committed.id}`);
+        assert.equal(indexed?.name, `${dialect}-index-final`);
+
+        await assert.rejects(
+            db.transaction(async session => {
+                const user = await createPersistedEntity(
+                    Entity,
+                    { name: `${dialect}-index-rollback`, email: null, score: 80 } as Partial<T>,
+                    session
+                );
+                session.addPreCommitHook(async () => {
+                    await session.rawExecute(sql`INSERT INTO ${projection} (id, name)
+                    SELECT id, display_name FROM ${source} WHERE id = ${user.id}`);
+                    throw new Error('index hook failed');
+                }, 100);
+            }),
+            /index hook failed/
+        );
+        const rolledBackSource = await db
+            .query(Entity)
+            .filter({ name: `${dialect}-index-rollback` })
+            .count();
+        const projectionRows = await db.rawFind<{ name: string }>(sql`SELECT name FROM ${projection}`);
+        assert.equal(rolledBackSource, 0);
+        assert.deepStrictEqual(projectionRows, [{ name: `${dialect}-index-final` }]);
+
+        await db.transaction(async session => {
+            session.addPreCommitHook(async () => {
+                await session.rawExecute(sql`UPDATE ${projection} SET name = ${`${dialect}-raw-indexed`} WHERE id = ${committed.id}`);
+            });
+        });
+        const rawIndexed = await db.rawFindOne<{ name: string }>(sql`SELECT name FROM ${projection} WHERE id = ${committed.id}`);
+        assert.equal(rawIndexed?.name, `${dialect}-raw-indexed`);
+    } finally {
+        await db.rawExecute(sql`DROP TABLE IF EXISTS ${projection}`);
+    }
 }
 
 async function resetMySQLSchema(db: BaseDatabase): Promise<void> {

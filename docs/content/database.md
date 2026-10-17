@@ -328,8 +328,8 @@ Session methods:
 | `rollbackToSavepoint(name)`                                   | Rolls back the database and restores the matching complete session checkpoint.          |
 | `withSavepoint(name, fn)`                                     | Runs a block and performs the same complete rollback if the block throws.               |
 | `getTransactionState(key, create, checkpoint, restore)`       | Stores interceptor policy state that participates in savepoint rollback.                |
-| `addPreCommitHook(fn)`                                        | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
-| `addPostCommitHook(fn)`                                       | Runs serially after successful commit; it is skipped on rollback.                       |
+| `addPreCommitHook(fn, weight = 0)`                            | Runs serially before commit, after normal flushes; failure rolls back the transaction.  |
+| `addPostCommitHook(fn, weight = 0)`                           | Runs serially after successful commit; it is skipped on rollback.                       |
 | `acquireSessionLock(key)`                                     | Acquires a transaction-scoped database lock.                                            |
 
 Use `db.withTransaction(existingSession, fn)` when helper functions should reuse a caller-provided session if one exists, or open a transaction otherwise.
@@ -374,6 +374,36 @@ Both the public `savepoint()`/`rollbackToSavepoint()` pair and `withSavepoint()`
 Observed existing-entity updates and deletes lock and load the persisted row immediately before writing, so interceptors receive the real prior snapshot rather than a stale load or caller-supplied defaults. Updates merge only the caller's dirty fields into that authoritative row for the final snapshot and synchronize untouched concurrent values back to the entity instance. Entity update/delete and query mutations with zero affected rows are omitted. Raw SQL cannot be mapped reliably to ORM entities and is therefore outside mutation interception; applications that enforce entity-level policies should constrain or wrap raw writes separately.
 
 Mutation interceptors should only validate changes or write transaction-local derived artifacts. External side effects belong in a post-commit hook.
+
+### Weighted commit hooks
+
+`addPreCommitHook(callback, weight = 0)` and `addPostCommitHook(callback, weight = 0)` run callbacks serially in ascending weight order. Equal weights retain registration order. Existing callers use weight `0`, preserving FIFO order; weights must be finite numbers. Every registration runs independently, even when the same callback is registered twice.
+
+Use a later pre-commit weight for derived data that must see earlier hooks' persisted changes:
+
+```ts
+await db.transaction(async session => {
+    const user = await session.query(User).filter({ id: userId }).findOne();
+
+    session.addPreCommitHook(async () => {
+        await session.rawExecute(sql`DELETE FROM user_search WHERE userId = ${userId}`);
+        await session.rawExecute(sql`INSERT INTO user_search (userId, name)
+            SELECT id, name FROM users WHERE id = ${userId}`);
+    }, 100);
+
+    session.addPreCommitHook(async () => {
+        user.name = newName;
+    });
+});
+```
+
+The transaction drains tracked pending work and flushes ORM changes before starting pre-commit hooks, before advancing to a higher weight, and after the final weight. Hooks registered while draining or flushing are included. Mutation interceptors then receive the net ORM changes from all pre-commit weights, their artifacts are flushed, and the SQL transaction commits. A pre-commit failure rolls back source and derived changes and skips post-commit hooks. Tracked work is drained before rolling back a failed pre-commit callback; its original error is preserved.
+
+A running hook may register another callback at its current or a higher weight. Registering below the active weight, after that phase has finished, or recursively running the same phase throws. Pre-commit registration is closed before mutation interceptors run. Post-commit hooks follow the same ordering rules after a successful commit; advancing their weights does not flush the committed session or drain unawaited operations. Await callback work explicitly. Post-commit failure cannot undo the commit.
+
+Savepoint rollback restores the registered callbacks and transaction-local state, preserving weights and FIFO order. Execution history and the active weight do not rewind: callbacks that already ran are never replayed automatically. If a later hook rolls back earlier hooks' database work, the caller must compensate or register replacement work at the current or a higher weight. Store application-specific accumulated work and deduplication in `getTransactionState()` when needed.
+
+Weights provide ordering within each phase, without adding locks or retries. Acquire application mutexes before opening the transaction and hold them through commit. External side effects belong in post-commit hooks.
 
 ## Session Locks
 

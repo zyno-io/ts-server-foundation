@@ -21,6 +21,71 @@ interface TransactionStateEntry {
     restore(value: unknown, checkpoint: unknown): void;
 }
 
+interface CommitHook {
+    readonly callback: () => Promise<void>;
+    readonly weight: number;
+}
+
+class CommitHookQueue {
+    private hooks: CommitHook[] = [];
+    private state: 'pending' | 'running' | 'finished' = 'pending';
+    private currentWeight?: number;
+
+    constructor(private readonly name: string) {}
+
+    add(callback: () => Promise<void>, weight: number): void {
+        if (!Number.isFinite(weight)) throw new RangeError('Commit hook weight must be finite');
+        if (this.state === 'finished') throw new Error(`Database ${this.name} hooks have already finished`);
+        if (this.currentWeight !== undefined && weight < this.currentWeight) {
+            throw new RangeError(`Cannot register a database ${this.name} hook below the current weight`);
+        }
+        this.hooks.push({ callback, weight });
+    }
+
+    checkpoint(): CommitHook[] {
+        return [...this.hooks];
+    }
+
+    restore(hooks: readonly CommitHook[]): void {
+        this.hooks = [...hooks];
+    }
+
+    assertCanRun(): void {
+        if (this.state !== 'pending') throw new Error(`Database ${this.name} hooks have already started`);
+    }
+
+    async run(settle?: () => Promise<void>): Promise<void> {
+        this.assertCanRun();
+        this.state = 'running';
+        const executed = new Set<CommitHook>();
+        try {
+            while (true) {
+                let next = this.next(executed);
+                if (settle && (!next || (this.currentWeight !== undefined && next.weight > this.currentWeight))) {
+                    await settle();
+                    // Pending work or a flush can register another hook at the current weight.
+                    next = this.next(executed);
+                }
+                if (!next) break;
+                this.currentWeight = next.weight;
+                executed.add(next);
+                await next.callback();
+            }
+        } finally {
+            this.state = 'finished';
+        }
+    }
+
+    private next(executed: ReadonlySet<CommitHook>): CommitHook | undefined {
+        let next: CommitHook | undefined;
+        for (const hook of this.hooks) {
+            if (executed.has(hook)) continue;
+            if (!next || hook.weight < next.weight) next = hook;
+        }
+        return next;
+    }
+}
+
 interface DatabaseSessionCheckpoint {
     sequence: number;
     queued: Set<object>;
@@ -30,8 +95,8 @@ interface DatabaseSessionCheckpoint {
     touchedEntitySnapshots: Map<object, EntityInstanceCheckpointState>;
     mutationEntitySnapshots: EntityMutationCheckpointState[];
     insertedEntities: Map<object, InsertedEntityState>;
-    preCommitHookCount: number;
-    postCommitHookCount: number;
+    preCommitHooks: CommitHook[];
+    postCommitHooks: CommitHook[];
     pendingOperationErrorCount: number;
     mutations: ReturnType<DatabaseMutationAccumulator['checkpoint']>;
     transactionStates: Map<object, { entry: TransactionStateEntry; checkpoint: unknown }>;
@@ -61,8 +126,8 @@ export class DatabaseSession {
     private removed = new Set<object>();
     private pendingOperations = new Set<Promise<unknown>>();
     private pendingOperationErrors: unknown[] = [];
-    private preCommitHooks: (() => Promise<void>)[] = [];
-    private postCommitHooks: (() => Promise<void>)[] = [];
+    private readonly preCommitHooks = new CommitHookQueue('pre-commit');
+    private readonly postCommitHooks = new CommitHookQueue('post-commit');
     private flushing = false;
     private autoFlushSuppressionDepth = 0;
     private readonly mutationAccumulator = new DatabaseMutationAccumulator();
@@ -292,12 +357,14 @@ export class DatabaseSession {
         }
     }
 
-    addPreCommitHook(hook: () => Promise<void>): void {
-        this.preCommitHooks.push(hook);
+    /** Lower weights run first; equal weights retain registration order. */
+    addPreCommitHook(hook: () => Promise<void>, weight = 0): void {
+        this.preCommitHooks.add(hook, weight);
     }
 
-    addPostCommitHook(hook: () => Promise<void>): void {
-        this.postCommitHooks.push(hook);
+    /** Orders callbacks after commit without flushing the committed session. */
+    addPostCommitHook(hook: () => Promise<void>, weight = 0): void {
+        this.postCommitHooks.add(hook, weight);
     }
 
     recordEntityMutation(
@@ -327,11 +394,21 @@ export class DatabaseSession {
     }
 
     async runPreCommitHooks(): Promise<void> {
-        for (const hook of this.preCommitHooks) await hook();
+        this.preCommitHooks.assertCanRun();
+        try {
+            await this.preCommitHooks.run(async () => {
+                await this.waitForPendingOperations();
+                await this.flush();
+            });
+        } catch (error) {
+            // A callback can throw while tracked work still holds this connection. Drain it before rollback.
+            await this.settlePendingOperations();
+            throw error;
+        }
     }
 
     async runPostCommitHooks(): Promise<void> {
-        for (const hook of this.postCommitHooks) await hook();
+        await this.postCommitHooks.run();
     }
 
     private createCheckpoint(): DatabaseSessionCheckpoint {
@@ -363,8 +440,8 @@ export class DatabaseSession {
             touchedEntitySnapshots,
             mutationEntitySnapshots,
             insertedEntities: new Map(this.insertedEntities),
-            preCommitHookCount: this.preCommitHooks.length,
-            postCommitHookCount: this.postCommitHooks.length,
+            preCommitHooks: this.preCommitHooks.checkpoint(),
+            postCommitHooks: this.postCommitHooks.checkpoint(),
             pendingOperationErrorCount: this.pendingOperationErrors.length,
             mutations: this.mutationAccumulator.checkpoint(),
             transactionStates: new Map([...this.transactionStates].map(([key, entry]) => [key, { entry, checkpoint: entry.checkpoint(entry.value) }]))
@@ -424,8 +501,8 @@ export class DatabaseSession {
             Object.assign(entity, snapshot);
             markEntityClean(entity);
         }
-        this.preCommitHooks.length = checkpoint.preCommitHookCount;
-        this.postCommitHooks.length = checkpoint.postCommitHookCount;
+        this.preCommitHooks.restore(checkpoint.preCommitHooks);
+        this.postCommitHooks.restore(checkpoint.postCommitHooks);
         this.pendingOperationErrors.length = checkpoint.pendingOperationErrorCount;
         this.mutationAccumulator.restore(checkpoint.mutations);
 

@@ -1469,6 +1469,347 @@ describe('database query builder and persistence', () => {
         assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'pre', 'commit', 'post', 'release']);
     });
 
+    for (const phase of ['pre', 'post'] as const) {
+        it(`orders ${phase}-commit hooks by weight with FIFO ties and distinct registrations`, async () => {
+            const db = new BaseDatabase(new FakeDriver('mysql'), []);
+            const order: string[] = [];
+            await db.transaction(async session => {
+                const add = phase === 'pre' ? session.addPreCommitHook.bind(session) : session.addPostCommitHook.bind(session);
+                const repeated = async () => {
+                    order.push('repeated');
+                };
+                add(async () => {
+                    order.push('late');
+                }, 100);
+                add(async () => {
+                    order.push('default');
+                });
+                add(repeated);
+                add(async () => {
+                    order.push('early');
+                }, -10);
+                add(repeated);
+            });
+            assert.deepStrictEqual(order, ['early', 'default', 'repeated', 'repeated', 'late']);
+        });
+
+        it(`allows current and higher weights during ${phase}-commit hooks`, async () => {
+            const db = new BaseDatabase(new FakeDriver('mysql'), []);
+            const order: string[] = [];
+            await db.transaction(async session => {
+                const add = phase === 'pre' ? session.addPreCommitHook.bind(session) : session.addPostCommitHook.bind(session);
+                add(async () => {
+                    order.push('first');
+                    assert.throws(() => add(async () => {}, -1), /below the current weight/);
+                    add(async () => {
+                        order.push('dynamic late');
+                    }, 20);
+                    add(async () => {
+                        order.push('dynamic current');
+                    });
+                });
+                add(async () => {
+                    order.push('second');
+                });
+                add(async () => {
+                    order.push('late');
+                }, 10);
+            });
+            assert.deepStrictEqual(order, ['first', 'second', 'dynamic current', 'late', 'dynamic late']);
+        });
+
+        it(`rejects non-finite weights and completed or recursive ${phase}-commit execution`, async () => {
+            const db = new BaseDatabase(new FakeDriver('mysql'), []);
+            let completed!: DatabaseSession;
+            await db.transaction(async session => {
+                completed = session;
+                const add = phase === 'pre' ? session.addPreCommitHook.bind(session) : session.addPostCommitHook.bind(session);
+                const run = phase === 'pre' ? session.runPreCommitHooks.bind(session) : session.runPostCommitHooks.bind(session);
+                for (const weight of [NaN, Infinity, -Infinity]) {
+                    assert.throws(() => add(async () => {}, weight), /weight must be finite/);
+                }
+                add(async () => {
+                    await assert.rejects(run(), /hooks have already started/);
+                });
+            });
+            const add = phase === 'pre' ? completed.addPreCommitHook.bind(completed) : completed.addPostCommitHook.bind(completed);
+            assert.throws(() => add(async () => {}), /hooks have already finished/);
+        });
+    }
+
+    it('rejects recursive pre-commit execution from tracked work without waiting on its caller', async () => {
+        const db = new BaseDatabase(new FakeDriver('mysql'), []);
+        await db.transaction(async session => {
+            session.addPreCommitHook(async () => {
+                await session.trackOperation(async () => {
+                    await assert.rejects(session.runPreCommitHooks(), /hooks have already started/);
+                });
+            });
+        });
+    });
+
+    it('flushes each pre-commit weight group before later hooks and audits their final changes', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User, ApiToken]);
+        const order: string[] = [];
+        db.registerMutationInterceptor({
+            beforeCommit: ({ session, mutations }) => {
+                order.push('intercept');
+                const mutation = mutations[0];
+                assert(mutation.kind === 'entity');
+                assert.equal(mutation.after?.name, 'Late hook');
+                assert.throws(() => session.addPreCommitHook(async () => {}), /hooks have already finished/);
+                session.add(createEntity(ApiToken, { token: 'audit', label: 'artifact' }));
+            }
+        });
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Initial', email: null });
+            session.add(user);
+            session.addPreCommitHook(async () => {
+                order.push('late');
+                assert.equal(driver.executes.length, 2);
+                assert.equal(driver.executes[1].bindings[0], 'Normal hook');
+                driver.rows = [{ id: user.id, name: 'Normal hook', email: null }];
+                const persisted = await session.query(User).filter({ id: user.id }).findOne();
+                assert.equal(persisted.name, 'Normal hook');
+                user.name = 'Late hook';
+            }, 100);
+            session.addPreCommitHook(async () => {
+                order.push('normal');
+                user.name = 'Normal hook';
+            });
+            session.addPostCommitHook(async () => {
+                order.push('post');
+                assert.match(driver.executes.at(-1)!.sql, /INSERT INTO `api_tokens`/);
+            });
+        });
+        assert.deepStrictEqual(order, ['normal', 'late', 'intercept', 'post']);
+        assert.equal(driver.executes.length, 4);
+    });
+
+    for (const hasLaterHook of [false, true]) {
+        it(`reselects hooks registered by tracked work at the ${hasLaterHook ? 'next-weight' : 'final'} drain`, async () => {
+            const driver = new FakeDriver('mysql');
+            const db = new BaseDatabase(driver, []);
+            const order: string[] = [];
+            let release!: () => void;
+            let started!: () => void;
+            const gate = new Promise<void>(resolve => {
+                release = resolve;
+            });
+            const ready = new Promise<void>(resolve => {
+                started = resolve;
+            });
+            const transaction = db.transaction(async session => {
+                session.addPreCommitHook(async () => {
+                    order.push('initial');
+                    void session.trackOperation(async () => {
+                        await gate;
+                        session.addPreCommitHook(async () => {
+                            order.push('drained current');
+                        });
+                        session.addPreCommitHook(async () => {
+                            order.push('drained later');
+                        }, 20);
+                    });
+                    started();
+                });
+                if (hasLaterHook)
+                    session.addPreCommitHook(async () => {
+                        order.push('later');
+                    }, 10);
+            });
+            await ready;
+            assert.deepStrictEqual(order, ['initial']);
+            assert.equal(driver.connections[0].released, false);
+            release();
+            await transaction;
+            assert.deepStrictEqual(
+                order,
+                hasLaterHook ? ['initial', 'drained current', 'later', 'drained later'] : ['initial', 'drained current', 'drained later']
+            );
+        });
+    }
+
+    it('reselects hooks registered during the boundary flush', async () => {
+        const db = new BaseDatabase(new FakeDriver('mysql'), []);
+        const order: string[] = [];
+        await db.transaction(async session => {
+            const flush = session.flush.bind(session);
+            let registerDuringFlush = false;
+            session.flush = async () => {
+                await flush();
+                if (registerDuringFlush) {
+                    registerDuringFlush = false;
+                    session.addPreCommitHook(async () => {
+                        order.push('from flush');
+                    });
+                }
+            };
+            session.addPreCommitHook(async () => {
+                order.push('normal');
+                registerDuringFlush = true;
+            });
+            session.addPreCommitHook(async () => {
+                order.push('late');
+            }, 100);
+        });
+        assert.deepStrictEqual(order, ['normal', 'from flush', 'late']);
+    });
+
+    it('restores weighted registrations and transaction state on savepoint rollback', async () => {
+        const db = new BaseDatabase(new FakeDriver('mysql'), []);
+        const order: string[] = [];
+        await db.transaction(async session => {
+            const state = session.getTransactionState(
+                {},
+                () => new Set(['original']),
+                value => new Set(value),
+                (value, saved) => {
+                    value.clear();
+                    for (const item of saved) value.add(item);
+                }
+            );
+            session.addPreCommitHook(async () => {
+                order.push('late');
+            }, 100);
+            session.addPreCommitHook(async () => {
+                order.push(...state);
+            });
+            session.addPostCommitHook(async () => {
+                order.push('post late');
+            }, 100);
+            await session.savepoint('hooks');
+            state.add('discarded');
+            session.addPreCommitHook(async () => {
+                assert.fail('rolled-back pre hook ran');
+            }, -10);
+            session.addPostCommitHook(async () => {
+                assert.fail('rolled-back post hook ran');
+            }, -10);
+            await session.rollbackToSavepoint('hooks');
+            session.addPreCommitHook(async () => {
+                order.push('replacement');
+            });
+            session.addPostCommitHook(async () => {
+                order.push('post normal');
+            });
+        });
+        assert.deepStrictEqual(order, ['original', 'replacement', 'late', 'post normal', 'post late']);
+    });
+
+    it('does not replay executed hooks or rewind the active weight on savepoint rollback', async () => {
+        const db = new BaseDatabase(new FakeDriver('mysql'), []);
+        const order: string[] = [];
+        await db.transaction(async session => {
+            session.addPreCommitHook(async () => {
+                order.push('external action');
+            });
+            session.addPreCommitHook(async () => {
+                order.push('rollback');
+                await session.rollbackToSavepoint('before_hooks');
+                assert.throws(() => session.addPreCommitHook(async () => {}, 0), /below the current weight/);
+                session.addPreCommitHook(async () => {
+                    order.push('compensation');
+                }, 100);
+            }, 100);
+            session.addPreCommitHook(async () => {
+                order.push('last');
+            }, 200);
+            await session.savepoint('before_hooks');
+        });
+        assert.deepStrictEqual(order, ['external action', 'rollback', 'compensation', 'last']);
+    });
+
+    it('orders post-commit callbacks without flushing ORM changes after commit', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        await db.transaction(async session => {
+            const user = createEntity(User, { name: 'Committed', email: null });
+            session.add(user);
+            session.addPostCommitHook(async () => {
+                user.name = 'After commit';
+            });
+            session.addPostCommitHook(async () => {
+                assert.equal(driver.executes.length, 1);
+                assert(driver.connections[0].commands.includes('commit'));
+            }, 100);
+        });
+        assert.equal(driver.executes.length, 1);
+    });
+
+    it('rolls back late-hook writes on failure and skips post-commit hooks', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const error = new Error('projection failed');
+        await assert.rejects(
+            db.transaction(async session => {
+                session.add(createEntity(User, { name: 'Source', email: null }));
+                session.addPreCommitHook(async () => {
+                    await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${10})`);
+                    throw error;
+                }, 100);
+                session.addPostCommitHook(async () => {
+                    assert.fail('post-commit hook ran');
+                });
+            }),
+            error
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'execute', 'rollback', 'release']);
+    });
+
+    it('drains tracked work before rolling back an early pre-commit failure', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const error = new Error('callback failed first');
+        let release!: () => void;
+        let started!: () => void;
+        const gate = new Promise<void>(resolve => {
+            release = resolve;
+        });
+        const ready = new Promise<void>(resolve => {
+            started = resolve;
+        });
+        const transaction = db.transaction(async session => {
+            session.addPreCommitHook(async () => {
+                void session.trackOperation(async () => {
+                    await gate;
+                    await session.rawExecute(sql`INSERT INTO search_index (id) VALUES (${7})`);
+                    throw new Error('tracked failure must not replace original');
+                });
+                started();
+                throw error;
+            });
+        });
+        const rejected = assert.rejects(transaction, error);
+        await ready;
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin']);
+        assert.equal(driver.connections[0].released, false);
+        release();
+        await rejected;
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'execute', 'rollback', 'release']);
+    });
+
+    it('fails before later weights on a tracked rejection even when the hook returns normally', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, []);
+        const error = new Error('tracked hook failure');
+        await assert.rejects(
+            db.transaction(async session => {
+                session.addPreCommitHook(async () => {
+                    void session.trackOperation(async () => {
+                        throw error;
+                    });
+                });
+                session.addPreCommitHook(async () => {
+                    assert.fail('later hook ran');
+                }, 100);
+            }),
+            error
+        );
+        assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
+    });
+
     it('delivers consolidated entity mutations to database interceptors before commit', async () => {
         const driver = new FakeDriver('mysql');
         const db = new BaseDatabase(driver, [User]);

@@ -99,8 +99,6 @@ export class BaseDatabase {
             await session.waitForPendingOperations();
             await session.flush();
             await session.runPreCommitHooks();
-            await session.waitForPendingOperations();
-            await session.flush();
             await this.runMutationInterceptors(session);
             await session.waitForPendingOperations();
             await session.flush();
