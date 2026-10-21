@@ -1,3 +1,4 @@
+import { BaseAppConfig } from '../../app/config';
 import { BaseDatabase, createMigrationPlan } from '../../database';
 import { sql } from '../../database/sql';
 import { uuid7 } from '../../helpers';
@@ -20,14 +21,93 @@ export class WorkerRecorderService {
     private readonly observers = new Map<string, QueueEvents>();
     private readonly terminalJobTasks = new Map<string, Promise<void>>();
     private tableReady?: Promise<void>;
+    private retentionRunning = false;
+    private retentionTimer?: NodeJS.Timeout;
+    private retentionTask?: Promise<number>;
     private readonly logger = createLogger(this);
 
-    constructor(private readonly db?: BaseDatabase) {
+    constructor(
+        private readonly db?: BaseDatabase,
+        private readonly config: BaseAppConfig = new BaseAppConfig()
+    ) {
         if (db) JobEntity.registerDatabase(db);
     }
 
     getRecords(): WorkerJobRecord[] {
         return this.records.map(record => ({ ...record }));
+    }
+
+    isRetentionEnabled(): boolean {
+        const { WORKER_RECORD_RETENTION_MS: ttl, WORKER_RECORD_PURGE_BATCH_SIZE: batchSize, WORKER_RECORD_PURGE_INTERVAL_MS: interval } = this.config;
+        if (!Number.isSafeInteger(ttl) || ttl < 0) throw new Error('WORKER_RECORD_RETENTION_MS must be a nonnegative safe integer');
+        if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 10_000) {
+            throw new Error('WORKER_RECORD_PURGE_BATCH_SIZE must be an integer between 1 and 10000');
+        }
+        if (!Number.isSafeInteger(interval) || interval < 1_000 || interval > 2_147_483_647) {
+            throw new Error('WORKER_RECORD_PURGE_INTERVAL_MS must be an integer between 1000 and 2147483647');
+        }
+        return !!this.db && ttl > 0;
+    }
+
+    /** Called only by the elected retention worker (or the in-process test runner). */
+    startRetention(): void {
+        if (this.retentionRunning || !this.isRetentionEnabled()) return;
+        this.retentionRunning = true;
+        this.scheduleRetention(0);
+    }
+
+    async stopRetention(): Promise<void> {
+        this.retentionRunning = false;
+        clearTimeout(this.retentionTimer);
+        this.retentionTimer = undefined;
+        await this.retentionTask?.catch(() => {});
+    }
+
+    /** Deletes at most one batch in autocommit, outside job recording and application transactions. */
+    async purgeExpiredRecords(): Promise<number> {
+        if (!this.isRetentionEnabled()) return 0;
+        if (this.retentionTask) return this.retentionTask;
+        const task = this.purgeExpiredBatch();
+        this.retentionTask = task;
+        try {
+            return await task;
+        } finally {
+            if (this.retentionTask === task) this.retentionTask = undefined;
+        }
+    }
+
+    private scheduleRetention(delay: number): void {
+        if (!this.retentionRunning) return;
+        this.retentionTimer = setTimeout(async () => {
+            this.retentionTimer = undefined;
+            let nextDelay = this.config.WORKER_RECORD_PURGE_INTERVAL_MS;
+            try {
+                const deleted = await this.purgeExpiredRecords();
+                // Drain historical backlogs gradually, yielding between short, bounded transactions.
+                if (deleted === this.config.WORKER_RECORD_PURGE_BATCH_SIZE) nextDelay = 1_000;
+            } catch (error) {
+                this.logger.error('Failed to purge expired worker records', error);
+            }
+            this.scheduleRetention(nextDelay);
+        }, delay);
+        this.retentionTimer.unref();
+    }
+
+    private async purgeExpiredBatch(): Promise<number> {
+        await this.ensureTableExists();
+        const db = this.db!;
+        const cutoff = new Date(Date.now() - this.config.WORKER_RECORD_RETENTION_MS);
+        const expired = sql`${sql.identifier('completedAt')} < ${cutoff} AND ${sql.identifier('status')} IN (${'completed'}, ${'failed'})`;
+        // A limited indexed read works on both MySQL and PostgreSQL without an unbounded DELETE
+        // or MySQL's restrictions on selecting from the target table in a DELETE subquery.
+        const rows = await db.rawQuery<{ id: string }>(
+            sql`SELECT ${sql.identifier('id')} FROM ${sql.identifier('_jobs')} WHERE ${expired} ORDER BY ${sql.identifier('completedAt')}, ${sql.identifier('id')} LIMIT ${this.config.WORKER_RECORD_PURGE_BATCH_SIZE}`
+        );
+        if (!rows.length) return 0;
+        const result = await db.rawExecute(
+            sql`DELETE FROM ${sql.identifier('_jobs')} WHERE ${expired} AND ${sql.identifier('id')} IN (${sql.join(rows.map(row => sql`${row.id}`))})`
+        );
+        return result.affectedRows;
     }
 
     async ensureTableExists(): Promise<void> {
@@ -110,7 +190,7 @@ export class WorkerRecorderService {
             } catch (error) {
                 // Another elected queue recorder can initialize the shared table at the same time.
                 // Re-reading the scoped plan verifies that its DDL won the race before suppressing it.
-                if (!isTableAlreadyExistsError(error)) throw error;
+                if (!isSchemaAlreadyExistsError(error)) throw error;
                 const retry = await createMigrationPlan(db, { tableNames: ['_jobs'] });
                 if (retry.hasChanges) throw error;
             }
@@ -271,10 +351,16 @@ export class WorkerRecorderService {
     }
 }
 
-function isTableAlreadyExistsError(error: unknown): boolean {
+function isSchemaAlreadyExistsError(error: unknown): boolean {
     if (typeof error !== 'object' || error === null) return false;
     const candidate = error as { code?: unknown; errno?: unknown };
-    return candidate.code === '42P07' || candidate.code === 'ER_TABLE_EXISTS_ERROR' || candidate.errno === 1050;
+    return (
+        candidate.code === '42P07' ||
+        candidate.code === 'ER_TABLE_EXISTS_ERROR' ||
+        candidate.errno === 1050 ||
+        candidate.code === 'ER_DUP_KEYNAME' ||
+        candidate.errno === 1061
+    );
 }
 
 function toJsonValue(value: unknown): string | null {
