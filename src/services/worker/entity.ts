@@ -4,6 +4,7 @@ import type { integer, MaxLength, MySQL, PrimaryKey } from '../../reflection';
 import { BaseEntity } from '../../database';
 
 @entity.name('_jobs')
+@entity.index(['completedAt', 'id'], { name: '_jobs_completed_at_id_idx' })
 export class JobEntity extends BaseEntity {
     id!: string & PrimaryKey & MaxLength<191>;
     queue!: string & MaxLength<191>;

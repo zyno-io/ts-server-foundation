@@ -140,6 +140,10 @@ export class BaseAppConfig {
     BULL_REDIS_PREFIX?: string;
 
     BULL_QUEUE: string = 'default';
+    /** Completed/failed database job history lifetime; 0 disables automatic purging. */
+    WORKER_RECORD_RETENTION_MS: number = 48 * 60 * 60_000;
+    WORKER_RECORD_PURGE_BATCH_SIZE: number = 1_000;
+    WORKER_RECORD_PURGE_INTERVAL_MS: number = 60_000;
     MUTEX_MODE: 'local' | 'redis' = 'local';
 
     ENABLE_OPENAPI_SCHEMA?: boolean;

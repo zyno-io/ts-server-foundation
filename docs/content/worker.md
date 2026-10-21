@@ -131,7 +131,7 @@ Outside test mode, `WorkerService.queueJob()` writes to BullMQ. Workers deserial
 
 `WorkerRecorderService` keeps in-memory execution records for the lifetime of the process and writes completed/failed records into the internal `_jobs` table by default when a `BaseDatabase` provider is configured. It provisions that table from `JobEntity` before a BullMQ worker consumes jobs (and before inline database recording); applications do not include it in their own migrations.
 
-For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. This preserves completed jobs across recorder restart or leader handoff until their database record is durable. `getRecords()` returns shallow copies. The recorder itself is unbounded; DevConsole intentionally displays only the latest 200 records.
+For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. This preserves completed jobs across recorder restart or leader handoff until their database record is durable. `getRecords()` returns shallow copies. In-memory records remain available for the lifetime of the process; DevConsole intentionally displays only the latest 200 records.
 
 ```typescript
 await worker.queueJob(SendEmailJob, data, {
@@ -141,7 +141,23 @@ await worker.queueJob(SendEmailJob, data, {
 const records = app.get(WorkerRecorderService).getRecords();
 ```
 
-Set `recordToDatabase: false` only when a job must not have a durable audit record. The database record contains queue, queue id, attempt, job name, input data, status, result, and timestamps.
+Set `recordToDatabase: false` to opt out of persisted execution history. The database record contains queue, queue id, attempt, job name, input data, status, result, and timestamps. Execution history has a short retention period; keep business or security audit history in an application-owned audit log.
+
+### Database retention
+
+The framework automatically deletes completed and failed `_jobs` rows whose `completedAt` is older than 48 hours. Retention is global across queues and applies to existing rows as well as new executions. Configure it through `BaseAppConfig` (or the corresponding environment variables):
+
+| Setting                           | Default                | Meaning                                                                                     |
+| --------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------- |
+| `WORKER_RECORD_RETENTION_MS`      | `172800000` (48 hours) | Retain terminal records for this long; `0` disables automatic purging.                      |
+| `WORKER_RECORD_PURGE_BATCH_SIZE`  | `1000`                 | Maximum rows per delete, from `1` to `10000`.                                               |
+| `WORKER_RECORD_PURGE_INTERVAL_MS` | `60000`                | Delay between checks when caught up or after a database error; from `1000` to `2147483647`. |
+
+A dedicated Redis leader, using the `BULL` connection and prefix, runs retention across worker replicas independently of the per-queue recorders. At least one worker runner must be running; HTTP-only and inline-only processes do not run automatic retention. The in-process test runner uses a local loop. Shutdown and leadership loss stop the loop and wait for the current batch.
+
+Each batch selects at most the configured number of ids through the `(completedAt, id)` index, then deletes only those ids while rechecking their age and terminal status. These are separate short autocommit statements, outside job execution and recording transactions. Full batches retry after one second to drain a backlog gradually; errors are logged and retried at the configured interval without affecting job recording. Retention is approximate: backlog, downtime, and the check interval can keep rows longer than the TTL.
+
+The recorder provisions `_jobs_completed_at_id_idx` on new and existing tables. For a very large existing table, plan and verify that index build before upgrading workers: startup schema reconciliation must finish before consumption starts, and index creation can take time and database resources. Deleting rows makes InnoDB space reusable; it does not itself shrink the table's filesystem allocation. This retention policy does not trim the in-memory `getRecords()` history.
 
 ## Request Context
 

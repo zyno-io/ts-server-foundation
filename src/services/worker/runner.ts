@@ -22,6 +22,7 @@ export class WorkerRunnerService {
     private readonly bullWorkers = new Map<string, BullWorker<BullMqWorkerJobData>>();
     private readonly bullWorkerRedisLifecycleCleanup = new Set<() => void>();
     private readonly recorderLeaders = new Map<string, LeaderService>();
+    private retentionLeader?: LeaderService;
     private bullWorkerRedisMonitor?: AvailabilityMonitor;
 
     constructor(
@@ -63,6 +64,7 @@ export class WorkerRunnerService {
             return;
         }
 
+        this.recorder.startRetention();
         this.scheduleCronJobs();
         this.logger.info('Worker started', {
             backend: 'memory',
@@ -103,6 +105,9 @@ export class WorkerRunnerService {
         this.bullWorkers.clear();
         await Promise.all([...this.recorderLeaders.values()].map(leader => leader.stop()));
         this.recorderLeaders.clear();
+        await this.retentionLeader?.stop();
+        this.retentionLeader = undefined;
+        await this.recorder.stopRetention();
         await this.recorder.stop();
         while (this.executing.size) {
             await new Promise(resolve => setTimeout(resolve, 10));
@@ -313,6 +318,13 @@ export class WorkerRunnerService {
     }
 
     private startBullMqRecorders(): void {
+        if (!this.retentionLeader && this.recorder.isRetentionEnabled()) {
+            const leader = new LeaderService('worker-record-retention', { redisConfigPrefix: 'BULL' });
+            leader.setBecameLeaderCallback(() => this.recorder.startRetention());
+            leader.setLostLeaderCallback(() => this.recorder.stopRetention());
+            this.retentionLeader = leader;
+            leader.start();
+        }
         for (const queueName of this.getRegisteredQueueNames()) {
             if (this.recorderLeaders.has(queueName)) continue;
             const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL' });
