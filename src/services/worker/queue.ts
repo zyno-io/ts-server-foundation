@@ -2,7 +2,7 @@ import { BaseAppConfig } from '../../app';
 import { createRedisOptions } from '../../helpers/redis/redis';
 import { getWorkerJobMetadata, type JobClass, type QueuedWorkerJob, type IJobOptions } from './types';
 import { notifyWorkerObservers } from './observer';
-import { Queue, type ConnectionOptions, type Job as BullJob, type QueueOptions, type WorkerOptions } from 'bullmq';
+import { Queue, type ConnectionOptions, type Job as BullJob, type KeepJobs, type QueueOptions, type WorkerOptions } from 'bullmq';
 
 export interface BullMqWorkerJobData<I = unknown> {
     data: I;
@@ -56,11 +56,10 @@ export class WorkerQueueRegistry {
             },
             {
                 delay: options.delay,
-                // The elected worker recorder removes terminal BullMQ jobs only after their
-                // durable _jobs record has been written. Keeping them here makes leader
-                // handoff and recorder restart recovery possible.
-                removeOnComplete: false,
-                removeOnFail: false
+                // Prefer recorder-driven removal after `_jobs` is written (leader handoff /
+                // restart recovery). Age+count are a Redis safety net when the recorder
+                // cannot keep up or the worker is scaled to zero.
+                ...bullMqTerminalKeepJobs(this.config)
             }
         );
 
@@ -321,6 +320,25 @@ export class WorkerQueueRegistry {
             await job.remove();
         }
     }
+}
+
+
+/** Redis retention backstop for completed/failed jobs awaiting recorder cleanup. */
+export function bullMqTerminalKeepJobs(config?: BaseAppConfig): {
+    removeOnComplete: KeepJobs | boolean;
+    removeOnFail: KeepJobs | boolean;
+} {
+    const age = config?.BULL_TERMINAL_KEEP_AGE_SEC ?? 24 * 60 * 60;
+    const count = config?.BULL_TERMINAL_KEEP_COUNT ?? 10_000;
+    const keep: KeepJobs = {};
+    if (Number.isFinite(age) && age > 0) keep.age = Math.trunc(age);
+    if (Number.isFinite(count) && count > 0) keep.count = Math.trunc(count);
+    // Empty keep object would mean "keep forever" in BullMQ — fall back to false only when
+    // both dimensions are explicitly disabled.
+    if (keep.age === undefined && keep.count === undefined) {
+        return { removeOnComplete: false, removeOnFail: false };
+    }
+    return { removeOnComplete: keep, removeOnFail: keep };
 }
 
 async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> {

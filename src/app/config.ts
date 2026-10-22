@@ -144,6 +144,9 @@ export class BaseAppConfig {
     WORKER_RECORD_RETENTION_MS: number = 48 * 60 * 60_000;
     WORKER_RECORD_PURGE_BATCH_SIZE: number = 1_000;
     WORKER_RECORD_PURGE_INTERVAL_MS: number = 60_000;
+    /** Redis safety net for unreaped terminal BullMQ jobs (recorder still removes promptly after _jobs write). age/count 0 disables that dimension. */
+    BULL_TERMINAL_KEEP_AGE_SEC: number = 24 * 60 * 60;
+    BULL_TERMINAL_KEEP_COUNT: number = 10_000;
     MUTEX_MODE: 'local' | 'redis' = 'local';
 
     ENABLE_OPENAPI_SCHEMA?: boolean;

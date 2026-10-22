@@ -2,7 +2,7 @@ import type { App } from '../../app';
 import { createAvailabilityMonitor, withContextData, type AvailabilityMonitor } from '../../helpers';
 import { LeaderService } from '../leader';
 import { ScopedLogger } from '../logger';
-import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData } from './queue';
+import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData, bullMqTerminalKeepJobs } from './queue';
 import { WorkerRecorderService } from './recorder';
 import { BaseJob, getRegisteredWorkerJobs, getWorkerJobMetadata, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
 import { notifyWorkerObservers } from './observer';
@@ -355,8 +355,7 @@ export class WorkerRunnerService {
                     options: { repeatKey }
                 },
                 opts: {
-                    removeOnComplete: false,
-                    removeOnFail: false
+                    ...bullMqTerminalKeepJobs(this.config)
                 }
             });
         }

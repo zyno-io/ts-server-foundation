@@ -406,8 +406,8 @@ describe('worker services', () => {
                     options: { repeatKey: 'NewYorkCronJob:0 12 * * *' }
                 },
                 opts: {
-                    removeOnComplete: false,
-                    removeOnFail: false
+                    removeOnComplete: { age: 24 * 60 * 60, count: 10_000 },
+                    removeOnFail: { age: 24 * 60 * 60, count: 10_000 }
                 }
             }
         ]);
