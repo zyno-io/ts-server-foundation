@@ -49,6 +49,7 @@ export class WorkerRunnerService {
         }
 
         if (this.queueRegistry.usesBullMq()) {
+            bullMqTerminalKeepJobs(this.app.config);
             // A deployment migration may have run while an old worker was still active. Reconcile
             // again before this worker starts consuming jobs so a materialized stale repeat job
             // cannot reach this process and perpetuate its own chain.

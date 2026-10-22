@@ -38,7 +38,7 @@ describe('BullMQ recorder recovery', () => {
         drain.observers.set('history', observer);
         const completed: Job[] = [];
         const failed: Job[] = [];
-        const reads: { status: string; start: number; end: number }[] = [];
+        const reads: { status: string; start: number; end: number; asc: boolean }[] = [];
         const removed: string[] = [];
         const jobs = new Map<string, Job>();
         for (const [status, target, count] of [
@@ -73,13 +73,9 @@ describe('BullMQ recorder recovery', () => {
             }
         }
         const queue = {
-            async getCompleted(start: number, end: number) {
-                reads.push({ status: 'completed', start, end });
-                return completed.slice(start, end + 1);
-            },
-            async getFailed(start: number, end: number) {
-                reads.push({ status: 'failed', start, end });
-                return failed.slice(start, end + 1);
+            async getJobs([status]: ['completed' | 'failed'], start: number, end: number, asc: boolean) {
+                reads.push({ status, start, end, asc });
+                return (status === 'completed' ? completed : failed).slice(start, end + 1);
             },
             async getJob(id: string) {
                 return jobs.get(id);
@@ -91,12 +87,15 @@ describe('BullMQ recorder recovery', () => {
         assert.equal(new Set(removed).size, 308);
         assert.equal(completed.length, 0);
         assert.equal(failed.length, 0);
-        assert.deepEqual(
-            reads.map(read => read.status),
-            ['completed', 'completed', 'completed', 'completed', 'failed', 'failed', 'failed']
+        assert.ok(
+            removed.indexOf('failed-0') < removed.indexOf('completed-100'),
+            'failed jobs must progress before the completed backlog is exhausted'
         );
-        assert.ok(reads.every(read => read.start === 0 && read.end === 99));
-        assert.deepEqual(recorder.getRecords().at(-1)?.result, { reason: 'historical failure', stack: ['historical stack'] });
+        assert.ok(reads.every(read => read.start === 0 && read.end === 99 && read.asc));
+        assert.deepEqual(recorder.getRecords().find(record => record.queueId === 'failed-102')?.result, {
+            reason: 'historical failure',
+            stack: ['historical stack']
+        });
     });
 
     it('stops draining when its observer loses ownership during a page read', async () => {
@@ -106,15 +105,64 @@ describe('BullMQ recorder recovery', () => {
         drain.observers.set('history', observer);
         const registry = {
             getBullQueue: () => ({
-                async getCompleted() {
+                async getJobs() {
                     drain.observers.delete('history');
                     return [{ id: '1' }];
                 },
-                getJob: () => assert.fail('leadership was lost'),
-                getFailed: () => assert.fail('leadership was lost')
+                getJob: () => assert.fail('leadership was lost')
             })
         } as unknown as WorkerQueueRegistry;
         await drain.drainTerminalBullMqJobs('history', registry, observer);
+    });
+
+    it('does not reopen a queue when ownership was lost before draining began', async () => {
+        const recorder = new WorkerRecorderService();
+        const registry = {
+            getBullQueue: () => assert.fail('cancelled startup must not reopen a Redis queue')
+        } as unknown as WorkerQueueRegistry;
+        await (recorder as unknown as RecorderDrain).drainTerminalBullMqJobs('history', registry, {} as QueueEvents);
+    });
+
+    it('coalesces concurrent starts and cancels schema initialization before opening an observer', async () => {
+        for (const queueName of [undefined, 'history']) {
+            const recorder = new WorkerRecorderService();
+            let ready!: () => void;
+            const schema = new Promise<void>(resolve => (ready = resolve));
+            let schemaChecks = 0;
+            recorder.ensureTableExists = async () => {
+                schemaChecks++;
+                await schema;
+            };
+            const registry = {
+                getBullMqOptions: () => assert.fail('cancelled startup must not create a Redis observer')
+            } as unknown as WorkerQueueRegistry;
+            const first = recorder.start('history', registry);
+            const second = recorder.start('history', registry);
+            await recorder.stop(queueName);
+            ready();
+            await Promise.all([first, second]);
+            assert.equal(schemaChecks, 1);
+        }
+    });
+
+    it('does not let cancelled schema initialization cancel its replacement startup', async () => {
+        const recorder = new WorkerRecorderService();
+        let ready!: () => void;
+        const schema = new Promise<void>(resolve => (ready = resolve));
+        recorder.ensureTableExists = () => schema;
+        let optionReads = 0;
+        const registry = {
+            getBullMqOptions: () => {
+                optionReads++;
+                throw new Error('replacement reached observer creation');
+            }
+        } as unknown as WorkerQueueRegistry;
+        const first = recorder.start('history', registry);
+        await recorder.stop('history');
+        const replacement = assert.rejects(recorder.start('history', registry), /replacement reached observer creation/);
+        ready();
+        await Promise.all([first, replacement]);
+        assert.equal(optionReads, 1);
     });
 
     it('recovers a database deadlock during real QueueEvents startup and resumes removing new completions', async t => {

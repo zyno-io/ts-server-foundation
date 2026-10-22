@@ -47,6 +47,7 @@ export class WorkerQueueRegistry {
     async enqueue<I>(jobClass: JobClass<I>, data: I, options: IJobOptions = {}): Promise<QueuedWorkerJob<I>> {
         if (!this.usesBullMq()) return this.add(jobClass, data, options);
 
+        const terminalRetention = bullMqTerminalKeepJobs(this.config);
         const queueName = this.getQueueName(jobClass, options);
         const bullJob = await this.getBullQueue(queueName).add(
             jobClass.name,
@@ -58,8 +59,8 @@ export class WorkerQueueRegistry {
                 delay: options.delay,
                 // Prefer recorder-driven removal after `_jobs` is written (leader handoff /
                 // restart recovery). Age+count are a Redis safety net when the recorder
-                // cannot keep up or the worker is scaled to zero.
-                ...bullMqTerminalKeepJobs(this.config)
+                // cannot keep up. BullMQ applies this lazily on later terminal transitions.
+                ...terminalRetention
             }
         );
 
@@ -329,14 +330,16 @@ export function bullMqTerminalKeepJobs(config?: BaseAppConfig): {
 } {
     const age = config?.BULL_TERMINAL_KEEP_AGE_SEC ?? 24 * 60 * 60;
     const count = config?.BULL_TERMINAL_KEEP_COUNT ?? 10_000;
-    const hasAge = Number.isFinite(age) && age > 0;
-    const hasCount = Number.isFinite(count) && count > 0;
+    if (!Number.isSafeInteger(age) || age < 0) throw new Error('BULL_TERMINAL_KEEP_AGE_SEC must be a nonnegative safe integer');
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('BULL_TERMINAL_KEEP_COUNT must be a nonnegative safe integer');
+    const hasAge = age > 0;
+    const hasCount = count > 0;
     // BullMQ requires at least one retention dimension; false keeps jobs indefinitely.
     if (!hasAge && !hasCount) {
         return { removeOnComplete: false, removeOnFail: false };
     }
-    const keep: KeepJobs = hasAge ? { age: Math.trunc(age) } : { count: Math.trunc(count) };
-    if (hasCount) keep.count = Math.trunc(count);
+    const keep: KeepJobs = hasAge ? { age } : { count };
+    if (hasCount) keep.count = count;
     return { removeOnComplete: keep, removeOnFail: keep };
 }
 

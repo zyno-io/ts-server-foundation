@@ -18,7 +18,7 @@ function leaderFixture(t: TestContext, retryOnCallbackError = true) {
     const leader = new LeaderService('worker-recorder:recovery', { renewalIntervalMs: 100, retryDelayMs: 10, retryOnCallbackError });
     let owner: string | undefined;
     const client = {
-        ACQUIRE: t.mock.fn(async (_key: string, id: string) => {
+        ACQUIRE: t.mock.fn(async (_key: string, id: string): Promise<number> => {
             if (owner) return 0;
             owner = id;
             return 1;
@@ -139,4 +139,90 @@ describe('leader startup recovery', () => {
             await leader.stop();
         }
     });
+
+    it('does not let a pre-stop startup failure revoke a restarted leader', async t => {
+        const { leader, client } = leaderFixture(t);
+        let failStartup!: (error: Error) => void;
+        const startup = new Promise<void>((_resolve, reject) => (failStartup = reject));
+        let attempts = 0;
+        leader.setBecameLeaderCallback(() => (++attempts === 1 ? startup : undefined));
+        try {
+            leader.start();
+            await flushTasks();
+            await leader.stop();
+            leader.start();
+            await flushTasks();
+            failStartup(new Error('failure from before stop'));
+            await flushTasks();
+            assert.equal(leader.isLeader, true);
+            assert.equal(attempts, 2);
+            assert.equal(client.RELEASE.mock.callCount(), 1);
+            assert.notEqual(client.ACQUIRE.mock.calls[0].arguments[1], client.ACQUIRE.mock.calls[1].arguments[1]);
+        } finally {
+            await leader.stop();
+        }
+    });
+
+    it('releases a stale acquisition by its old ID without adopting or releasing the restarted lease', async t => {
+        const { leader, client } = leaderFixture(t);
+        let finishAcquire!: (value: number) => void;
+        client.ACQUIRE.mock.mockImplementationOnce(() => new Promise<number>(resolve => (finishAcquire = resolve)));
+        const start = t.mock.fn();
+        leader.setBecameLeaderCallback(start);
+        try {
+            leader.start();
+            await flushTasks();
+            await leader.stop();
+            leader.start();
+            await flushTasks();
+            finishAcquire(1);
+            await flushTasks();
+            assert.equal(leader.isLeader, true);
+            assert.equal(start.mock.callCount(), 1);
+            assert.equal(client.RELEASE.mock.callCount(), 1);
+            assert.equal(client.RELEASE.mock.calls[0].arguments[1], client.ACQUIRE.mock.calls[0].arguments[1]);
+            assert.notEqual(client.RELEASE.mock.calls[0].arguments[1], client.ACQUIRE.mock.calls[1].arguments[1]);
+        } finally {
+            await leader.stop();
+        }
+    });
+
+    for (const outcome of ['lease lost', 'connection error'] as const) {
+        it(`ignores an old renewal's ${outcome} after failed startup has reacquired leadership`, async t => {
+            const { leader, client } = leaderFixture(t);
+            let failStartup!: (error: Error) => void;
+            const startup = new Promise<void>((_resolve, reject) => (failStartup = reject));
+            let finishRenewal!: (value: number) => void;
+            let failRenewal!: (error: Error) => void;
+            const renewal = new Promise<number>((resolve, reject) => {
+                finishRenewal = resolve;
+                failRenewal = reject;
+            });
+            client.RENEW.mock.mockImplementationOnce(() => renewal);
+            let attempts = 0;
+            leader.setBecameLeaderCallback(() => (++attempts === 1 ? startup : undefined));
+            const cleanup = t.mock.fn();
+            leader.setLostLeaderCallback(cleanup);
+            try {
+                leader.start();
+                await flushTasks();
+                t.mock.timers.tick(100);
+                await flushTasks();
+                failStartup(new Error('recording failed'));
+                await flushTasks();
+                t.mock.timers.tick(10);
+                await flushTasks();
+                assert.equal(leader.isLeader, true);
+                assert.equal(attempts, 2);
+
+                if (outcome === 'lease lost') finishRenewal(0);
+                else failRenewal(new Error('old Redis request failed'));
+                await flushTasks();
+                assert.equal(leader.isLeader, true);
+                assert.equal(cleanup.mock.callCount(), 1);
+            } finally {
+                await leader.stop();
+            }
+        });
+    }
 });
