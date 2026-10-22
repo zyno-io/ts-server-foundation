@@ -133,6 +133,8 @@ Outside test mode, `WorkerService.queueJob()` writes to BullMQ. Workers deserial
 
 For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. This preserves completed jobs across recorder restart or leader handoff until their database record is durable. `getRecords()` returns shallow copies. In-memory records remain available for the lifetime of the process; DevConsole intentionally displays only the latest 200 records.
 
+On acquisition, the recorder drains historical terminal jobs in pages of 100. If startup fails (for example, a database deadlock during recording), it closes the observer and relinquishes its leader lease so election and startup can retry. A failed startup cannot keep renewing a lease without an active recorder.
+
 ```typescript
 await worker.queueJob(SendEmailJob, data, {
     runImmediately: true

@@ -62,6 +62,8 @@ export interface LeaderServiceOptions {
     retryDelayMs?: number;
     /** Redis configuration namespace, such as `BULL`; defaults to `MUTEX`. */
     redisConfigPrefix?: string;
+    /** Relinquish the lease and retry election if the became-leader callback fails. */
+    retryOnCallbackError?: boolean;
 }
 
 export class LeaderService {
@@ -79,12 +81,14 @@ export class LeaderService {
     private renewalIntervalMs: number;
     private retryDelayMs: number;
     private readonly redisConfigPrefix: string;
+    private readonly retryOnCallbackError: boolean;
 
     private logger = createLogger(this);
 
     constructor(key: string, options?: LeaderServiceOptions) {
         const config = getAppConfig();
         this.redisConfigPrefix = options?.redisConfigPrefix ?? 'MUTEX';
+        this.retryOnCallbackError = options?.retryOnCallbackError ?? false;
         const prefix = config[`${this.redisConfigPrefix}_REDIS_PREFIX` as keyof typeof config] ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app';
         this.key = `${prefix}:leader:${key}`;
         this.ttlMs = options?.ttlMs ?? 30000;
@@ -161,10 +165,21 @@ export class LeaderService {
                 this._isLeader = true;
                 this.logger.info('became leader', { key: this.key });
                 this.startRenewal();
+                const acquiredLockId = this.lockId;
                 try {
                     await this.becameLeaderCallback?.();
                 } catch (err) {
-                    this.logger.warn('becameLeader callback error', { err });
+                    this.logger.warn('becameLeader callback error', { err, key: this.key });
+                    // Failed startup must not leave a renewed lease with no service behind it.
+                    // A callback can outlive its lease; only abandon the acquisition it belongs to.
+                    if (this.retryOnCallbackError && this._isLeader && this.lockId === acquiredLockId) {
+                        this.handleLostLeadership();
+                        try {
+                            await this.getRedisClient().RELEASE(this.key, acquiredLockId);
+                        } catch (releaseError) {
+                            this.logger.warn('failed to release leader lock after callback error', { err: releaseError, key: this.key });
+                        }
+                    }
                 }
                 return;
             }

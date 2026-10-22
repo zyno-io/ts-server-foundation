@@ -11,6 +11,7 @@ import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
 import type { JobClass, QueuedWorkerJob, WorkerJobRecord } from './types';
 
 type TerminalJobStatus = 'completed' | 'failed';
+const TERMINAL_DRAIN_BATCH_SIZE = 100;
 
 /**
  * Records terminal worker jobs. For BullMQ queues, a leader-owned QueueEvents observer writes
@@ -199,19 +200,26 @@ export class WorkerRecorderService {
 
     private async drainTerminalBullMqJobs(queueName: string, queueRegistry: WorkerQueueRegistry, observer: QueueEvents): Promise<void> {
         const queue = queueRegistry.getBullQueue(queueName);
-        const [completed, failed] = await Promise.all([queue.getCompleted(), queue.getFailed()]);
-        for (const job of completed) {
-            await this.queueTerminalBullMqJob(queueName, String(job.id), 'completed', job.returnvalue, queueRegistry, observer);
-        }
-        for (const job of failed) {
-            await this.queueTerminalBullMqJob(
-                queueName,
-                String(job.id),
-                'failed',
-                { reason: job.failedReason, stack: job.stacktrace },
-                queueRegistry,
-                observer
-            );
+        for (const status of ['completed', 'failed'] as const) {
+            while (this.observers.get(queueName) === observer) {
+                // Removal shifts the remaining set forward. Always read its first bounded page
+                // instead of materializing every historical job or skipping jobs by offset.
+                const jobs = await (status === 'completed'
+                    ? queue.getCompleted(0, TERMINAL_DRAIN_BATCH_SIZE - 1)
+                    : queue.getFailed(0, TERMINAL_DRAIN_BATCH_SIZE - 1));
+                if (!jobs.length) break;
+                for (const job of jobs) {
+                    if (this.observers.get(queueName) !== observer) return;
+                    await this.queueTerminalBullMqJob(
+                        queueName,
+                        String(job.id),
+                        status,
+                        status === 'completed' ? job.returnvalue : { reason: job.failedReason, stack: job.stacktrace },
+                        queueRegistry,
+                        observer
+                    );
+                }
+            }
         }
     }
 

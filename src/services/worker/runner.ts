@@ -327,7 +327,7 @@ export class WorkerRunnerService {
         }
         for (const queueName of this.getRegisteredQueueNames()) {
             if (this.recorderLeaders.has(queueName)) continue;
-            const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL' });
+            const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL', retryOnCallbackError: true });
             leader.setBecameLeaderCallback(async () => {
                 this.logger.info('This worker is now the recorder leader', { queue: queueName });
                 await this.recorder.start(queueName, this.queueRegistry);
@@ -355,7 +355,7 @@ export class WorkerRunnerService {
                     options: { repeatKey }
                 },
                 opts: {
-                    ...bullMqTerminalKeepJobs(this.config)
+                    ...bullMqTerminalKeepJobs(this.app.config)
                 }
             });
         }

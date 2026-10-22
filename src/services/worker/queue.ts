@@ -322,7 +322,6 @@ export class WorkerQueueRegistry {
     }
 }
 
-
 /** Redis retention backstop for completed/failed jobs awaiting recorder cleanup. */
 export function bullMqTerminalKeepJobs(config?: BaseAppConfig): {
     removeOnComplete: KeepJobs | boolean;
@@ -330,14 +329,14 @@ export function bullMqTerminalKeepJobs(config?: BaseAppConfig): {
 } {
     const age = config?.BULL_TERMINAL_KEEP_AGE_SEC ?? 24 * 60 * 60;
     const count = config?.BULL_TERMINAL_KEEP_COUNT ?? 10_000;
-    const keep: KeepJobs = {};
-    if (Number.isFinite(age) && age > 0) keep.age = Math.trunc(age);
-    if (Number.isFinite(count) && count > 0) keep.count = Math.trunc(count);
-    // Empty keep object would mean "keep forever" in BullMQ — fall back to false only when
-    // both dimensions are explicitly disabled.
-    if (keep.age === undefined && keep.count === undefined) {
+    const hasAge = Number.isFinite(age) && age > 0;
+    const hasCount = Number.isFinite(count) && count > 0;
+    // BullMQ requires at least one retention dimension; false keeps jobs indefinitely.
+    if (!hasAge && !hasCount) {
         return { removeOnComplete: false, removeOnFail: false };
     }
+    const keep: KeepJobs = hasAge ? { age: Math.trunc(age) } : { count: Math.trunc(count) };
+    if (hasCount) keep.count = Math.trunc(count);
     return { removeOnComplete: keep, removeOnFail: keep };
 }
 
