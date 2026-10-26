@@ -62,6 +62,8 @@ export interface LeaderServiceOptions {
     retryDelayMs?: number;
     /** Redis configuration namespace, such as `BULL`; defaults to `MUTEX`. */
     redisConfigPrefix?: string;
+    /** Relinquish the lease and retry election if the became-leader callback fails. */
+    retryOnCallbackError?: boolean;
 }
 
 export class LeaderService {
@@ -79,12 +81,14 @@ export class LeaderService {
     private renewalIntervalMs: number;
     private retryDelayMs: number;
     private readonly redisConfigPrefix: string;
+    private readonly retryOnCallbackError: boolean;
 
     private logger = createLogger(this);
 
     constructor(key: string, options?: LeaderServiceOptions) {
         const config = getAppConfig();
         this.redisConfigPrefix = options?.redisConfigPrefix ?? 'MUTEX';
+        this.retryOnCallbackError = options?.retryOnCallbackError ?? false;
         const prefix = config[`${this.redisConfigPrefix}_REDIS_PREFIX` as keyof typeof config] ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app';
         this.key = `${prefix}:leader:${key}`;
         this.ttlMs = options?.ttlMs ?? 30000;
@@ -120,6 +124,10 @@ export class LeaderService {
 
     async stop(): Promise<void> {
         this.running = false;
+        const lockId = this.lockId;
+        const wasLeader = this._isLeader;
+        this._isLeader = false;
+        this.lockId = randomUUID();
 
         if (this.renewTimer) {
             clearInterval(this.renewTimer);
@@ -131,27 +139,27 @@ export class LeaderService {
             this.retryTimer = null;
         }
 
-        if (this._isLeader) {
+        if (wasLeader) {
             try {
-                await this.getRedisClient().RELEASE(this.key, this.lockId);
+                await this.getRedisClient().RELEASE(this.key, lockId);
             } catch (err) {
                 this.logger.warn('failed to release leader lock during stop', { err });
             }
-            this._isLeader = false;
         }
     }
 
     private async tryAcquire(): Promise<void> {
         if (!this.running) return;
+        const lockId = this.lockId;
 
         try {
-            const result = await this.getRedisClient().ACQUIRE(this.key, this.lockId, this.ttlMs);
+            const result = await this.getRedisClient().ACQUIRE(this.key, lockId, this.ttlMs);
 
             if (result === 1) {
-                // If stop() was called while ACQUIRE was in-flight, release immediately
-                if (!this.running) {
+                // A stopped/restarted election cannot adopt an older in-flight acquisition.
+                if (!this.running || this.lockId !== lockId) {
                     try {
-                        await this.getRedisClient().RELEASE(this.key, this.lockId);
+                        await this.getRedisClient().RELEASE(this.key, lockId);
                     } catch {
                         // ignore - lock will expire via TTL
                     }
@@ -161,32 +169,46 @@ export class LeaderService {
                 this._isLeader = true;
                 this.logger.info('became leader', { key: this.key });
                 this.startRenewal();
+                const acquiredLockId = lockId;
                 try {
                     await this.becameLeaderCallback?.();
                 } catch (err) {
-                    this.logger.warn('becameLeader callback error', { err });
+                    this.logger.warn('becameLeader callback error', { err, key: this.key });
+                    // Failed startup must not leave a renewed lease with no service behind it.
+                    // A callback can outlive its lease; only abandon the acquisition it belongs to.
+                    if (this.retryOnCallbackError && this._isLeader && this.lockId === acquiredLockId) {
+                        this.handleLostLeadership();
+                        try {
+                            await this.getRedisClient().RELEASE(this.key, acquiredLockId);
+                        } catch (releaseError) {
+                            this.logger.warn('failed to release leader lock after callback error', { err: releaseError, key: this.key });
+                        }
+                    }
                 }
                 return;
             }
         } catch (err) {
+            if (this.lockId !== lockId) return;
             this.logger.warn('error during leader acquisition', { err });
         }
 
-        if (this.running) {
+        if (this.running && this.lockId === lockId) {
             this.retryTimer = setTimeout(() => this.tryAcquire(), this.retryDelayMs);
         }
     }
 
     private startRenewal(): void {
+        const lockId = this.lockId;
         this.renewTimer = setInterval(async () => {
-            if (!this.running) return;
+            if (!this.running || !this._isLeader || this.lockId !== lockId) return;
 
             try {
-                const result = await this.getRedisClient().RENEW(this.key, this.lockId, this.ttlMs);
-                if (result === 0) {
+                const result = await this.getRedisClient().RENEW(this.key, lockId, this.ttlMs);
+                if (result === 0 && this.lockId === lockId) {
                     this.handleLostLeadership();
                 }
             } catch (err) {
+                if (this.lockId !== lockId) return;
                 this.logger.warn('error during leader renewal', { err });
                 this.handleLostLeadership();
             }

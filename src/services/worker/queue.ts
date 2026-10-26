@@ -2,7 +2,7 @@ import { BaseAppConfig } from '../../app';
 import { createRedisOptions } from '../../helpers/redis/redis';
 import { getWorkerJobMetadata, type JobClass, type QueuedWorkerJob, type IJobOptions } from './types';
 import { notifyWorkerObservers } from './observer';
-import { Queue, type ConnectionOptions, type Job as BullJob, type QueueOptions, type WorkerOptions } from 'bullmq';
+import { Queue, type ConnectionOptions, type Job as BullJob, type KeepJobs, type QueueOptions, type WorkerOptions } from 'bullmq';
 
 export interface BullMqWorkerJobData<I = unknown> {
     data: I;
@@ -47,6 +47,7 @@ export class WorkerQueueRegistry {
     async enqueue<I>(jobClass: JobClass<I>, data: I, options: IJobOptions = {}): Promise<QueuedWorkerJob<I>> {
         if (!this.usesBullMq()) return this.add(jobClass, data, options);
 
+        const terminalRetention = bullMqTerminalKeepJobs(this.config);
         const queueName = this.getQueueName(jobClass, options);
         const bullJob = await this.getBullQueue(queueName).add(
             jobClass.name,
@@ -56,11 +57,10 @@ export class WorkerQueueRegistry {
             },
             {
                 delay: options.delay,
-                // The elected worker recorder removes terminal BullMQ jobs only after their
-                // durable _jobs record has been written. Keeping them here makes leader
-                // handoff and recorder restart recovery possible.
-                removeOnComplete: false,
-                removeOnFail: false
+                // Prefer recorder-driven removal after `_jobs` is written (leader handoff /
+                // restart recovery). Age+count are a Redis safety net when the recorder
+                // cannot keep up. BullMQ applies this lazily on later terminal transitions.
+                ...terminalRetention
             }
         );
 
@@ -321,6 +321,26 @@ export class WorkerQueueRegistry {
             await job.remove();
         }
     }
+}
+
+/** Redis retention backstop for completed/failed jobs awaiting recorder cleanup. */
+export function bullMqTerminalKeepJobs(config?: BaseAppConfig): {
+    removeOnComplete: KeepJobs | boolean;
+    removeOnFail: KeepJobs | boolean;
+} {
+    const age = config?.BULL_TERMINAL_KEEP_AGE_SEC ?? 24 * 60 * 60;
+    const count = config?.BULL_TERMINAL_KEEP_COUNT ?? 10_000;
+    if (!Number.isSafeInteger(age) || age < 0) throw new Error('BULL_TERMINAL_KEEP_AGE_SEC must be a nonnegative safe integer');
+    if (!Number.isSafeInteger(count) || count < 0) throw new Error('BULL_TERMINAL_KEEP_COUNT must be a nonnegative safe integer');
+    const hasAge = age > 0;
+    const hasCount = count > 0;
+    // BullMQ requires at least one retention dimension; false keeps jobs indefinitely.
+    if (!hasAge && !hasCount) {
+        return { removeOnComplete: false, removeOnFail: false };
+    }
+    const keep: KeepJobs = hasAge ? { age } : { count };
+    if (hasCount) keep.count = count;
+    return { removeOnComplete: keep, removeOnFail: keep };
 }
 
 async function closeBullQueue(queue: Queue<BullMqWorkerJobData>): Promise<void> {

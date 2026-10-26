@@ -11,6 +11,7 @@ import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
 import type { JobClass, QueuedWorkerJob, WorkerJobRecord } from './types';
 
 type TerminalJobStatus = 'completed' | 'failed';
+const TERMINAL_DRAIN_BATCH_SIZE = 100;
 
 /**
  * Records terminal worker jobs. For BullMQ queues, a leader-owned QueueEvents observer writes
@@ -19,6 +20,7 @@ type TerminalJobStatus = 'completed' | 'failed';
 export class WorkerRecorderService {
     private readonly records: WorkerJobRecord[] = [];
     private readonly observers = new Map<string, QueueEvents>();
+    private readonly pendingStarts = new Map<string, Promise<void>>();
     private readonly terminalJobTasks = new Map<string, Promise<void>>();
     private tableReady?: Promise<void>;
     private retentionRunning = false;
@@ -122,9 +124,22 @@ export class WorkerRecorderService {
     }
 
     async start(queueName: string, queueRegistry: WorkerQueueRegistry): Promise<void> {
+        const pending = this.pendingStarts.get(queueName);
+        if (pending) return pending;
         if (this.observers.has(queueName)) return;
 
+        let task: Promise<void>;
+        task = this.startObserver(queueName, queueRegistry, () => this.pendingStarts.get(queueName) === task).finally(() => {
+            if (this.pendingStarts.get(queueName) === task) this.pendingStarts.delete(queueName);
+        });
+        this.pendingStarts.set(queueName, task);
+        return task;
+    }
+
+    private async startObserver(queueName: string, queueRegistry: WorkerQueueRegistry, isCurrent: () => boolean): Promise<void> {
         await this.ensureTableExists();
+        // Leadership can be lost while schema initialization is still in flight.
+        if (!isCurrent()) return;
         const observer = new QueueEvents(queueName, queueRegistry.getBullMqOptions());
         this.observers.set(queueName, observer);
         observer.on('completed', args => {
@@ -144,7 +159,7 @@ export class WorkerRecorderService {
         try {
             await observer.waitUntilReady();
             await this.drainTerminalBullMqJobs(queueName, queueRegistry, observer);
-            this.logger.info('Worker recorder started', { queue: queueName });
+            if (this.observers.get(queueName) === observer) this.logger.info('Worker recorder started', { queue: queueName });
         } catch (error) {
             if (this.observers.get(queueName) === observer) this.observers.delete(queueName);
             await observer.close().catch(() => {});
@@ -153,6 +168,8 @@ export class WorkerRecorderService {
     }
 
     async stop(queueName?: string): Promise<void> {
+        if (queueName) this.pendingStarts.delete(queueName);
+        else this.pendingStarts.clear();
         const entries = queueName
             ? ([[queueName, this.observers.get(queueName)]] as const)
             : [...this.observers.entries()].map(([name, observer]) => [name, observer] as const);
@@ -198,20 +215,30 @@ export class WorkerRecorderService {
     }
 
     private async drainTerminalBullMqJobs(queueName: string, queueRegistry: WorkerQueueRegistry, observer: QueueEvents): Promise<void> {
+        if (this.observers.get(queueName) !== observer) return;
         const queue = queueRegistry.getBullQueue(queueName);
-        const [completed, failed] = await Promise.all([queue.getCompleted(), queue.getFailed()]);
-        for (const job of completed) {
-            await this.queueTerminalBullMqJob(queueName, String(job.id), 'completed', job.returnvalue, queueRegistry, observer);
-        }
-        for (const job of failed) {
-            await this.queueTerminalBullMqJob(
-                queueName,
-                String(job.id),
-                'failed',
-                { reason: job.failedReason, stack: job.stacktrace },
-                queueRegistry,
-                observer
-            );
+        while (this.observers.get(queueName) === observer) {
+            let foundJobs = false;
+            // Alternate statuses so a busy completed set cannot starve historical failures.
+            for (const status of ['completed', 'failed'] as const) {
+                if (this.observers.get(queueName) !== observer) return;
+                // Removal shifts the set forward. Read the oldest bounded page at offset zero
+                // so incoming completions cannot push historical jobs out of each page.
+                const jobs = await queue.getJobs([status], 0, TERMINAL_DRAIN_BATCH_SIZE - 1, true);
+                if (jobs.length) foundJobs = true;
+                for (const job of jobs) {
+                    if (this.observers.get(queueName) !== observer) return;
+                    await this.queueTerminalBullMqJob(
+                        queueName,
+                        String(job.id),
+                        status,
+                        status === 'completed' ? job.returnvalue : { reason: job.failedReason, stack: job.stacktrace },
+                        queueRegistry,
+                        observer
+                    );
+                }
+            }
+            if (!foundJobs) return;
         }
     }
 

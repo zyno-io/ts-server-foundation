@@ -41,11 +41,12 @@ Creates a new leader election instance.
 
 ### `LeaderServiceOptions`
 
-| Option              | Type     | Default | Description                                                                                            |
-| ------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------ |
-| `ttlMs`             | `number` | `30000` | Lock TTL in milliseconds. If the leader crashes without releasing, the lock expires after this period. |
-| `renewalIntervalMs` | `number` | `10000` | How often the leader renews its lock. Should be well below `ttlMs` to avoid accidental expiry.         |
-| `retryDelayMs`      | `number` | `5000`  | Delay between acquisition attempts for non-leader instances.                                           |
+| Option                 | Type      | Default | Description                                                                                            |
+| ---------------------- | --------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `ttlMs`                | `number`  | `30000` | Lock TTL in milliseconds. If the leader crashes without releasing, the lock expires after this period. |
+| `renewalIntervalMs`    | `number`  | `10000` | How often the leader renews its lock. Should be well below `ttlMs` to avoid accidental expiry.         |
+| `retryDelayMs`         | `number`  | `5000`  | Delay between acquisition attempts for non-leader instances.                                           |
+| `retryOnCallbackError` | `boolean` | `false` | Release the lease and retry election if the became-leader callback fails. Enabled by worker recorders. |
 
 ### Properties
 
@@ -57,7 +58,7 @@ Creates a new leader election instance.
 
 #### `setBecameLeaderCallback(callback: () => void | Promise<void>): void`
 
-Register a callback invoked when this instance acquires leadership. Errors thrown by the callback are logged but do not affect leader status.
+Register a callback invoked when this instance acquires leadership. Errors thrown by the callback are logged with the lease key. By default, they do not affect leader status. With `retryOnCallbackError: true`, leadership is relinquished and the lost-leadership callback runs to clean up partial startup. The instance releases its lease and retries election after `retryDelayMs`. Callbacks using this option must tolerate retries.
 
 #### `setLostLeaderCallback(callback: () => void | Promise<void>): void`
 

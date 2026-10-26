@@ -131,7 +131,9 @@ Outside test mode, `WorkerService.queueJob()` writes to BullMQ. Workers deserial
 
 `WorkerRecorderService` keeps in-memory execution records for the lifetime of the process and writes completed/failed records into the internal `_jobs` table by default when a `BaseDatabase` provider is configured. It provisions that table from `JobEntity` before a BullMQ worker consumes jobs (and before inline database recording); applications do not include it in their own migrations.
 
-For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. This preserves completed jobs across recorder restart or leader handoff until their database record is durable. `getRecords()` returns shallow copies. In-memory records remain available for the lifetime of the process; DevConsole intentionally displays only the latest 200 records.
+For BullMQ queues, a Redis leader is elected independently for each queue. The elected recorder listens through `QueueEvents`, persists a terminal job record, and only then removes that completed or failed job from BullMQ. Terminal jobs remain available for recorder restart or leader handoff, subject to the Redis retention backstop below. `getRecords()` returns shallow copies. In-memory records remain available for the lifetime of the process; DevConsole intentionally displays only the latest 200 records.
+
+On acquisition, the recorder drains historical terminal jobs in pages of 100, oldest first, alternating completed and failed jobs. If startup fails (for example, a database deadlock during recording), it closes the observer and relinquishes its leader lease so election and startup can retry. A failed startup cannot keep renewing a lease without an active recorder. Leadership loss also cancels a pending start before it can open an observer.
 
 ```typescript
 await worker.queueJob(SendEmailJob, data, {
@@ -142,6 +144,12 @@ const records = app.get(WorkerRecorderService).getRecords();
 ```
 
 Set `recordToDatabase: false` to opt out of persisted execution history. The database record contains queue, queue id, attempt, job name, input data, status, result, and timestamps. Execution history has a short retention period; keep business or security audit history in an application-owned audit log.
+
+### Redis retention backstop
+
+BullMQ also limits unreaped terminal jobs with `BULL_TERMINAL_KEEP_AGE_SEC` (default `86400`, 24 hours) and `BULL_TERMINAL_KEEP_COUNT` (default `10000`, per terminal status per queue). Both settings must be nonnegative safe integers; `0` disables that dimension, and setting both to `0` retains jobs until the recorder removes them.
+
+This is a safety net for Redis growth during recorder failures. BullMQ applies age/count cleanup on later completions or failures; it does not assign key TTLs or sweep an idle queue. When a limit is reached before recording recovers, jobs can be removed without a database record. Recorder-driven removal remains the normal path.
 
 ### Database retention
 

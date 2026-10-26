@@ -2,7 +2,7 @@ import type { App } from '../../app';
 import { createAvailabilityMonitor, withContextData, type AvailabilityMonitor } from '../../helpers';
 import { LeaderService } from '../leader';
 import { ScopedLogger } from '../logger';
-import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData } from './queue';
+import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobData, bullMqTerminalKeepJobs } from './queue';
 import { WorkerRecorderService } from './recorder';
 import { BaseJob, getRegisteredWorkerJobs, getWorkerJobMetadata, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
 import { notifyWorkerObservers } from './observer';
@@ -49,6 +49,7 @@ export class WorkerRunnerService {
         }
 
         if (this.queueRegistry.usesBullMq()) {
+            bullMqTerminalKeepJobs(this.app.config);
             // A deployment migration may have run while an old worker was still active. Reconcile
             // again before this worker starts consuming jobs so a materialized stale repeat job
             // cannot reach this process and perpetuate its own chain.
@@ -327,7 +328,7 @@ export class WorkerRunnerService {
         }
         for (const queueName of this.getRegisteredQueueNames()) {
             if (this.recorderLeaders.has(queueName)) continue;
-            const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL' });
+            const leader = new LeaderService(`worker-recorder:${queueName}`, { redisConfigPrefix: 'BULL', retryOnCallbackError: true });
             leader.setBecameLeaderCallback(async () => {
                 this.logger.info('This worker is now the recorder leader', { queue: queueName });
                 await this.recorder.start(queueName, this.queueRegistry);
@@ -355,8 +356,7 @@ export class WorkerRunnerService {
                     options: { repeatKey }
                 },
                 opts: {
-                    removeOnComplete: false,
-                    removeOnFail: false
+                    ...bullMqTerminalKeepJobs(this.app.config)
                 }
             });
         }
