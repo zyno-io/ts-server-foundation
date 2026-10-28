@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { describe, it } from 'node:test';
 import { Worker } from 'bullmq';
-import type Redis from 'ioredis';
+import Redis from 'ioredis';
 
 import { createApp, createRedis, disconnectAllRedis, sleepMs, withMutex, WorkerQueueRegistry, WorkerRecorderService } from '../src';
 import { registerRedisStateReset } from '../src/helpers/redis/lifecycle';
@@ -28,6 +28,40 @@ async function waitFor(check: () => boolean): Promise<void> {
     }
     assert.fail('Timed out waiting for Redis recovery');
 }
+
+it('continues retrying when an explicit reconnect overlaps the background timer and fails', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let rejectConnection!: (error: Error) => void;
+    const connecting = new Promise<void>((_resolve, reject) => {
+        rejectConnection = reject;
+    });
+    let attempts = 0;
+    t.mock.method(Redis.prototype, 'connect', function (this: Redis) {
+        if (++attempts === 1) {
+            this.status = 'connecting';
+            return connecting;
+        }
+        this.status = 'ready';
+        this.emit('ready');
+        return Promise.resolve();
+    });
+    const client = createRecoveringRedisClient({ lazyConnect: true });
+    try {
+        client.status = 'end';
+        client.emit('end');
+        const manualConnect = client.connect();
+        t.mock.timers.tick(1_000);
+        client.status = 'end';
+        client.emit('end');
+        rejectConnection(new Error('Connection is closed.'));
+        await assert.rejects(manualConnect, /Connection is closed/);
+        t.mock.timers.tick(2_000);
+        assert.equal(attempts, 2);
+        assert.equal(client.status, 'ready');
+    } finally {
+        client.disconnect();
+    }
+});
 
 describe(
     'Redis terminal recovery',

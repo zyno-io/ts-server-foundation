@@ -38,7 +38,13 @@ function manageRedisClient(client: Redis): Redis {
     };
     const scheduleRetry = () => {
         if (!isRedisClientRecovering(client) || client.status !== 'end' || timer) return;
-        timer = setTimeout(reconnect, Math.min(1_000 * 2 ** Math.min(failures++, 5), 30_000));
+        timer = setTimeout(
+            () => {
+                timer = undefined;
+                reconnect();
+            },
+            Math.min(1_000 * 2 ** Math.min(failures++, 5), 30_000)
+        );
         timer.unref();
     };
 
@@ -46,6 +52,7 @@ function manageRedisClient(client: Redis): Redis {
         // BullMQ deliberately disconnects and reconnects blocking clients when
         // abandoning a stuck read. An explicit connect starts a new lifetime.
         recoveringClients.add(client);
+        clearRetry();
         return connect(callback);
     };
     client.disconnect = (reconnect = false) => {
