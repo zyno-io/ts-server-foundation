@@ -5,9 +5,17 @@ import { describe, it } from 'node:test';
 import { Worker } from 'bullmq';
 import Redis from 'ioredis';
 
-import { createApp, createRedis, disconnectAllRedis, sleepMs, withMutex, WorkerQueueRegistry, WorkerRecorderService } from '../src';
+import {
+    createApp,
+    createRedis,
+    createRecoveringRedisClient,
+    disconnectAllRedis,
+    sleepMs,
+    withMutex,
+    WorkerQueueRegistry,
+    WorkerRecorderService
+} from '../src';
 import { registerRedisStateReset } from '../src/helpers/redis/lifecycle';
-import { createRecoveringRedisClient } from '../src/helpers/redis/recovery';
 import { createWorkerRedisBackend } from '../src/services/worker/redis';
 
 const redisOptions = { host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT ?? 6379), retryStrategy: () => null };
