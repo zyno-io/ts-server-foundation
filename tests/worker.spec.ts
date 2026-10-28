@@ -154,6 +154,48 @@ class BullMqExampleJob extends BaseJob<{ name: string }, string> {
 }
 
 describe('worker services', () => {
+    for (const status of ['completed', 'failed'] as const) {
+        it(`retries a closed recorder lookup once for ${status} jobs`, async () => {
+            const app = createApp({ enableHealthcheck: false });
+            const recorder = new WorkerRecorderService();
+            const observer = {};
+            const internals = recorder as unknown as {
+                observers: Map<string, object>;
+                queueTerminalBullMqJob(...args: unknown[]): Promise<void>;
+            };
+            internals.observers.set('unit', observer);
+            let lookups = 0;
+            let removals = 0;
+            const registry = {
+                getBullQueue: () => ({
+                    getJob: async () => {
+                        if (++lookups === 1) throw new Error('Connection is closed.');
+                        return {
+                            id: '1',
+                            name: 'RecoveredJob',
+                            queueName: 'unit',
+                            timestamp: Date.now(),
+                            attemptsMade: 1,
+                            opts: {},
+                            data: { data: {}, options: {} },
+                            remove: async () => removals++
+                        };
+                    }
+                })
+            };
+            try {
+                await internals.queueTerminalBullMqJob('unit', '1', status, 'result', registry, observer);
+                assert.equal(lookups, 2);
+                assert.equal(removals, 1);
+                assert.equal(recorder.getRecords().length, 1);
+                assert.equal(recorder.getRecords()[0].status, status);
+            } finally {
+                internals.observers.clear();
+                await app.stop();
+            }
+        });
+    }
+
     it('registers worker job metadata', () => {
         assert.deepEqual(getWorkerJobMetadata(ExampleJob), {
             queueName: 'critical',

@@ -4,6 +4,7 @@ import { getAppConfig } from '../../app/resolver';
 import { sleepMs } from '../utils/date';
 import { type RedisEndEmitter, registerRedisStateReset } from './lifecycle';
 import { createRedis, type RedisConnection } from './redis';
+import { isRedisConnectionClosedError } from './recovery';
 
 export type MutexKey = any;
 export interface MutexContext {
@@ -256,7 +257,15 @@ async function redisMutexExec<T>(
     try {
         for (let attempts = 1; attempts <= maxAttempts; attempts++) {
             throwIfSignalAborted(options.signal, redisKey);
-            if (Number(await evalRedisScript(client, ACQUIRE_SCRIPT, redisKey, lockId, lockTtl)) === 1) {
+            let acquisition: unknown;
+            try {
+                acquisition = await evalRedisScript(client, ACQUIRE_SCRIPT, redisKey, lockId, lockTtl);
+            } catch (error) {
+                if (!isRedisConnectionClosedError(error) || attempts === maxAttempts) throw error;
+                await sleepOrAbort(options.retryDelay, options.signal, redisKey);
+                continue;
+            }
+            if (Number(acquisition) === 1) {
                 acquired = true;
                 notifyMutexObservers({
                     id: observationId,
