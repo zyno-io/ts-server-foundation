@@ -2,6 +2,7 @@ import Redis, { type RedisOptions } from 'ioredis';
 
 import { getAppConfig, registerAppCleanup } from '../../app/resolver';
 import { getPackageName } from '../io/package';
+import { createRecoveringRedisClient, isRedisClientRecovering } from './recovery';
 
 export interface RedisConnection<TClient = Redis> {
     client: TClient;
@@ -78,10 +79,14 @@ const allClients = new Set<Redis>();
 
 export function createRedis(configPrefix?: string): RedisConnection {
     const { options, prefix } = createRedisOptions(configPrefix);
-    const client = new Redis(options);
+    const client = createRecoveringRedisClient(options);
     allClients.add(client);
-    const unregisterCleanup = registerAppCleanup(() => closeRedisClient(client));
+    const unregisterCleanup = registerAppCleanup(async () => {
+        allClients.delete(client);
+        await closeRedisClient(client);
+    });
     client.on('end', () => {
+        if (isRedisClientRecovering(client)) return;
         // QUIT closes the data socket, but ioredis's Sentinel detector owns
         // a separate subscription/retry timer. Release that connector too.
         client.disconnect();
@@ -98,7 +103,10 @@ export async function disconnectAllRedis(): Promise<void> {
 }
 
 async function closeRedisClient(client: Redis): Promise<void> {
-    if (client.status === 'end') return;
+    if (client.status !== 'ready') {
+        client.disconnect();
+        return;
+    }
     try {
         await client.quit();
     } catch {

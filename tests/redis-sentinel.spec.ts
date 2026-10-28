@@ -181,6 +181,15 @@ describe('Sentinel recovery', () => {
                     assert.equal(mesh.instanceId, originalId);
                     const members = await mesh.getNodes();
                     assert.ok(members.some(member => member.instanceId === originalId));
+                    // Exhaust the native retry policy to exercise terminal-state
+                    // recovery, including the Sentinel failover detector cleanup.
+                    client.options.retryStrategy = () => null;
+                    const ended = new Promise<void>(resolve => client.once('end', resolve));
+                    client.stream.destroy();
+                    await ended;
+                    assert.equal(client.status, 'end');
+                    const recovered = await client.ping();
+                    assert.equal(recovered, 'PONG');
                     const subscriptions = subscribers.size;
                     assert.ok(subscriptions > 0);
                     await client.quit();

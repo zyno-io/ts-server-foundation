@@ -285,6 +285,31 @@ describe('helper utilities', () => {
         assert.deepStrictEqual(calls, ['acquire:unit:redis:lock', 'acquire:unit:redis:lock', 'release:unit:redis:lock']);
     });
 
+    it('retries mutex acquisition after a terminal connection error without rerunning the callback', async () => {
+        let attempts = 0;
+        let callbacks = 0;
+        const client = {
+            eval: async (script: string) => {
+                if (script.includes('exists') && ++attempts === 1) throw new Error('Connection is closed.');
+                return 1;
+            }
+        };
+        const result = await withMutex({
+            key: 'recovered',
+            mode: 'redis',
+            retryCount: 2,
+            retryDelay: 1,
+            redis: () => ({ prefix: 'unit', client }),
+            fn: async didWait => {
+                callbacks++;
+                return didWait;
+            }
+        });
+        assert.equal(result, true);
+        assert.equal(attempts, 2);
+        assert.equal(callbacks, 1);
+    });
+
     it('resolves prefixed Redis connection options from app config', () => {
         process.env.APP_ENV = 'test';
         process.env.REDIS_HOST = 'redis-default';

@@ -3,9 +3,11 @@ import { BaseDatabase, createMigrationPlan } from '../../database';
 import { sql } from '../../database/sql';
 import { uuid7 } from '../../helpers';
 import { createLogger } from '../logger';
+import { isRedisConnectionClosedError } from '../../helpers/redis/recovery';
 import { QueueEvents, type Job as BullJob } from 'bullmq';
 
 import { JobEntity } from './entity';
+import { createWorkerRedisBackend } from './redis';
 import { notifyWorkerObservers } from './observer';
 import { WorkerQueueRegistry, type BullMqWorkerJobData } from './queue';
 import type { JobClass, QueuedWorkerJob, WorkerJobRecord } from './types';
@@ -21,6 +23,7 @@ export class WorkerRecorderService {
     private readonly records: WorkerJobRecord[] = [];
     private readonly observers = new Map<string, QueueEvents>();
     private readonly pendingStarts = new Map<string, Promise<void>>();
+    private readonly observerCleanups = new Map<QueueEvents, () => void>();
     private readonly terminalJobTasks = new Map<string, Promise<void>>();
     private tableReady?: Promise<void>;
     private retentionRunning = false;
@@ -140,7 +143,7 @@ export class WorkerRecorderService {
         await this.ensureTableExists();
         // Leadership can be lost while schema initialization is still in flight.
         if (!isCurrent()) return;
-        const observer = new QueueEvents(queueName, queueRegistry.getBullMqOptions());
+        const observer = new QueueEvents(queueName, queueRegistry.getBullMqOptions(), createWorkerRedisBackend);
         this.observers.set(queueName, observer);
         observer.on('completed', args => {
             void this.queueTerminalBullMqJob(queueName, args.jobId, 'completed', args.returnvalue, queueRegistry, observer).catch(error => {
@@ -158,10 +161,29 @@ export class WorkerRecorderService {
 
         try {
             await observer.waitUntilReady();
+            if (this.observers.get(queueName) !== observer) return;
+            const commandBackend = queueRegistry.getBullQueue(queueName).getBackend();
+            const eventBackend = observer.getBackend();
+            const onReady = () => {
+                if (this.observers.get(queueName) !== observer) return;
+                // An event or its job lookup may have been lost during the outage.
+                // Terminal jobs remain in Redis until their durable record is saved.
+                void this.drainTerminalBullMqJobs(queueName, queueRegistry, observer).catch(error => {
+                    this.logger.error('Failed to drain terminal BullMQ jobs after Redis recovery', error, { queue: queueName });
+                });
+            };
+            commandBackend.on('ready', onReady);
+            eventBackend.on('ready', onReady);
+            this.observerCleanups.set(observer, () => {
+                commandBackend.removeListener('ready', onReady);
+                eventBackend.removeListener('ready', onReady);
+            });
             await this.drainTerminalBullMqJobs(queueName, queueRegistry, observer);
             if (this.observers.get(queueName) === observer) this.logger.info('Worker recorder started', { queue: queueName });
         } catch (error) {
             if (this.observers.get(queueName) === observer) this.observers.delete(queueName);
+            this.observerCleanups.get(observer)?.();
+            this.observerCleanups.delete(observer);
             await observer.close().catch(() => {});
             throw error;
         }
@@ -178,6 +200,8 @@ export class WorkerRecorderService {
             if (!observer) continue;
             if (this.observers.get(name) !== observer) continue;
             this.observers.delete(name);
+            this.observerCleanups.get(observer)?.();
+            this.observerCleanups.delete(observer);
             closures.push(observer.close());
         }
         await Promise.all(closures);
@@ -271,7 +295,15 @@ export class WorkerRecorderService {
     ): Promise<void> {
         if (this.observers.get(queueName) !== observer) return;
         const queue = queueRegistry.getBullQueue(queueName);
-        const job = await queue.getJob(jobId);
+        let job: BullJob<BullMqWorkerJobData> | undefined;
+        try {
+            job = await queue.getJob(jobId);
+        } catch (error) {
+            if (!isRedisConnectionClosedError(error) || this.observers.get(queueName) !== observer) throw error;
+            // A read that raced the terminal close is safe to retry. The managed
+            // client reconnects before dispatching this next command.
+            job = await queue.getJob(jobId);
+        }
         if (!job) return;
         const record = await this.record(this.toQueuedWorkerJob(job), status, result, {
             recordToDatabase: this.shouldRecordBullMqJob(job)

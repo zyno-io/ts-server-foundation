@@ -1,4 +1,5 @@
 import { registerAppCleanup } from '../../app/resolver';
+import { isRedisClientRecovering } from './recovery';
 
 export interface RedisEndEmitter {
     once(event: 'end', listener: () => void): unknown;
@@ -10,7 +11,8 @@ export interface RedisEndEmitter {
  * `createRedis()` owns closing each client during app shutdown, but helpers such as Cache, Mutex, and Mesh
  * also cache those clients in module-level variables. Those references must be cleared synchronously before
  * the next app can reuse the helper; waiting only for ioredis's asynchronous `end` event can briefly expose a
- * closed client to the new app.
+ * closed client to the new app. Managed clients can recover after an unexpected
+ * `end`; only their explicit shutdown invalidates cached state.
  *
  * This registers `reset` as an app cleanup and also attaches it to each supplied client's `end` event. The
  * first trigger wins: `reset` runs exactly once, and an early client disconnect unregisters the now-unneeded
@@ -34,5 +36,11 @@ export function registerRedisStateReset(clients: RedisEndEmitter | readonly Redi
     };
 
     unregisterReset = registerAppCleanup(resetOnce);
-    for (const client of redisClients) client.once('end', resetOnce);
+    for (const client of redisClients) {
+        const handleEnd = () => {
+            if (isRedisClientRecovering(client)) client.once('end', handleEnd);
+            else resetOnce();
+        };
+        client.once('end', handleEnd);
+    }
 }

@@ -2,6 +2,7 @@ import { BaseAppConfig } from '../../app';
 import { createRedisOptions } from '../../helpers/redis/redis';
 import { getWorkerJobMetadata, type JobClass, type QueuedWorkerJob, type IJobOptions } from './types';
 import { notifyWorkerObservers } from './observer';
+import { createWorkerRedisBackend } from './redis';
 import { Queue, type ConnectionOptions, type Job as BullJob, type KeepJobs, type QueueOptions, type WorkerOptions } from 'bullmq';
 
 export interface BullMqWorkerJobData<I = unknown> {
@@ -133,7 +134,7 @@ export class WorkerQueueRegistry {
         const existing = this.bullQueues.get(queueName);
         if (existing) return existing;
 
-        const queue = new Queue<BullMqWorkerJobData>(queueName, this.getBullMqOptions());
+        const queue = new Queue<BullMqWorkerJobData>(queueName, this.getBullMqOptions(), createWorkerRedisBackend);
         this.bullQueues.set(queueName, queue);
         WorkerQueueRegistry.bullQueues.add(queue);
         return queue;

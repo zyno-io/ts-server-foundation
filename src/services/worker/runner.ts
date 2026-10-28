@@ -6,6 +6,7 @@ import { WorkerQueueRegistry, type BullMqCronJobSchedule, type BullMqWorkerJobDa
 import { WorkerRecorderService } from './recorder';
 import { BaseJob, getRegisteredWorkerJobs, getWorkerJobMetadata, type IJobOptions, type JobClass, type QueuedWorkerJob } from './types';
 import { notifyWorkerObservers } from './observer';
+import { createWorkerRedisBackend } from './redis';
 import { Worker as BullWorker, type Job as BullJob } from 'bullmq';
 
 const BULLMQ_REDIS_WARNING_AFTER_MS = 2_000;
@@ -274,7 +275,8 @@ export class WorkerRunnerService {
                     const execution = await this.executeBullMqJob(job);
                     return execution.result;
                 },
-                this.queueRegistry.getBullMqOptions()
+                this.queueRegistry.getBullMqOptions(),
+                createWorkerRedisBackend
             );
             worker.on('failed', (job, error) => {
                 this.logger.error(`Job failed: ${error.message}`, error, {
