@@ -4,6 +4,31 @@ import type { RenderedSql } from '../sql';
 import type { DatabaseDriver, DriverConnection, ExecuteResult, QueryResult } from '../driver';
 import { registerMySQLCleanup } from './mysql-lifecycle';
 
+// A node can accept connections before Galera allows application statements.
+// Retry only the explicit readiness rejection, not generic connection failures:
+// a lost response can leave the outcome of a write or commit unknown.
+const WSREP_RETRY_DELAYS_MS = [100, 100, 200, 200, 250, 250, 250, 250, 250, 250];
+
+function isWsrepNotReady(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null) return false;
+    const candidate = error as { message?: unknown; sqlMessage?: unknown };
+    return [candidate.sqlMessage, candidate.message].some(
+        message => typeof message === 'string' && /\bwsrep\b.*\b(?:has not yet prepared|not ready)\b.*\b(?:node|application use)\b/i.test(message)
+    );
+}
+
+async function retryWsrepNotReady<T>(operation: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await operation();
+        } catch (error) {
+            const delay = WSREP_RETRY_DELAYS_MS[attempt];
+            if (delay === undefined || !isWsrepNotReady(error)) throw error;
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
 export interface MySQLPoolLike {
     getConnection(): Promise<MySQLConnectionLike>;
     end(): Promise<void>;
@@ -46,21 +71,33 @@ export class MySQLDriver implements DatabaseDriver {
 
     async acquire(): Promise<DriverConnection> {
         if (this.closing) throw new Error('MySQL pool is closed');
-        const connection = await this.pool.getConnection();
+        const connection = await retryWsrepNotReady(() => {
+            if (this.closing) throw new Error('MySQL pool is closed');
+            return this.pool.getConnection();
+        });
         return new MySQLConnection(connection);
     }
 }
 
 class MySQLConnection implements DriverConnection {
+    private transactional = false;
+    // Callers can also change session state or start a transaction through raw
+    // SQL. Once a statement succeeds, its state cannot safely be reconstructed.
+    private statementSucceeded = false;
+
     constructor(private connection: MySQLConnectionLike) {}
 
     async query<T = Record<string, unknown>>(query: RenderedSql): Promise<QueryResult<T>> {
-        const [rows] = await this.connection.query<T[]>(query.sql, query.bindings);
+        const [rows] = await this.runStatement(() => this.connection.query<T[]>(query.sql, query.bindings));
+        this.statementSucceeded = true;
         return { rows: Array.isArray(rows) ? rows : [] };
     }
 
     async execute(query: RenderedSql): Promise<ExecuteResult> {
-        const [result] = await this.connection.execute<any>(query.sql, query.bindings);
+        const [result] = await this.runStatement(() =>
+            this.connection.execute<{ affectedRows?: number; insertId?: number | string; warningStatus?: number }>(query.sql, query.bindings)
+        );
+        this.statementSucceeded = true;
         return {
             affectedRows: Number(result?.affectedRows ?? 0),
             insertId: result?.insertId,
@@ -70,15 +107,19 @@ class MySQLConnection implements DriverConnection {
     }
 
     async begin(): Promise<void> {
-        await this.connection.query('START TRANSACTION');
+        await this.runStatement(() => this.connection.query('START TRANSACTION'));
+        this.transactional = true;
+        this.statementSucceeded = true;
     }
 
     async commit(): Promise<void> {
         await this.connection.query('COMMIT');
+        this.transactional = false;
     }
 
     async rollback(): Promise<void> {
         await this.connection.query('ROLLBACK');
+        this.transactional = false;
     }
 
     async savepoint(name: string): Promise<void> {
@@ -91,6 +132,10 @@ class MySQLConnection implements DriverConnection {
 
     async release(): Promise<void> {
         await this.connection.release();
+    }
+
+    private async runStatement<T>(operation: () => Promise<T>): Promise<T> {
+        return this.transactional || this.statementSucceeded ? operation() : retryWsrepNotReady(operation);
     }
 }
 
