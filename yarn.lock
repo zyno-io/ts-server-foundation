@@ -1640,137 +1640,66 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/darwin-arm64@npm:0.34.2"
+"@ttsc/darwin-arm64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/darwin-arm64@npm:0.30.1"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/darwin-x64@npm:0.34.2"
+"@ttsc/darwin-x64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/darwin-x64@npm:0.30.1"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-darwin-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-darwin-arm64@npm:0.34.2"
-  conditions: os=darwin & cpu=arm64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-darwin-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-darwin-x64@npm:0.34.2"
-  conditions: os=darwin & cpu=x64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-linux-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-arm64@npm:0.34.2"
-  conditions: os=linux & cpu=arm64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-linux-arm@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-arm@npm:0.34.2"
-  conditions: os=linux & cpu=arm
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-linux-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-x64@npm:0.34.2"
-  conditions: os=linux & cpu=x64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-win32-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-win32-arm64@npm:0.34.2"
-  conditions: os=win32 & cpu=arm64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph-win32-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-win32-x64@npm:0.34.2"
-  conditions: os=win32 & cpu=x64
-  languageName: node
-  linkType: hard
-
-"@ttsc/graph@npm:^0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph@npm:0.34.2"
+"@ttsc/graph@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/graph@npm:0.30.1"
   dependencies:
     "@modelcontextprotocol/sdk": "npm:^1.26.0"
-    "@ttsc/graph-darwin-arm64": "npm:0.34.2"
-    "@ttsc/graph-darwin-x64": "npm:0.34.2"
-    "@ttsc/graph-linux-arm": "npm:0.34.2"
-    "@ttsc/graph-linux-arm64": "npm:0.34.2"
-    "@ttsc/graph-linux-x64": "npm:0.34.2"
-    "@ttsc/graph-win32-arm64": "npm:0.34.2"
-    "@ttsc/graph-win32-x64": "npm:0.34.2"
-    "@typia/mcp": "npm:^15.1.0"
-    typia: "npm:^15.1.0"
+    "@typia/mcp": "npm:^14.0.6"
+    typia: "npm:^14.0.6"
   peerDependencies:
-    ttsc: ^0.34.2
-  dependenciesMeta:
-    "@ttsc/graph-darwin-arm64":
-      optional: true
-    "@ttsc/graph-darwin-x64":
-      optional: true
-    "@ttsc/graph-linux-arm":
-      optional: true
-    "@ttsc/graph-linux-arm64":
-      optional: true
-    "@ttsc/graph-linux-x64":
-      optional: true
-    "@ttsc/graph-win32-arm64":
-      optional: true
-    "@ttsc/graph-win32-x64":
-      optional: true
+    ttsc: ^0.30.1
   bin:
     ttsc-graph: lib/bin.js
-  checksum: 10c0/b0d7926971589481b79d27bf8dc5c4673f2087e24cb7bf87aa7c4d9ab60c1f3a2f8ffb178095c454327e2ea3e6cc90474a86c9d78a7fc73e8dc69f9ec781801c
+  checksum: 10c0/63ba03f0cb8173332efe25b619e5f17fdf012528a1b77ee8616d972690ed4474f2b9517ba8b0cb96bb9823d20f760bac36805fe8bb9fdade2683500bfec4199b
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-arm64@npm:0.34.2"
+"@ttsc/linux-arm64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/linux-arm64@npm:0.30.1"
   conditions: os=linux & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-arm@npm:0.34.2"
+"@ttsc/linux-arm@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/linux-arm@npm:0.30.1"
   conditions: os=linux & cpu=arm
   languageName: node
   linkType: hard
 
-"@ttsc/linux-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-x64@npm:0.34.2"
+"@ttsc/linux-x64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/linux-x64@npm:0.30.1"
   conditions: os=linux & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/win32-arm64@npm:0.34.2"
+"@ttsc/win32-arm64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/win32-arm64@npm:0.30.1"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/win32-x64@npm:0.34.2"
+"@ttsc/win32-x64@npm:0.30.1":
+  version: 0.30.1
+  resolution: "@ttsc/win32-x64@npm:0.30.1"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
@@ -2077,31 +2006,31 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@typia/interface@npm:^15.2.1":
-  version: 15.2.1
-  resolution: "@typia/interface@npm:15.2.1"
-  checksum: 10c0/bdbcfaeb62dc796719c343dfbef8f5fe52872c0d58464181029435bb4b234f276d339cbb4ffff9db9a3e40a75514d1af37abb1f91233da9ad4a5ecda2c86370f
+"@typia/interface@npm:^14.0.6":
+  version: 14.0.6
+  resolution: "@typia/interface@npm:14.0.6"
+  checksum: 10c0/da91fe02a4b37a92b92ecb3b6eb330eec6aa5178ccb06b885684039b684d24c7c6b91b03d84158adc58c931f78050a32518a63461f6ebb3e91e470dc913218c1
   languageName: node
   linkType: hard
 
-"@typia/mcp@npm:^15.1.0":
-  version: 15.2.1
-  resolution: "@typia/mcp@npm:15.2.1"
+"@typia/mcp@npm:^14.0.6":
+  version: 14.0.6
+  resolution: "@typia/mcp@npm:14.0.6"
   dependencies:
-    "@typia/interface": "npm:^15.2.1"
-    "@typia/utils": "npm:^15.2.1"
+    "@typia/interface": "npm:^14.0.6"
+    "@typia/utils": "npm:^14.0.6"
   peerDependencies:
     "@modelcontextprotocol/sdk": ">=1.12.0"
-  checksum: 10c0/d207bf4e02c8125374bf8a50ae5a4e1f5fd064792bc521c266ca9b62ef6dca0290890b3aeaf4d0073d8d96e2857ed9fe9b30fc8c38181a04c1d4efbf7c1fee05
+  checksum: 10c0/9f93f4b4c84737851ef2261bed6782bd6a64a1e8998cd4b555222ee00862cf07210533f77483ade826d3082a658f52b9da246fc98e79206ad9d4428f08cd149a
   languageName: node
   linkType: hard
 
-"@typia/utils@npm:^15.2.1":
-  version: 15.2.1
-  resolution: "@typia/utils@npm:15.2.1"
+"@typia/utils@npm:^14.0.6":
+  version: 14.0.6
+  resolution: "@typia/utils@npm:14.0.6"
   dependencies:
-    "@typia/interface": "npm:^15.2.1"
-  checksum: 10c0/47b81e5cd9d1e9c4d9638dac7db23fb35a92a298d2a0558185df58544dc950a5172de7628a6149b0b05cbd56805b2460b2de6f3eccc45660204bc61a99a8bb2b
+    "@typia/interface": "npm:^14.0.6"
+  checksum: 10c0/b24104a965e77da11e75c2bd6b763895834146d068adbbb6da61d0ac6b9725286bf86d3a481feb8820e2fdc91baa52b132f044116c8c5d90913139b3f68152c0
   languageName: node
   linkType: hard
 
@@ -2445,7 +2374,7 @@ __metadata:
     "@opentelemetry/sdk-trace-node": "npm:^2.12.0"
     "@pyroscope/nodejs": "npm:^0.7.0"
     "@sentry/node": "npm:^10.74.0"
-    "@ttsc/graph": "npm:^0.34.2"
+    "@ttsc/graph": "npm:0.30.1"
     "@types/bcrypt": "npm:^6.0.0"
     "@types/busboy": "npm:^1.5.5"
     "@types/debug": "npm:^4.1.13"
@@ -2479,7 +2408,7 @@ __metadata:
     protoc: "npm:^36.2.0"
     ts-proto: "npm:^2.18.3"
     tslib: "npm:^2.8.1"
-    ttsc: "npm:0.34.2"
+    ttsc: "npm:0.30.1"
     typescript: "npm:^7.0.2"
     uuidv7: "npm:^1.2.1"
     vite: "npm:^8.3.5"
@@ -3577,7 +3506,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"fsevents@npm:^2.3.3, fsevents@npm:~2.3.2, fsevents@npm:~2.3.3":
+"fsevents@npm:~2.3.2, fsevents@npm:~2.3.3":
   version: 2.3.3
   resolution: "fsevents@npm:2.3.3"
   dependencies:
@@ -3587,7 +3516,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"fsevents@patch:fsevents@npm%3A^2.3.3#optional!builtin<compat/fsevents>, fsevents@patch:fsevents@npm%3A~2.3.2#optional!builtin<compat/fsevents>, fsevents@patch:fsevents@npm%3A~2.3.3#optional!builtin<compat/fsevents>":
+"fsevents@patch:fsevents@npm%3A~2.3.2#optional!builtin<compat/fsevents>, fsevents@patch:fsevents@npm%3A~2.3.3#optional!builtin<compat/fsevents>":
   version: 2.3.3
   resolution: "fsevents@patch:fsevents@npm%3A2.3.3#optional!builtin<compat/fsevents>::version=2.3.3&hash=df0bf1"
   dependencies:
@@ -5928,22 +5857,19 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ttsc@npm:0.34.2":
-  version: 0.34.2
-  resolution: "ttsc@npm:0.34.2"
+"ttsc@npm:0.30.1":
+  version: 0.30.1
+  resolution: "ttsc@npm:0.30.1"
   dependencies:
-    "@ttsc/darwin-arm64": "npm:0.34.2"
-    "@ttsc/darwin-x64": "npm:0.34.2"
-    "@ttsc/linux-arm": "npm:0.34.2"
-    "@ttsc/linux-arm64": "npm:0.34.2"
-    "@ttsc/linux-x64": "npm:0.34.2"
-    "@ttsc/win32-arm64": "npm:0.34.2"
-    "@ttsc/win32-x64": "npm:0.34.2"
+    "@ttsc/darwin-arm64": "npm:0.30.1"
+    "@ttsc/darwin-x64": "npm:0.30.1"
+    "@ttsc/linux-arm": "npm:0.30.1"
+    "@ttsc/linux-arm64": "npm:0.30.1"
+    "@ttsc/linux-x64": "npm:0.30.1"
+    "@ttsc/win32-arm64": "npm:0.30.1"
+    "@ttsc/win32-x64": "npm:0.30.1"
     acorn: "npm:8.16.0"
     cjs-module-lexer: "npm:2.2.1"
-    fsevents: "npm:^2.3.3"
-  peerDependencies:
-    typescript: ">=7.0.0 || >=7.1.0-0"
   dependenciesMeta:
     "@ttsc/darwin-arm64":
       optional: true
@@ -5959,13 +5885,11 @@ __metadata:
       optional: true
     "@ttsc/win32-x64":
       optional: true
-    fsevents:
-      optional: true
   bin:
     ttsc: lib/launcher/ttsc.js
     ttscserver: lib/launcher/ttscserver.js
     ttsx: lib/launcher/ttsx.js
-  checksum: 10c0/431a4d3d03c686de13a422033fc9973ab5823419299d3ce57add9fbd8112ba6d8107aaa79b5d5cabb1ab6b8fbfb70240e11a01a938ca0f2b03a8adb8aa749356
+  checksum: 10c0/9a4c95b5e3e17bd377d3be72746eda1daaab7e2063f256bb349f42b2c2eb580c244c1adc9d340c0600fc773c0691710e2d5239597d9fd71207327f4c19f8e0ba
   languageName: node
   linkType: hard
 
@@ -6122,19 +6046,19 @@ __metadata:
   languageName: node
   linkType: hard
 
-"typia@npm:^15.1.0":
-  version: 15.2.1
-  resolution: "typia@npm:15.2.1"
+"typia@npm:^14.0.6":
+  version: 14.0.6
+  resolution: "typia@npm:14.0.6"
   dependencies:
-    "@typia/interface": "npm:^15.2.1"
-    "@typia/utils": "npm:^15.2.1"
+    "@typia/interface": "npm:^14.0.6"
+    "@typia/utils": "npm:^14.0.6"
     randexp: "npm:^0.5.3"
   peerDependencies:
-    ttsc: ">=0.34.1"
+    ttsc: ">=0.19.2"
   peerDependenciesMeta:
     ttsc:
       optional: true
-  checksum: 10c0/62f51ccdfd557f231126a03f01c33a12d51d944cf22fad0287915f31c9e7262324a1b0ece65a7855903a946954bd8bd6dee34c1289dcc16aeaa8e382bf91a106
+  checksum: 10c0/3e09b99ded014977034faffe7df2a47cd698ceb020dfdf5b6e63dd3e8d904bd6ea35e124e06afc0d2b21c3a04e0605022ec80160b395c8511f48278cec118042
   languageName: node
   linkType: hard
 
