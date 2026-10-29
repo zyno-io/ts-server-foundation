@@ -7,6 +7,18 @@ corepack yarn test
 corepack yarn test tests/http.spec.ts
 ```
 
+## Test Worker Isolation
+
+`tsf-test` (including `tsf-dev test`) loads a general worker bootstrap before test code. It assigns each worker a random `TSF_TEST_NAMESPACE` that resource helpers can reuse. Redis prefixes and generated test database suffixes use this same namespace. Helper processes inherit it, so resources belonging to one test can communicate across processes.
+
+Redis helpers append `:test:<namespace>` to default and utility-specific prefixes such as `BROADCAST_REDIS_PREFIX` and `BULL_REDIS_PREFIX`. Parallel test files and separate runs therefore use different cache keys, broadcast channels, locks, mesh state, and BullMQ queues even when their application prefixes match. Custom Redis clients must use the prefix returned by `createRedisOptions()` or `createRedis()` to participate in isolation.
+
+Generated database names include an SQL-safe representation of the namespace and retain their existing process, counter, and slot identifiers. Names still fit MySQL and PostgreSQL identifier limits. The shared MySQL session manager initializes its own namespace for the pooled databases it owns, allowing prepared database slots to remain reusable across worker leases.
+
+Set `TSF_TEST_NAMESPACE` explicitly to share a resource namespace across workers or include global setup and teardown. Database instance suffixes still distinguish individual databases. An empty value disables the namespace component: Redis keeps its configured prefixes, and database names use their existing generated suffixes. Application processes outside the test runner do not initialize a namespace automatically.
+
+Namespaces separate workers, not individual test cases. Database fixture rollback does not reset service singleton state; clear application caches between tests when fixtures reuse the same identities.
+
 ## Testing Facade
 
 `TestingHelpers.createTestingFacade()` creates an app with `frameworkConfig.port = 0`, then gives tests lifecycle helpers around that app.

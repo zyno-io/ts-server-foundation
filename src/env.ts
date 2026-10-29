@@ -157,6 +157,7 @@ export interface EnvObject {
     TEST_RUN_TS?: string;
     TSF_TSCONFIG?: string;
     TSF_TEST_DATABASE_NAME?: string;
+    TSF_TEST_NAMESPACE?: string;
     TSF_TEST_ALLOW_SAVEPOINTS?: string;
     TSF_TEST_MYSQL_SESSION_MANAGER?: string;
     TSF_TEST_MYSQL_SESSION_POOL_SIZE?: string;

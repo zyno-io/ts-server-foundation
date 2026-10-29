@@ -26,6 +26,7 @@ import {
 import type { RenderedSql } from '../src';
 
 const originalEnv = { ...process.env };
+const redisNamespaceSuffix = process.env.TSF_TEST_NAMESPACE ? `:test:${process.env.TSF_TEST_NAMESPACE}` : '';
 
 afterEach(async () => {
     process.env = { ...originalEnv };
@@ -620,7 +621,7 @@ describe('worker services', () => {
             }
         });
 
-        assert.equal(defaultPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, 'default-prefix:bmq');
+        assert.equal(defaultPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, `default-prefix${redisNamespaceSuffix}:bmq`);
 
         const bullPrefixApp = createApp({
             enableWorker: true,
@@ -631,7 +632,7 @@ describe('worker services', () => {
             }
         });
 
-        assert.equal(bullPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, 'bull-prefix:bmq');
+        assert.equal(bullPrefixApp.get(WorkerQueueRegistry).getBullMqOptions().prefix, `bull-prefix${redisNamespaceSuffix}:bmq`);
     });
 
     it('disconnects BullMQ clients after gracefully closing registry queues', async () => {
