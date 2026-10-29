@@ -102,7 +102,8 @@ export async function disconnectAllRedis(): Promise<void> {
     await Promise.all(clients.map(closeRedisClient));
 }
 
-async function closeRedisClient(client: Redis): Promise<void> {
+/** Close a client and stop recovery, including non-ready connections and failed QUITs. */
+export async function closeRedisClient(client: Pick<Redis, 'status' | 'quit' | 'disconnect'>): Promise<void> {
     if (client.status !== 'ready') {
         client.disconnect();
         return;

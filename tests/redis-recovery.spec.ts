@@ -6,6 +6,7 @@ import { Worker } from 'bullmq';
 import Redis from 'ioredis';
 
 import {
+    closeRedisClient,
     createApp,
     createRedis,
     createRecoveringRedisClient,
@@ -36,6 +37,37 @@ async function waitFor(check: () => boolean): Promise<void> {
     }
     assert.fail('Timed out waiting for Redis recovery');
 }
+
+it('closes non-ready custom clients without waiting for a QUIT response', async () => {
+    for (const status of ['end', 'connecting', 'reconnecting', 'wait'] as const) {
+        let disconnects = 0;
+        await closeRedisClient({
+            status,
+            async quit() {
+                assert.fail(`QUIT must not be attempted in ${status} status`);
+            },
+            disconnect() {
+                disconnects++;
+            }
+        });
+        assert.equal(disconnects, 1);
+    }
+});
+
+it('releases a ready custom client when QUIT fails during shutdown', async () => {
+    const calls: string[] = [];
+    await closeRedisClient({
+        status: 'ready',
+        async quit() {
+            calls.push('quit');
+            throw new Error('Connection is closed.');
+        },
+        disconnect() {
+            calls.push('disconnect');
+        }
+    });
+    assert.deepEqual(calls, ['quit', 'disconnect']);
+});
 
 it('continues retrying when an explicit reconnect overlaps the background timer and fails', async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -146,7 +178,7 @@ describe(
                 await endConnection(duplicate);
                 const duplicateResponse = await duplicate.ping();
                 assert.equal(duplicateResponse, 'PONG');
-                await duplicate.quit();
+                await closeRedisClient(duplicate);
                 await waitFor(() => duplicate.status === 'end');
                 await assert.rejects(duplicate.ping(), /Connection is closed/);
                 client.disconnect();
@@ -162,6 +194,20 @@ describe(
             } finally {
                 client.disconnect();
                 duplicate.disconnect();
+            }
+        });
+
+        it('cancels recovery when closing an already-ended custom client', async () => {
+            const client = createRecoveringRedisClient(redisOptions);
+            try {
+                await client.ping();
+                await endConnection(client);
+                await closeRedisClient(client);
+                await sleepMs(1_100);
+                assert.equal(client.status, 'end');
+                await assert.rejects(client.ping(), /Connection is closed/);
+            } finally {
+                client.disconnect();
             }
         });
 
