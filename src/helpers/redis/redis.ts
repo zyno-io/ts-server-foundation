@@ -1,8 +1,11 @@
-import Redis, { type RedisOptions } from 'ioredis';
+import type Redis from 'ioredis';
+import type { RedisOptions } from 'ioredis';
 
-import { getAppConfig, registerAppCleanup } from '../../app/resolver';
+import { getAppConfig } from '../../app/resolver';
 import { getPackageName } from '../io/package';
-import { createRecoveringRedisClient, isRedisClientRecovering } from './recovery';
+import { createRecoveringRedisClient } from './recovery';
+
+export { disconnectAllRedis } from './recovery';
 
 export interface RedisConnection<TClient = Redis> {
     client: TClient;
@@ -75,43 +78,8 @@ export function createRedisOptions(configPrefix?: string): {
     throw new Error('REDIS_HOST or REDIS_SENTINEL_HOST must be configured');
 }
 
-const allClients = new Set<Redis>();
-
 export function createRedis(configPrefix?: string): RedisConnection {
     const { options, prefix } = createRedisOptions(configPrefix);
     const client = createRecoveringRedisClient(options);
-    allClients.add(client);
-    const unregisterCleanup = registerAppCleanup(async () => {
-        allClients.delete(client);
-        await closeRedisClient(client);
-    });
-    client.on('end', () => {
-        if (isRedisClientRecovering(client)) return;
-        // QUIT closes the data socket, but ioredis's Sentinel detector owns
-        // a separate subscription/retry timer. Release that connector too.
-        client.disconnect();
-        allClients.delete(client);
-        unregisterCleanup();
-    });
     return { client, prefix };
-}
-
-export async function disconnectAllRedis(): Promise<void> {
-    const clients = [...allClients];
-    allClients.clear();
-    await Promise.all(clients.map(closeRedisClient));
-}
-
-async function closeRedisClient(client: Redis): Promise<void> {
-    if (client.status !== 'ready') {
-        client.disconnect();
-        return;
-    }
-    try {
-        await client.quit();
-    } catch {
-        // A disconnected server cannot acknowledge QUIT.
-    } finally {
-        client.disconnect();
-    }
 }

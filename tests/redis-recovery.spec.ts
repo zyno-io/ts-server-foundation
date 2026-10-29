@@ -16,6 +16,7 @@ import {
     WorkerRecorderService
 } from '../src';
 import { registerRedisStateReset } from '../src/helpers/redis/lifecycle';
+import { closeRedisClient } from '../src/helpers/redis/recovery';
 import { createWorkerRedisBackend } from '../src/services/worker/redis';
 
 const redisOptions = { host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT ?? 6379), retryStrategy: () => null };
@@ -36,6 +37,37 @@ async function waitFor(check: () => boolean): Promise<void> {
     }
     assert.fail('Timed out waiting for Redis recovery');
 }
+
+it('closes non-ready custom clients without waiting for a QUIT response', async () => {
+    for (const status of ['end', 'connecting', 'reconnecting', 'wait'] as const) {
+        let disconnects = 0;
+        await closeRedisClient({
+            status,
+            async quit() {
+                assert.fail(`QUIT must not be attempted in ${status} status`);
+            },
+            disconnect() {
+                disconnects++;
+            }
+        });
+        assert.equal(disconnects, 1);
+    }
+});
+
+it('releases a ready custom client when QUIT fails during shutdown', async () => {
+    const calls: string[] = [];
+    await closeRedisClient({
+        status: 'ready',
+        async quit() {
+            calls.push('quit');
+            throw new Error('Connection is closed.');
+        },
+        disconnect() {
+            calls.push('disconnect');
+        }
+    });
+    assert.deepEqual(calls, ['quit', 'disconnect']);
+});
 
 it('continues retrying when an explicit reconnect overlaps the background timer and fails', async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -71,10 +103,173 @@ it('continues retrying when an explicit reconnect overlaps the background timer 
     }
 });
 
+it('tracks standalone clients and their duplicates without requiring an app', async () => {
+    const client = createRecoveringRedisClient({ lazyConnect: true });
+    const duplicate = client.duplicate();
+    try {
+        await disconnectAllRedis();
+        await waitFor(() => client.status === 'end' && duplicate.status === 'end');
+        await assert.rejects(client.ping(), /Connection is closed/);
+        await assert.rejects(duplicate.ping(), /Connection is closed/);
+    } finally {
+        client.disconnect();
+        duplicate.disconnect();
+    }
+});
+
 describe(
     'Redis terminal recovery',
     { skip: process.env.REDIS_HOST ? false : 'set REDIS_HOST to run Redis recovery integration', timeout: 15_000 },
     () => {
+        it('keeps a client registered for app cleanup after QUIT is rejected', async t => {
+            const originalSendCommand = Redis.prototype.sendCommand;
+            let quits = 0;
+            t.mock.method(Redis.prototype, 'sendCommand', function (this: Redis, ...args: Parameters<Redis['sendCommand']>) {
+                const [command] = args;
+                if (command.name === 'quit') {
+                    quits++;
+                    command.reject(new Error('ERR QUIT was rejected'));
+                    return command.promise;
+                }
+                return originalSendCommand.apply(this, args);
+            });
+            const app = createApp({ enableHealthcheck: false });
+            const client = createRecoveringRedisClient(redisOptions);
+            try {
+                await client.ping();
+                await assert.rejects(client.quit(), /QUIT was rejected/);
+                assert.equal(client.status, 'ready');
+                await app.stop();
+                await waitFor(() => client.status === 'end');
+                assert.equal(quits, 2);
+            } finally {
+                client.disconnect();
+                await app.stop();
+            }
+        });
+
+        it('bounds app shutdown when QUIT is already pending behind a blocking read', async () => {
+            const app = createApp({ enableHealthcheck: false });
+            const client = createRecoveringRedisClient(redisOptions);
+            let deadline: NodeJS.Timeout | undefined;
+            try {
+                await client.ping();
+                const blockedRead = client.blpop(`recovery:blocking:${randomUUID()}`, 0).catch(error => error as Error);
+                const pendingQuit = client.quit().catch(error => error as Error);
+                await Promise.race([
+                    app.stop(),
+                    new Promise<never>((_resolve, reject) => {
+                        deadline = setTimeout(() => reject(new Error('App shutdown waited indefinitely for QUIT')), 5_000);
+                    })
+                ]);
+                await waitFor(() => client.status === 'end');
+                const readResult = await blockedRead;
+                const quitResult = await pendingQuit;
+                assert.ok(readResult instanceof Error);
+                assert.ok(quitResult instanceof Error);
+            } finally {
+                if (deadline) clearTimeout(deadline);
+                client.disconnect();
+                await app.stop();
+            }
+        });
+
+        it('automatically registers shared, direct, and duplicate clients exactly once', async t => {
+            const app = createApp({ enableHealthcheck: false });
+            const registration = t.mock.method(app, 'registerCleanup');
+            const { client: shared } = createRedis();
+            const direct = createRecoveringRedisClient(redisOptions);
+            const duplicate = direct.duplicate();
+            try {
+                await Promise.all([shared.ping(), direct.ping(), duplicate.ping()]);
+                assert.equal(registration.mock.callCount(), 3);
+                await app.stop();
+                await waitFor(() => [shared, direct, duplicate].every(client => client.status === 'end'));
+                await assert.rejects(duplicate.ping(), /Connection is closed/);
+            } finally {
+                await app.stop();
+                shared.disconnect();
+                direct.disconnect();
+                duplicate.disconnect();
+            }
+        });
+
+        it('automatically stops ended, reconnecting, and lazy clients without reviving recovery', async t => {
+            const app = createApp({ enableHealthcheck: false });
+            const ended = createRecoveringRedisClient(redisOptions);
+            const reconnecting = createRecoveringRedisClient(redisOptions);
+            const lazy = createRecoveringRedisClient({ ...redisOptions, lazyConnect: true });
+            const clients = [ended, reconnecting, lazy];
+            try {
+                await Promise.all([ended.ping(), reconnecting.ping()]);
+                await endConnection(ended);
+                reconnecting.options.retryStrategy = () => 500;
+                const retrying = new Promise<void>(resolve => reconnecting.once('reconnecting', () => resolve()));
+                reconnecting.stream.destroy();
+                await retrying;
+                assert.equal(reconnecting.status, 'reconnecting');
+                assert.equal(lazy.status, 'wait');
+                await app.stop();
+                const attempts = clients.map(client => t.mock.method(client, 'connect'));
+                await waitFor(() => ended.status === 'end' && lazy.status === 'end');
+                await sleepMs(1_100);
+                // ioredis can retain "reconnecting" status after its already-closed socket is disconnected.
+                assert.equal(reconnecting.stream.destroyed, true);
+                for (const attempt of attempts) assert.equal(attempt.mock.callCount(), 0);
+                await assert.rejects(ended.ping(), /Connection is closed/);
+                await assert.rejects(lazy.ping(), /Connection is closed/);
+            } finally {
+                await app.stop();
+                for (const client of clients) client.disconnect();
+            }
+        });
+
+        it('keeps clients and duplicates with their original app when another app becomes current', async () => {
+            const first = createApp({ enableHealthcheck: false });
+            const original = createRecoveringRedisClient(redisOptions);
+            const second = createApp({ enableHealthcheck: false });
+            const unrelated = createRecoveringRedisClient(redisOptions);
+            const duplicate = original.duplicate();
+            try {
+                await Promise.all([original.ping(), duplicate.ping(), unrelated.ping()]);
+                await first.stop();
+                await waitFor(() => original.status === 'end' && duplicate.status === 'end');
+                const response = await unrelated.ping();
+                assert.equal(response, 'PONG');
+                await second.stop();
+                await waitFor(() => unrelated.status === 'end');
+            } finally {
+                await first.stop();
+                await second.stop();
+                original.disconnect();
+                duplicate.disconnect();
+                unrelated.disconnect();
+            }
+        });
+
+        it('unregisters released clients and tracks an explicit reconnect as a new lifetime', async t => {
+            const app = createApp({ enableHealthcheck: false });
+            const released = createRecoveringRedisClient(redisOptions);
+            const reconnected = createRecoveringRedisClient(redisOptions);
+            const disconnect = t.mock.method(released, 'disconnect');
+            try {
+                await Promise.all([released.ping(), reconnected.ping()]);
+                released.disconnect();
+                reconnected.disconnect();
+                await waitFor(() => released.status === 'end' && reconnected.status === 'end');
+                await reconnected.connect();
+                const response = await reconnected.ping();
+                assert.equal(response, 'PONG');
+                await app.stop();
+                await waitFor(() => reconnected.status === 'end');
+                assert.equal(disconnect.mock.callCount(), 1);
+            } finally {
+                await app.stop();
+                released.disconnect();
+                reconnected.disconnect();
+            }
+        });
+
         it('recovers the same shared client and mutex without invalidating cached state', async () => {
             const app = createApp({ enableHealthcheck: false, defaultConfig: { REDIS_PREFIX: randomUUID() } });
             const connection = createRedis();
@@ -146,7 +341,7 @@ describe(
                 await endConnection(duplicate);
                 const duplicateResponse = await duplicate.ping();
                 assert.equal(duplicateResponse, 'PONG');
-                await duplicate.quit();
+                await closeRedisClient(duplicate);
                 await waitFor(() => duplicate.status === 'end');
                 await assert.rejects(duplicate.ping(), /Connection is closed/);
                 client.disconnect();
@@ -162,6 +357,20 @@ describe(
             } finally {
                 client.disconnect();
                 duplicate.disconnect();
+            }
+        });
+
+        it('cancels recovery when closing an already-ended custom client', async () => {
+            const client = createRecoveringRedisClient(redisOptions);
+            try {
+                await client.ping();
+                await endConnection(client);
+                await closeRedisClient(client);
+                await sleepMs(1_100);
+                assert.equal(client.status, 'end');
+                await assert.rejects(client.ping(), /Connection is closed/);
+            } finally {
+                client.disconnect();
             }
         });
 
