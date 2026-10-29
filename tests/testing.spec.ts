@@ -129,6 +129,31 @@ describe('TestingHelpers', () => {
         assert.equal(name.length <= 63, true);
     });
 
+    it('shares the test namespace in database names while retaining instance suffixes', () => {
+        const prefix = createTestDatabasePrefix('scope');
+        process.env.TSF_TEST_NAMESPACE = 'shared_worker';
+        const first = formatTestDatabaseName('scope', [42, 1]);
+        assert.equal(first, `${prefix}_shared_worker_42_1`);
+        assert.notEqual(formatTestDatabaseName('scope', [42, 2]), first);
+        process.env.TSF_TEST_NAMESPACE = 'another_worker';
+        assert.notEqual(formatTestDatabaseName('scope', [42, 1]), first);
+        process.env.TSF_TEST_NAMESPACE = '';
+        assert.equal(formatTestDatabaseName('scope', [42, 1]), `${prefix}_42_1`);
+        delete process.env.TSF_TEST_NAMESPACE;
+        assert.equal(formatTestDatabaseName('scope', [42, 1]), `${prefix}_42_1`);
+    });
+
+    it('keeps custom test namespaces distinct and safe for database identifiers', () => {
+        const names = ['shared-worker', 'shared_worker', 'shared/worker', 'worker🔥'].map(namespace => {
+            process.env.TSF_TEST_NAMESPACE = namespace;
+            const name = formatTestDatabaseName('scope', [42, 1]);
+            assert.match(name, /^[a-zA-Z0-9_]+$/);
+            assert.ok(Buffer.byteLength(name) <= 63);
+            return name;
+        });
+        assert.equal(new Set(names).size, names.length);
+    });
+
     it('creates a testing facade and sends mock requests', async () => {
         @http.controller('/testing')
         class TestingController {

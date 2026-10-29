@@ -7,15 +7,17 @@ corepack yarn test
 corepack yarn test tests/http.spec.ts
 ```
 
-## Redis Isolation
+## Test Worker Isolation
 
-`tsf-test` (including `tsf-dev test`) assigns each Node test worker a random Redis namespace before loading test code. Redis helpers append `:test:<namespace>` to the configured prefix, including utility-specific prefixes such as `BROADCAST_REDIS_PREFIX` and `BULL_REDIS_PREFIX`. Parallel test files and separate runs therefore use different cache keys, broadcast channels, locks, mesh state, and BullMQ queues even when their application prefixes match.
+`tsf-test` (including `tsf-dev test`) loads a general worker bootstrap before test code. It assigns each worker a random `TSF_TEST_NAMESPACE` that resource helpers can reuse. Redis prefixes and generated test database suffixes use this same namespace. Helper processes inherit it, so resources belonging to one test can communicate across processes.
 
-Helper processes spawned by a test inherit `TSF_TEST_REDIS_NAMESPACE`, so they can communicate with that test through Redis. To share Redis state across test workers intentionally, set `TSF_TEST_REDIS_NAMESPACE` to the same explicit value for those workers. Set it to an empty string to use the configured prefixes without a test suffix. These overrides also apply to global setup and teardown code.
+Redis helpers append `:test:<namespace>` to default and utility-specific prefixes such as `BROADCAST_REDIS_PREFIX` and `BULL_REDIS_PREFIX`. Parallel test files and separate runs therefore use different cache keys, broadcast channels, locks, mesh state, and BullMQ queues even when their application prefixes match. Custom Redis clients must use the prefix returned by `createRedisOptions()` or `createRedis()` to participate in isolation.
 
-The namespace applies to TSF helpers that use `createRedisOptions()` or `createRedis()`. Custom Redis clients must use the returned prefix to participate in isolation. Application processes launched outside `tsf-test` keep their configured prefixes unless `TSF_TEST_REDIS_NAMESPACE` is explicitly supplied.
+Generated database names include an SQL-safe representation of the namespace and retain their existing process, counter, and slot identifiers. Names still fit MySQL and PostgreSQL identifier limits. The shared MySQL session manager initializes its own namespace for the pooled databases it owns, allowing prepared database slots to remain reusable across worker leases.
 
-Redis namespaces separate workers, not individual test cases. Database fixture rollback does not reset service singleton state; clear application caches between tests when fixtures reuse the same identities.
+Set `TSF_TEST_NAMESPACE` explicitly to share a resource namespace across workers or include global setup and teardown. Database instance suffixes still distinguish individual databases. An empty value disables the namespace component: Redis keeps its configured prefixes, and database names use their existing generated suffixes. Application processes outside the test runner do not initialize a namespace automatically.
+
+Namespaces separate workers, not individual test cases. Database fixture rollback does not reset service singleton state; clear application caches between tests when fixtures reuse the same identities.
 
 ## Testing Facade
 

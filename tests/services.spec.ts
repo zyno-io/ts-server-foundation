@@ -39,7 +39,7 @@ import type { RenderedSql } from '../src';
 import { installSentry, resetSentryForTests } from '../src/telemetry/sentry';
 
 const requireFromTest = createRequire(__filename);
-const redisNamespaceSuffix = process.env.TSF_TEST_REDIS_NAMESPACE ? `:test:${process.env.TSF_TEST_REDIS_NAMESPACE}` : '';
+const redisNamespaceSuffix = process.env.TSF_TEST_NAMESPACE ? `:test:${process.env.TSF_TEST_NAMESPACE}` : '';
 const Sentry = requireFromTest('@sentry/node') as {
     captureException: (error: unknown, context?: unknown) => string;
 };

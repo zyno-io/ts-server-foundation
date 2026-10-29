@@ -6,6 +6,6 @@ export function getRedisPrefix(configPrefix?: string): string {
     const config = getAppConfig();
     const utilityPrefix = configPrefix ? config[`${configPrefix}_REDIS_PREFIX` as keyof typeof config] : undefined;
     const configuredPrefix = String(utilityPrefix ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app');
-    const namespace = Env.TSF_TEST_REDIS_NAMESPACE;
+    const namespace = Env.TSF_TEST_NAMESPACE;
     return namespace ? `${configuredPrefix}:test:${namespace}` : configuredPrefix;
 }

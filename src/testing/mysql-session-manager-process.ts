@@ -5,8 +5,11 @@ import { randomBytes } from 'node:crypto';
 import { Env } from '../env';
 import { setLogSink, type LogData, type LogEntry } from '../services/logger';
 import { MySQLSessionManager } from './mysql-session-manager';
+import { initializeTestNamespace } from './namespace';
 
 async function main(): Promise<void> {
+    // Pooled databases belong to this manager and remain reusable across worker leases.
+    initializeTestNamespace();
     installStderrLogSink();
     const token = randomBytes(24).toString('hex');
     const manager = new MySQLSessionManager({

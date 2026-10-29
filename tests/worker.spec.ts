@@ -26,7 +26,7 @@ import {
 import type { RenderedSql } from '../src';
 
 const originalEnv = { ...process.env };
-const redisNamespaceSuffix = process.env.TSF_TEST_REDIS_NAMESPACE ? `:test:${process.env.TSF_TEST_REDIS_NAMESPACE}` : '';
+const redisNamespaceSuffix = process.env.TSF_TEST_NAMESPACE ? `:test:${process.env.TSF_TEST_NAMESPACE}` : '';
 
 afterEach(async () => {
     process.env = { ...originalEnv };

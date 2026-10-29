@@ -58,7 +58,7 @@ import {
 } from '../src';
 import { flattenMutexKey as flattenHelperMutexKey } from '../src/helpers';
 
-const redisNamespaceSuffix = process.env.TSF_TEST_REDIS_NAMESPACE ? `:test:${process.env.TSF_TEST_REDIS_NAMESPACE}` : '';
+const redisNamespaceSuffix = process.env.TSF_TEST_NAMESPACE ? `:test:${process.env.TSF_TEST_NAMESPACE}` : '';
 
 describe('helper utilities', () => {
     it('supports array helpers', async () => {

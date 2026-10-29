@@ -5,9 +5,11 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { createApp, createDistributedMethod, createRedis, createRedisOptions, Env, LeaderService } from '../../src';
+import { formatTestDatabaseName } from '../../src/testing/database-name';
 
-export async function runRedisIsolationWorker(id: string): Promise<void> {
-    const directory = Env.TSF_TEST_REDIS_FIXTURE_DIR!;
+export async function runIsolationWorker(id: string, initialNamespace: string | undefined): Promise<void> {
+    assert.equal(Env.TSF_TEST_NAMESPACE, initialNamespace, 'the worker namespace must exist before importing resource helpers');
+    const directory = Env.TSF_TEST_WORKER_FIXTURE_DIR!;
     const appOptions = {
         enableHealthcheck: false,
         defaultConfig: {
@@ -40,7 +42,7 @@ export async function runRedisIsolationWorker(id: string): Promise<void> {
         assert.equal(helper.status, 0, helper.stderr);
         assert.equal(JSON.parse(helper.stdout), prefixes['']);
 
-        if (Env.TSF_TEST_REDIS_FIXTURE_LIVE === '1') {
+        if (Env.TSF_TEST_WORKER_FIXTURE_LIVE_REDIS === '1') {
             const workerLeader = new LeaderService('same-leader', { ttlMs: 1_000, renewalIntervalMs: 250, retryDelayMs: 50 });
             leader = workerLeader;
             workerLeader.start();
@@ -70,7 +72,8 @@ export async function runRedisIsolationWorker(id: string): Promise<void> {
             assert.equal(flushes, 1);
         }
 
-        writeFileSync(join(directory, `${id}.json`), JSON.stringify({ namespace: Env.TSF_TEST_REDIS_NAMESPACE, prefixes }));
+        const databaseName = formatTestDatabaseName('worker', [process.pid, 1]);
+        writeFileSync(join(directory, `${id}.json`), JSON.stringify({ namespace: Env.TSF_TEST_NAMESPACE, prefixes, databaseName }));
     } finally {
         try {
             await cleanup?.();
