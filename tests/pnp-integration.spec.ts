@@ -82,7 +82,8 @@ describe('packed Yarn PnP consumer', () => {
                 packageManager: 'yarn@4.17.1'
             })
         );
-        writeFileSync(join(consumer, '.yarnrc.yml'), 'nodeLinker: pnp\n');
+        // Use the repository's release-age policy for freshly published dependencies.
+        writeFileSync(join(consumer, '.yarnrc.yml'), 'nodeLinker: pnp\nnpmMinimalAgeGate: 0\n');
         writeFileSync(
             join(consumer, 'tsconfig.json'),
             JSON.stringify({
