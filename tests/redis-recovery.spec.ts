@@ -121,6 +121,59 @@ describe(
     'Redis terminal recovery',
     { skip: process.env.REDIS_HOST ? false : 'set REDIS_HOST to run Redis recovery integration', timeout: 15_000 },
     () => {
+        it('keeps a client registered for app cleanup after QUIT is rejected', async t => {
+            const originalSendCommand = Redis.prototype.sendCommand;
+            let quits = 0;
+            t.mock.method(Redis.prototype, 'sendCommand', function (this: Redis, ...args: Parameters<Redis['sendCommand']>) {
+                const [command] = args;
+                if (command.name === 'quit') {
+                    quits++;
+                    command.reject(new Error('ERR QUIT was rejected'));
+                    return command.promise;
+                }
+                return originalSendCommand.apply(this, args);
+            });
+            const app = createApp({ enableHealthcheck: false });
+            const client = createRecoveringRedisClient(redisOptions);
+            try {
+                await client.ping();
+                await assert.rejects(client.quit(), /QUIT was rejected/);
+                assert.equal(client.status, 'ready');
+                await app.stop();
+                await waitFor(() => client.status === 'end');
+                assert.equal(quits, 2);
+            } finally {
+                client.disconnect();
+                await app.stop();
+            }
+        });
+
+        it('bounds app shutdown when QUIT is already pending behind a blocking read', async () => {
+            const app = createApp({ enableHealthcheck: false });
+            const client = createRecoveringRedisClient(redisOptions);
+            let deadline: NodeJS.Timeout | undefined;
+            try {
+                await client.ping();
+                const blockedRead = client.blpop(`recovery:blocking:${randomUUID()}`, 0).catch(error => error as Error);
+                const pendingQuit = client.quit().catch(error => error as Error);
+                await Promise.race([
+                    app.stop(),
+                    new Promise<never>((_resolve, reject) => {
+                        deadline = setTimeout(() => reject(new Error('App shutdown waited indefinitely for QUIT')), 5_000);
+                    })
+                ]);
+                await waitFor(() => client.status === 'end');
+                const readResult = await blockedRead;
+                const quitResult = await pendingQuit;
+                assert.ok(readResult instanceof Error);
+                assert.ok(quitResult instanceof Error);
+            } finally {
+                if (deadline) clearTimeout(deadline);
+                client.disconnect();
+                await app.stop();
+            }
+        });
+
         it('automatically registers shared, direct, and duplicate clients exactly once', async t => {
             const app = createApp({ enableHealthcheck: false });
             const registration = t.mock.method(app, 'registerCleanup');

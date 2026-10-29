@@ -5,6 +5,7 @@ import { getCurrentApp } from '../../app/current';
 
 const recoveringClients = new WeakSet<object>();
 const allClients = new Set<Redis>();
+const REDIS_SHUTDOWN_GRACE_MS = 1_000;
 
 /** Whether an end event is transient rather than an explicit client shutdown. */
 export function isRedisClientRecovering(client: object): boolean {
@@ -47,9 +48,12 @@ function manageRedisClient(client: Redis, owner: App | undefined): Redis {
         if (timer) clearTimeout(timer);
         timer = undefined;
     };
-    const stop = () => {
+    const pauseRecovery = () => {
         recoveringClients.delete(client);
         clearRetry();
+    };
+    const stop = () => {
+        pauseRecovery();
         unregisterCleanup?.();
         unregisterCleanup = undefined;
     };
@@ -85,8 +89,11 @@ function manageRedisClient(client: Redis, owner: App | undefined): Redis {
         disconnect(reconnect);
     };
     client.sendCommand = (command, stream) => {
-        if (command.name === 'quit') stop();
-        else reconnect();
+        if (command.name === 'quit') {
+            // A rejected or blocked QUIT has not released the connection yet.
+            pauseRecovery();
+            if (client.status === 'end') stop();
+        } else reconnect();
         return sendCommand(command, stream);
     };
     // Duplicates belong to the original owner even if another app is now current.
@@ -97,8 +104,10 @@ function manageRedisClient(client: Redis, owner: App | undefined): Redis {
     });
     client.on('end', () => {
         if (client.status !== 'end') return;
+        const recovering = isRedisClientRecovering(client);
+        if (!recovering) stop();
         // Also release Sentinel's separate failover subscription and retry timer.
-        disconnect(isRedisClientRecovering(client));
+        disconnect(recovering);
         scheduleRetry();
     });
     return client;
@@ -116,11 +125,20 @@ export async function closeRedisClient(client: Pick<Redis, 'status' | 'quit' | '
         client.disconnect();
         return;
     }
+    let timer: NodeJS.Timeout | undefined;
     try {
-        await client.quit();
+        await Promise.race([
+            client.quit(),
+            new Promise<void>(resolve => {
+                // QUIT may be queued behind an indefinite blocking command.
+                timer = setTimeout(resolve, REDIS_SHUTDOWN_GRACE_MS);
+                timer.unref();
+            })
+        ]);
     } catch {
         // A disconnected server cannot acknowledge QUIT.
     } finally {
+        if (timer) clearTimeout(timer);
         client.disconnect();
     }
 }
