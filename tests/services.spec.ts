@@ -39,6 +39,7 @@ import type { RenderedSql } from '../src';
 import { installSentry, resetSentryForTests } from '../src/telemetry/sentry';
 
 const requireFromTest = createRequire(__filename);
+const redisNamespaceSuffix = process.env.TSF_TEST_REDIS_NAMESPACE ? `:test:${process.env.TSF_TEST_REDIS_NAMESPACE}` : '';
 const Sentry = requireFromTest('@sentry/node') as {
     captureException: (error: unknown, context?: unknown) => string;
 };
@@ -430,19 +431,19 @@ describe('services', () => {
         process.env.REDIS_PREFIX = 'default-prefix';
         const defaultPrefixApp = createApp({});
         const defaultPrefixLeader = new LeaderService('main');
-        assert.equal((defaultPrefixLeader as unknown as { key: string }).key, 'default-prefix:leader:main');
+        assert.equal((defaultPrefixLeader as unknown as { key: string }).key, `default-prefix${redisNamespaceSuffix}:leader:main`);
 
         process.env.APP_ENV = 'test';
         process.env.MUTEX_REDIS_PREFIX = 'mutex-prefix';
         createApp({});
         const mutexPrefixLeader = new LeaderService('main');
-        assert.equal((mutexPrefixLeader as unknown as { key: string }).key, 'mutex-prefix:leader:main');
+        assert.equal((mutexPrefixLeader as unknown as { key: string }).key, `mutex-prefix${redisNamespaceSuffix}:leader:main`);
 
         process.env.APP_ENV = 'test';
         process.env.BULL_REDIS_PREFIX = 'bull-prefix';
         createApp({});
         const bullPrefixLeader = new LeaderService('worker-recorder:default', { redisConfigPrefix: 'BULL' });
-        assert.equal((bullPrefixLeader as unknown as { key: string }).key, 'bull-prefix:leader:worker-recorder:default');
+        assert.equal((bullPrefixLeader as unknown as { key: string }).key, `bull-prefix${redisNamespaceSuffix}:leader:worker-recorder:default`);
 
         void defaultPrefixApp;
     });

@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-import { getAppConfig } from '../app/resolver';
-import { getPackageName } from '../helpers/io/package';
 import { registerRedisStateReset } from '../helpers/redis/lifecycle';
+import { getRedisPrefix } from '../helpers/redis/prefix';
 import { createRedis } from '../helpers/redis/redis';
 import { createLogger } from './logger';
 
@@ -86,10 +85,9 @@ export class LeaderService {
     private logger = createLogger(this);
 
     constructor(key: string, options?: LeaderServiceOptions) {
-        const config = getAppConfig();
         this.redisConfigPrefix = options?.redisConfigPrefix ?? 'MUTEX';
         this.retryOnCallbackError = options?.retryOnCallbackError ?? false;
-        const prefix = config[`${this.redisConfigPrefix}_REDIS_PREFIX` as keyof typeof config] ?? config.REDIS_PREFIX ?? getPackageName() ?? 'app';
+        const prefix = getRedisPrefix(this.redisConfigPrefix);
         this.key = `${prefix}:leader:${key}`;
         this.ttlMs = options?.ttlMs ?? 30000;
         this.renewalIntervalMs = options?.renewalIntervalMs ?? 10000;

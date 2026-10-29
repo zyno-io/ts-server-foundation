@@ -58,6 +58,8 @@ import {
 } from '../src';
 import { flattenMutexKey as flattenHelperMutexKey } from '../src/helpers';
 
+const redisNamespaceSuffix = process.env.TSF_TEST_REDIS_NAMESPACE ? `:test:${process.env.TSF_TEST_REDIS_NAMESPACE}` : '';
+
 describe('helper utilities', () => {
     it('supports array helpers', async () => {
         assert.deepStrictEqual(toArray('a'), ['a']);
@@ -343,15 +345,15 @@ describe('helper utilities', () => {
         assert.equal(defaultRedis.options.host, 'redis-default');
         assert.equal(defaultRedis.options.username, 'default-user');
         assert.equal(defaultRedis.options.password, 'default-password');
-        assert.equal(defaultRedis.prefix, 'default-prefix');
+        assert.equal(defaultRedis.prefix, `default-prefix${redisNamespaceSuffix}`);
         assert.equal(cacheRedis.options.host, 'redis-cache');
         assert.equal(cacheRedis.options.port, 6380);
         assert.equal(cacheRedis.options.password, 'cache-password');
         assert.equal(cacheRedis.options.username, 'default-user');
-        assert.equal(cacheRedis.prefix, 'cache-prefix');
+        assert.equal(cacheRedis.prefix, `cache-prefix${redisNamespaceSuffix}`);
         assert.equal(mutexRedis.options.host, 'redis-mutex');
         assert.equal(mutexRedis.options.password, 'default-password');
-        assert.equal(mutexRedis.prefix, 'default-prefix');
+        assert.equal(mutexRedis.prefix, `default-prefix${redisNamespaceSuffix}`);
         assert.deepStrictEqual(broadcastRedis.options.sentinels, [{ host: 'redis-broadcast-sentinel', port: 26380 }]);
         assert.equal(broadcastRedis.options.name, 'broadcast-master');
         assert.equal(broadcastRedis.options.password, 'default-password');
@@ -369,7 +371,7 @@ describe('helper utilities', () => {
         assert.equal(meshRedis.options.password, 'default-password');
         assert.equal(bullRedis.options.host, 'redis-bull');
         assert.equal(bullRedis.options.password, 'default-password');
-        assert.equal(bullRedis.prefix, 'bull-prefix');
+        assert.equal(bullRedis.prefix, `bull-prefix${redisNamespaceSuffix}`);
     });
 
     it('delays and deduplicates Redis unavailable errors until the connection recovers', () => {
@@ -749,14 +751,14 @@ describe('helper utilities', () => {
         resetCacheRedisConnection();
 
         assert.deepStrictEqual(createRedisOptions(), {
-            prefix: 'root-prefix',
+            prefix: `root-prefix${redisNamespaceSuffix}`,
             options: {
                 host: 'redis.local',
                 port: 6380
             }
         });
         assert.deepStrictEqual(createRedisOptions('CACHE'), {
-            prefix: 'cache-prefix',
+            prefix: `cache-prefix${redisNamespaceSuffix}`,
             options: {
                 host: 'cache.local',
                 port: 6381

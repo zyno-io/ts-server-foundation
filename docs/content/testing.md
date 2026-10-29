@@ -7,6 +7,16 @@ corepack yarn test
 corepack yarn test tests/http.spec.ts
 ```
 
+## Redis Isolation
+
+`tsf-test` (including `tsf-dev test`) assigns each Node test worker a random Redis namespace before loading test code. Redis helpers append `:test:<namespace>` to the configured prefix, including utility-specific prefixes such as `BROADCAST_REDIS_PREFIX` and `BULL_REDIS_PREFIX`. Parallel test files and separate runs therefore use different cache keys, broadcast channels, locks, mesh state, and BullMQ queues even when their application prefixes match.
+
+Helper processes spawned by a test inherit `TSF_TEST_REDIS_NAMESPACE`, so they can communicate with that test through Redis. To share Redis state across test workers intentionally, set `TSF_TEST_REDIS_NAMESPACE` to the same explicit value for those workers. Set it to an empty string to use the configured prefixes without a test suffix. These overrides also apply to global setup and teardown code.
+
+The namespace applies to TSF helpers that use `createRedisOptions()` or `createRedis()`. Custom Redis clients must use the returned prefix to participate in isolation. Application processes launched outside `tsf-test` keep their configured prefixes unless `TSF_TEST_REDIS_NAMESPACE` is explicitly supplied.
+
+Redis namespaces separate workers, not individual test cases. Database fixture rollback does not reset service singleton state; clear application caches between tests when fixtures reuse the same identities.
+
 ## Testing Facade
 
 `TestingHelpers.createTestingFacade()` creates an app with `frameworkConfig.port = 0`, then gives tests lifecycle helpers around that app.

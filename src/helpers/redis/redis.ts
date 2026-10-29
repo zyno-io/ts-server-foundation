@@ -2,7 +2,7 @@ import type Redis from 'ioredis';
 import type { RedisOptions } from 'ioredis';
 
 import { getAppConfig } from '../../app/resolver';
-import { getPackageName } from '../io/package';
+import { getRedisPrefix } from './prefix';
 import { createRecoveringRedisClient } from './recovery';
 
 export { disconnectAllRedis } from './recovery';
@@ -27,7 +27,7 @@ export function createRedisOptions(configPrefix?: string): {
         }
     }
 
-    const prefix = String(config.REDIS_PREFIX ?? getPackageName() ?? 'app');
+    const prefix = getRedisPrefix(configPrefix);
     const username = config.REDIS_USERNAME === undefined ? undefined : String(config.REDIS_USERNAME);
     const password = config.REDIS_PASSWORD_SECRET === undefined ? undefined : String(config.REDIS_PASSWORD_SECRET);
     const sentinelUsername = config.REDIS_SENTINEL_USERNAME === undefined ? username : String(config.REDIS_SENTINEL_USERNAME);
