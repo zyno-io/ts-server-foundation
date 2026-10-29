@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import http, { type Server } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 
 // oxlint-disable-next-line typescript/no-require-imports
@@ -96,7 +96,7 @@ function publishedReflection(directory: string): { dirname: string; source: stri
     const source = join(dirname, 'go');
     const version = '26.714.1200';
     mkdirSync(dirname, { recursive: true });
-    cpSync(join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler', 'go'), source, { recursive: true });
+    cpSync(join(process.cwd(), 'packages', 'reflection', 'src', 'type-compiler'), dirname, { recursive: true });
     writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@zyno-io/ts-reflection', version }));
     return { dirname, source, version };
 }
@@ -232,6 +232,76 @@ describe('type compiler prebuilds', () => {
         assert.equal(cacheEntries.length, 1);
         const cachedBinary = join(cache, 'plugins', cacheEntries[0], process.platform === 'win32' ? 'plugin.exe' : 'plugin');
         assert.deepStrictEqual(readFileSync(cachedBinary), value.binary);
+    });
+
+    it('prepares a downloaded plugin without falling back to a source build', async () => {
+        const directory = temporaryDirectory();
+        const modules = join(directory, 'node_modules');
+        mkdirSync(join(modules, 'typescript'), { recursive: true });
+        symlinkSync(dirname(require.resolve('ttsc/package.json')), join(modules, 'ttsc'), 'junction');
+        writeFileSync(join(modules, 'typescript', 'package.json'), readFileSync(require.resolve('typescript/package.json')));
+        const reflection = publishedReflection(directory);
+        const cache = join(directory, 'ttsc-cache');
+        const value = fixture(directory);
+        value.manifest.packageVersion = reflection.version;
+        value.manifest.pluginSourceSha256 = prebuilt.hashPluginSource(reflection.source);
+        const assets = prebuilt.prebuiltAssetNames(`${process.platform}-${process.arch}`);
+        const baseUrl = await serve({
+            [`/v${reflection.version}/${assets.binary}`]: value.binary,
+            [`/v${reflection.version}/${assets.manifest}`]: JSON.stringify(value.manifest)
+        });
+        const sourceBuild = join(directory, 'source-build-attempt');
+        const guard = join(directory, 'deny-source-build.cjs');
+        writeFileSync(
+            guard,
+            `const cp = require('node:child_process');
+            const fs = require('node:fs');
+            const path = require('node:path');
+            for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
+                const original = cp[name];
+                cp[name] = function(command, args, ...rest) {
+                    if (/^go(?:\\.exe)?$/.test(path.basename(command)) && args?.includes('build')) {
+                        fs.writeFileSync(${JSON.stringify(sourceBuild)}, 'attempted');
+                        throw new Error('The verified prebuilt must be reused');
+                    }
+                    return original.call(this, command, args, ...rest);
+                };
+            }
+            require('node:module').syncBuiltinESMExports();`
+        );
+        const input = join(directory, 'input.ts');
+        const config = join(directory, 'tsconfig.json');
+        writeFileSync(input, 'export const value = 1;\n');
+        writeFileSync(
+            config,
+            JSON.stringify({ compilerOptions: { plugins: [{ transform: join(reflection.dirname, 'index.cjs') }] }, files: [input] })
+        );
+        const launcher = join(dirname(require.resolve('ttsc/package.json')), 'lib', 'launcher', 'ttsc.js');
+        const result = await runNode(
+            `const { spawnSync } = require('node:child_process');
+            const result = spawnSync(process.execPath, [${JSON.stringify(launcher)}, 'prepare', '-p', ${JSON.stringify(config)}], {
+                encoding: 'utf8', env: process.env, timeout: 25_000
+            });
+            process.stdout.write(result.stdout ?? '');
+            process.stderr.write(result.stderr ?? '');
+            process.exit(result.status ?? 1);`,
+            {
+                TSF_TYPE_COMPILER_PREBUILT_ALLOW_HTTP: '1',
+                TSF_TYPE_COMPILER_PREBUILT_BASE_URL: baseUrl,
+                TSF_TYPE_COMPILER_PREBUILT_TIMEOUT_MS: '5000',
+                TTSC_CACHE_DIR: cache,
+                CGO_ENABLED: '0',
+                NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --require=${guard}`.trim()
+            }
+        );
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(existsSync(sourceBuild), false);
+        const entries = readdirSync(join(cache, 'plugins'));
+        const binaries = entries
+            .map(entry => join(cache, 'plugins', entry, process.platform === 'win32' ? 'plugin.exe' : 'plugin'))
+            .filter(existsSync);
+        assert.equal(binaries.length, 1);
+        assert.deepStrictEqual(readFileSync(binaries[0]), value.binary);
     });
 
     it('returns the source descriptor when a release asset cannot be downloaded', async () => {

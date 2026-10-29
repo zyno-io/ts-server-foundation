@@ -154,6 +154,9 @@ function resolveTtscBuild(projectRoot, source) {
     const cacheKey = computeCacheKey({
         dir: source,
         entry: '.',
+        // ttsc 0.34 keys executable source plugins by their package ownership.
+        // Earlier cache helpers ignore this additional input.
+        packageOwnership: [{ entry: '.', kind: 'executable' }],
         goBinary,
         overlayDirs: findTtscOverlayDirs(ttscRoot),
         ttscVersion,
