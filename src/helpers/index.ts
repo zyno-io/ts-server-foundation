@@ -28,6 +28,7 @@ export {
     type RedisMutexProvider
 } from './redis/mutex';
 export * from './redis/redis';
+export { createRecoveringRedisClient } from './redis/recovery';
 export * from './security/crypto';
 export * from './security/validation';
 export * from './utils/date';
