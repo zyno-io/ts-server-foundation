@@ -26,7 +26,7 @@ export function installSentry(options: ISentryOptions): void {
         environment: Env.APP_ENV,
         maxBreadcrumbs: 0,
         release,
-        skipOpenTelemetrySetup: true,
+        enableOpenTelemetrySetup: false,
         integrations: integrations => integrations.filter(integration => !['Http', 'NodeFetch'].includes(integration.name)),
         ...sentryOptions
     });

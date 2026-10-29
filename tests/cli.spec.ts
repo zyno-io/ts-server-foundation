@@ -462,7 +462,7 @@ describe('CLI', () => {
         assert.equal(pkg.scripts?.tsf, "NODE_OPTIONS='--require=./.pnp.cjs --experimental-loader=./.pnp.loader.mjs' tsf-dev");
         const yarnrc = readFileSync(join(dir, '.yarnrc.yml'), 'utf8');
         assert.match(yarnrc, /pnpEnableEsmLoader: true/);
-        assert.match(yarnrc, /["']@sentry\/node@\*["']:[\s\S]+["']@opentelemetry\/core["']:/);
+        assert.doesNotMatch(yarnrc, /@sentry\/node/);
     });
 
     it('removes only Yarn’s asynchronous PnP loader from compiler processes', () => {
@@ -562,19 +562,7 @@ describe('CLI', () => {
         writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
         writeFileSync(join(ttscPackage, 'package.json'), JSON.stringify({ name: 'ttsc', version: expectedTtscVersion, main: 'index.js' }));
         mkdirSync(dirname(runtimeHookPreload), { recursive: true });
-        writeFileSync(
-            runtimeHookPreload,
-            [
-                'const runtimeHooks_1 = require("./runtimeHooks");',
-                '/**',
-                ' * bootstrap, which loads the entry itself; here we only register',
-                ' * (idempotently).',
-                ' */',
-                '(0, runtimeHooks_1.installRuntimeHooks)();',
-                '//# sourceMappingURL=runtimeHookPreload.js.map',
-                ''
-            ].join('\n')
-        );
+        copyFileSync(join(dirname(require.resolve('ttsc/package.json')), 'lib', 'launcher', 'internal', 'runtimeHookPreload.js'), runtimeHookPreload);
         writeFileSync(
             join(ttscPackage, 'index.js'),
             [
@@ -596,6 +584,23 @@ describe('CLI', () => {
             tsconfig: join(realpathSync(dir), 'tsconfig.json')
         });
         assert.match(readFileSync(runtimeHookPreload, 'utf8'), /TTSC_PLUGIN_DESCRIPTOR_LOAD/);
+
+        const hookMarker = join(dir, 'runtime-hooks-installed');
+        const hooksModule = join(dirname(runtimeHookPreload), 'runtime', 'installRuntimeHooks.js');
+        mkdirSync(dirname(hooksModule), { recursive: true });
+        writeFileSync(
+            hooksModule,
+            `exports.installRuntimeHooks = () => require('node:fs').writeFileSync(${JSON.stringify(hookMarker)}, 'installed');\n`
+        );
+        for (const descriptorLoad of ['1', '0']) {
+            rmSync(hookMarker, { force: true });
+            const preload = spawnSync(process.execPath, ['--require', runtimeHookPreload, '-e', ''], {
+                env: { ...process.env, TTSC_PLUGIN_DESCRIPTOR_LOAD: descriptorLoad },
+                encoding: 'utf8'
+            });
+            assert.equal(preload.status, 0, preload.stderr);
+            assert.equal(existsSync(hookMarker), descriptorLoad !== '1' || Number.parseInt(process.versions.node, 10) !== 24);
+        }
     });
 
     it('preserves an existing postinstall script and installs itself only once', () => {
