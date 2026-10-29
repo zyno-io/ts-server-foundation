@@ -116,7 +116,7 @@ describe('packed Yarn PnP consumer', () => {
         assert.equal(installedPackage.dependenciesMeta?.protoc?.unplugged, true);
         assert.equal(installedPackage.dependenciesMeta?.['ts-proto']?.unplugged, true);
         assert.equal(installedPackage.dependenciesMeta?.[`@ttsc/${process.platform}-${process.arch}`]?.unplugged, true);
-        assert.match(readFileSync(join(consumer, '.yarnrc.yml'), 'utf8'), /["']@sentry\/node@\*["']:[\s\S]+["']@opentelemetry\/core["']:/);
+        assert.doesNotMatch(readFileSync(join(consumer, '.yarnrc.yml'), 'utf8'), /@sentry\/node/);
         run('yarn', ['install'], consumer);
         run('yarn', ['ttsc', '-p', 'tsconfig.json'], consumer, { TSF_TYPE_COMPILER_PREBUILT: '0' });
         run(

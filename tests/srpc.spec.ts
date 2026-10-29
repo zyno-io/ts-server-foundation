@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import { afterEach, describe, it } from 'node:test';
 import WebSocket from 'ws';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
 
 import {
     BaseAppConfig,
@@ -1992,7 +1992,7 @@ describe('srpc', () => {
 
     it('propagates traces through notifications in both directions', async () => {
         const exporter = new InMemorySpanExporter();
-        initTelemetry({ serviceName: 'srpc-notification-trace-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        initTelemetry({ serviceName: 'srpc-notification-trace-test', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         const harness = await createHarness();
         const serverReceived = deferred<void>();
         const clientReceived = deferred<void>();
@@ -2182,7 +2182,7 @@ describe('srpc', () => {
 
     it('propagates trace context through client and server SRPC invocations', async () => {
         const exporter = new InMemorySpanExporter();
-        initTelemetry({ serviceName: 'srpc-trace-test', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        initTelemetry({ serviceName: 'srpc-trace-test', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         const harness = await createHarness();
         harness.server.registerMessageHandler('uEcho', async (_stream, data) => ({ message: data.message }));
         const client = harness.createClient('trace-client');

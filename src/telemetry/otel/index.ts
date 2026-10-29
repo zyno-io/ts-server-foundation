@@ -5,6 +5,8 @@ import type { IncomingMessage, RequestOptions } from 'node:http';
 import { createRequire } from 'node:module';
 
 import { context, diag, DiagConsoleLogger, DiagLogLevel, metrics, propagation, trace, type AttributeValue } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator } from '@opentelemetry/core';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
@@ -17,8 +19,17 @@ import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
 import { UndiciInstrumentation, type UndiciRequest } from '@opentelemetry/instrumentation-undici';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { MeterProvider, PeriodicExportingMetricReader, type MetricReader } from '@opentelemetry/sdk-metrics';
-import { BatchSpanProcessor, SimpleSpanProcessor, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import {
+    AlwaysOffSampler,
+    AlwaysOnSampler,
+    BatchSpanProcessor,
+    ParentBasedSampler,
+    SimpleSpanProcessor,
+    TraceIdRatioBasedSampler,
+    TracerProvider,
+    type Sampler,
+    type SpanProcessor
+} from '@opentelemetry/sdk-trace';
 import installNodeMetrics from 'opentelemetry-node-metrics';
 
 import { isDevelopmentEnvironment } from '../../app/const';
@@ -114,11 +125,24 @@ export function init(options: TelemetryInitOptions = {}): void {
     }
 
     if (shouldInstallTraces) {
-        const tracerProvider = new NodeTracerProvider({
+        const tracerProvider = new TracerProvider({
             resource,
+            sampler: createTraceSampler(),
+            // SDK 3 leaves environment configuration to its caller.
+            spanLimits: {
+                attributeCountLimit: readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT') ?? readTelemetryNumber('OTEL_ATTRIBUTE_COUNT_LIMIT'),
+                attributeValueLengthLimit:
+                    readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT') ?? readTelemetryNumber('OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT'),
+                eventCountLimit: readTelemetryNumber('OTEL_SPAN_EVENT_COUNT_LIMIT'),
+                linkCountLimit: readTelemetryNumber('OTEL_SPAN_LINK_COUNT_LIMIT'),
+                attributePerEventCountLimit: readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_PER_EVENT_COUNT_LIMIT'),
+                attributePerLinkCountLimit: readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_PER_LINK_COUNT_LIMIT')
+            },
             spanProcessors: options.spanProcessors?.length ? [...options.spanProcessors] : [createDefaultSpanProcessor()]
         });
-        tracerProvider.register();
+        trace.setGlobalTracerProvider(tracerProvider);
+        context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+        propagation.setGlobalPropagator(new CompositePropagator({ propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()] }));
         OtelState.tracerProvider = tracerProvider;
         OtelState.tracer = tracerProvider.getTracer(options.serviceName ?? 'default');
         installHttpTraceContextResolver();
@@ -206,7 +230,42 @@ function buildResource(options: TelemetryInitOptions) {
 
 function createDefaultSpanProcessor(): SpanProcessor {
     const exporter = new OTLPTraceExporter();
-    return isDevelopmentEnvironment() ? new SimpleSpanProcessor(exporter) : new BatchSpanProcessor(exporter);
+    return isDevelopmentEnvironment()
+        ? new SimpleSpanProcessor({ exporter })
+        : new BatchSpanProcessor({
+              exporter,
+              maxExportBatchSize: readTelemetryNumber('OTEL_BSP_MAX_EXPORT_BATCH_SIZE'),
+              maxQueueSize: readTelemetryNumber('OTEL_BSP_MAX_QUEUE_SIZE'),
+              scheduledDelayMillis: readTelemetryNumber('OTEL_BSP_SCHEDULE_DELAY'),
+              exportTimeoutMillis: readTelemetryNumber('OTEL_BSP_EXPORT_TIMEOUT')
+          });
+}
+
+function readTelemetryNumber(name: string): number | undefined {
+    const value = readTelemetrySetting(name);
+    if (!value?.trim()) return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : undefined;
+}
+
+function createTraceSampler(): Sampler | undefined {
+    const name = readTelemetrySetting('OTEL_TRACES_SAMPLER');
+    if (!name) return undefined;
+    let root: Sampler;
+    switch (name.replace(/^parentbased_/, '')) {
+        case 'always_on':
+            root = new AlwaysOnSampler();
+            break;
+        case 'always_off':
+            root = new AlwaysOffSampler();
+            break;
+        case 'traceidratio':
+            root = new TraceIdRatioBasedSampler(Number(readTelemetrySetting('OTEL_TRACES_SAMPLER_ARG') ?? '1'));
+            break;
+        default:
+            return undefined;
+    }
+    return name.startsWith('parentbased_') ? new ParentBasedSampler({ root }) : root;
 }
 
 function createMeterProvider(resource: ReturnType<typeof buildResource>, options: TelemetryInitOptions) {

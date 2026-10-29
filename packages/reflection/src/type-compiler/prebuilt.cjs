@@ -137,15 +137,21 @@ function resolveTtscBuild(projectRoot, source) {
     const projectRequire = createRequire(path.join(projectRoot, 'package.json'));
     const ttscPackageJson = projectRequire.resolve('ttsc/package.json');
     const ttscRoot = path.dirname(ttscPackageJson);
-    const internalsPath = path.join(ttscRoot, 'lib', 'plugin', 'internal', 'buildSourcePlugin.js');
-    const internals = require(internalsPath);
-    if (typeof internals.computeCacheKey !== 'function' || typeof internals.resolveSourceBuildCachePaths !== 'function') {
+    const legacyInternalsPath = path.join(ttscRoot, 'lib', 'plugin', 'internal', 'buildSourcePlugin.js');
+    const sourceInternalsRoot = path.join(ttscRoot, 'lib', 'plugin', 'internal', 'source');
+    // ttsc 0.34 split the source-build helpers into individual modules.
+    const internalsPath = fs.existsSync(legacyInternalsPath) ? legacyInternalsPath : path.join(sourceInternalsRoot, 'computeCacheKey.js');
+    const { computeCacheKey } = require(internalsPath);
+    const { resolveSourceBuildCachePaths } = require(
+        fs.existsSync(legacyInternalsPath) ? legacyInternalsPath : path.join(sourceInternalsRoot, 'resolveSourceBuildCachePaths.js')
+    );
+    if (typeof computeCacheKey !== 'function' || typeof resolveSourceBuildCachePaths !== 'function') {
         throw new Error('installed ttsc does not expose compatible cache helpers');
     }
 
     const { ttscVersion, typescriptVersion } = resolveToolchainVersions(projectRoot);
     const goBinary = resolveGoBinary(ttscRoot, internalsPath);
-    const cacheKey = internals.computeCacheKey({
+    const cacheKey = computeCacheKey({
         dir: source,
         entry: '.',
         goBinary,
@@ -155,7 +161,7 @@ function resolveTtscBuild(projectRoot, source) {
     });
     return {
         cacheKey,
-        cachePaths: internals.resolveSourceBuildCachePaths(projectRoot),
+        cachePaths: resolveSourceBuildCachePaths(projectRoot),
         ttscVersion,
         typescriptVersion
     };

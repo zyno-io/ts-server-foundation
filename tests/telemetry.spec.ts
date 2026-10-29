@@ -6,7 +6,7 @@ import { afterEach, describe, it, mock } from 'node:test';
 import type { Instrumentation } from '@opentelemetry/instrumentation';
 import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis';
 import { AggregationTemporality, InMemoryMetricExporter, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
 
 import {
     getTraceContext,
@@ -42,6 +42,8 @@ afterEach(() => {
     delete Env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT;
     delete Env.OTEL_METRICS_ENDPOINT_ENABLED;
     delete Env.OTEL_SDK_DISABLED;
+    delete Env.OTEL_TRACES_SAMPLER;
+    delete Env.OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT;
     delete Env.PYROSCOPE_APPLICATION_NAME;
     mock.restoreAll();
 });
@@ -68,7 +70,7 @@ describe('telemetry', () => {
         Env.OTEL_SDK_DISABLED = 'true';
         const exporter = new InMemorySpanExporter();
 
-        init({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 
         assert.equal(isTelemetryInitialized(), false);
         assert.equal(isTracingInstalled(), false);
@@ -76,7 +78,7 @@ describe('telemetry', () => {
 
     it('installs tracing with custom span processors and records helper spans', async () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 
         assert.equal(isTelemetryInitialized(), true);
         assert.equal(isTracingInstalled(), true);
@@ -95,6 +97,26 @@ describe('telemetry', () => {
         assert.equal(spans[0].spanContext().traceId, result);
     });
 
+    it('honors the environment sampler after the SDK 3 migration', async () => {
+        Env.OTEL_TRACES_SAMPLER = 'always_off';
+        const exporter = new InMemorySpanExporter();
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+
+        await withSpan('not-sampled', async () => undefined);
+
+        assert.equal(exporter.getFinishedSpans().length, 0);
+    });
+
+    it('honors environment span limits after the SDK 3 migration', async () => {
+        Env.OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT = '3';
+        const exporter = new InMemorySpanExporter();
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+
+        await withSpan('limited', { detail: 'abcdef' }, async () => undefined);
+
+        assert.equal(exporter.getFinishedSpans()[0].attributes.detail, 'abc');
+    });
+
     it('starts and stops Pyroscope only alongside tracing', async () => {
         const pyroscopeInit = mock.method(Pyroscope, 'init', () => undefined);
         const pyroscopeStart = mock.method(Pyroscope, 'start', () => undefined);
@@ -106,7 +128,7 @@ describe('telemetry', () => {
         assert.equal(pyroscopeStart.mock.callCount(), 0);
 
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'pyroscope-test', spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+        init({ serviceName: 'pyroscope-test', spanProcessors: [new SimpleSpanProcessor({ exporter })], pyroscope: true });
 
         assert.equal(pyroscopeInit.mock.callCount(), 1);
         assert.equal(pyroscopeStart.mock.callCount(), 1);
@@ -128,7 +150,7 @@ describe('telemetry', () => {
         mock.method(Pyroscope, 'start', () => undefined);
         const exporter = new InMemorySpanExporter();
 
-        init({ spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })], pyroscope: true });
 
         const pyroscopeOptions = pyroscopeInit.mock.calls[0].arguments[0] as { appName?: string };
         assert.equal(pyroscopeOptions.appName, 'zyno-io-ts-server-foundation');
@@ -140,7 +162,7 @@ describe('telemetry', () => {
         const exporter = new InMemorySpanExporter();
         Env.PYROSCOPE_APPLICATION_NAME = 'zynotalk-api-server';
 
-        init({ spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })], pyroscope: true });
 
         const pyroscopeOptions = pyroscopeInit.mock.calls[0].arguments[0] as { appName?: string };
         assert.equal(pyroscopeOptions.appName, 'zynotalk-api-server');
@@ -148,7 +170,7 @@ describe('telemetry', () => {
 
     it('records helper errors, root spans, and linked root spans', async () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'helper-errors', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'helper-errors', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 
         await assert.rejects(
             withSpan('failed-work', async () => {
@@ -203,7 +225,7 @@ describe('telemetry', () => {
         const exporter = new InMemorySpanExporter();
 
         init({
-            spanProcessors: [new SimpleSpanProcessor(exporter)],
+            spanProcessors: [new SimpleSpanProcessor({ exporter })],
             metricReaders: [metricReader],
             instrumentations: [instrumentation]
         });
@@ -221,7 +243,7 @@ describe('telemetry', () => {
         const setTracerProvider = mock.method(IORedisInstrumentation.prototype, 'setTracerProvider');
         const exporter = new InMemorySpanExporter();
 
-        init({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         assert.equal(setTracerProvider.mock.callCount(), 0);
 
         resetTelemetryForTests();
@@ -229,7 +251,7 @@ describe('telemetry', () => {
 
         init({
             enableRedisInstrumentation: true,
-            spanProcessors: [new SimpleSpanProcessor(exporter)]
+            spanProcessors: [new SimpleSpanProcessor({ exporter })]
         });
 
         assert.equal(setTracerProvider.mock.callCount() > 0, true);
@@ -252,7 +274,7 @@ describe('telemetry', () => {
             resetTelemetryForTests();
 
             const exporter = new InMemorySpanExporter();
-            init({ serviceName: 'config-resource', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+            init({ serviceName: 'config-resource', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
             await withSpan('config-resource-check', async () => undefined);
 
             assert.equal(exporter.getFinishedSpans()[0].resource.attributes['deployment.environment'], 'production');
@@ -266,7 +288,7 @@ describe('telemetry', () => {
 
     it('continues remote span context from traceparent', async () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 
         await withRemoteSpan(
             'remote-work',
@@ -348,7 +370,7 @@ describe('telemetry', () => {
         mock.method(Pyroscope, 'start', () => undefined);
         const pyroscopeStop = mock.method(Pyroscope, 'stop', async () => undefined);
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'app-shutdown-test', spanProcessors: [new SimpleSpanProcessor(exporter)], pyroscope: true });
+        init({ serviceName: 'app-shutdown-test', spanProcessors: [new SimpleSpanProcessor({ exporter })], pyroscope: true });
 
         const tf = TestingHelpers.createTestingFacade({});
         await tf.start();
@@ -364,7 +386,7 @@ describe('telemetry', () => {
 
     it('adds active trace ids to HTTP request context', async () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'test-service', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         Env.APP_ENV = 'test';
 
         @http.controller('/trace')
@@ -402,7 +424,7 @@ describe('telemetry', () => {
 
         resetSentryForTests();
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'sentry-order', spanProcessors: [new SimpleSpanProcessor(exporter)] });
+        init({ serviceName: 'sentry-order', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         installSentry({ dsn: 'https://example@sentry.invalid/1' });
         assert.equal(addEventProcessor.mock.callCount(), 1);
         assert.ok(processor);

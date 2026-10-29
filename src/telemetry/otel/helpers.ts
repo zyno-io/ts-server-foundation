@@ -14,14 +14,14 @@ import {
 import type { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import type { registerInstrumentations } from '@opentelemetry/instrumentation';
 import type { MeterProvider } from '@opentelemetry/sdk-metrics';
-import type { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import type { TracerProvider } from '@opentelemetry/sdk-trace';
 
 type MaybePromise<T> = T | Promise<T>;
 
 export const OtelState = {
     initialized: false,
     tracer: undefined as Tracer | undefined,
-    tracerProvider: undefined as NodeTracerProvider | undefined,
+    tracerProvider: undefined as TracerProvider | undefined,
     meterProvider: undefined as MeterProvider | undefined,
     prometheusExporter: undefined as PrometheusExporter | undefined,
     pyroscope: undefined as { stop(): Promise<void> } | undefined,

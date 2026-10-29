@@ -24,7 +24,7 @@ const REFLECTION_PACKAGE_NAME = '@zyno-io/ts-reflection';
 const INSTALL_COMMAND = 'tsf-install';
 const PACKAGE_TYPE_COMPILER_PLUGIN = '@zyno-io/ts-server-foundation/type-compiler';
 const REFLECTION_TYPE_COMPILER_PLUGIN = `${REFLECTION_PACKAGE_NAME}/type-compiler`;
-const TTSC_NODE_24_PATCH_VERSION = '0.30.1';
+const TTSC_NODE_24_PATCH_VERSION = '0.34.2';
 const TTSC_NODE_24_PATCH_FILE = `ttsc+${TTSC_NODE_24_PATCH_VERSION}.patch`;
 
 interface PackageJson {
@@ -55,7 +55,6 @@ interface YarnPnpCompatibilityResult {
 
 interface BaselineVersions {
     framework: string;
-    opentelemetryCore: string;
     ttsc: string;
     typescript: string;
 }
@@ -89,10 +88,7 @@ export function install(options: InstallOptions = {}): number {
     const workspacePkg = resolve(workspaceRoot) === resolve(projectDir) ? pkg : readPackageJson(join(workspaceRoot, 'package.json'));
     const packageManager = detectPackageManager(workspaceRoot, workspacePkg);
     const baselineVersions = readBaselineVersions();
-    const yarnPnpCompatibility =
-        packageManager.manager === 'yarn'
-            ? ensureYarnPnpCompatibility(workspaceRoot, baselineVersions.opentelemetryCore)
-            : { detected: false, changed: false };
+    const yarnPnpCompatibility = packageManager.manager === 'yarn' ? ensureYarnPnpCompatibility(workspaceRoot) : { detected: false, changed: false };
     const yarnConfigChanged = yarnPnpCompatibility.changed;
     const pnpScriptChanged = yarnPnpCompatibility.detected && ensureYarnPnpLauncherScript(pkg);
     const postinstallChanged = ensurePostinstallScript(pkg);
@@ -187,13 +183,12 @@ function readBaselineVersions(): BaselineVersions {
     if (!frameworkVersion) throw new Error(`Could not determine ${PACKAGE_NAME} version`);
     return {
         framework: frameworkVersion,
-        opentelemetryCore: readPackageDependencyVersion(packageRoot, '@opentelemetry/core'),
         ttsc: readPackageDependencyVersion(packageRoot, 'ttsc'),
         typescript: readPackageDependencyVersion(packageRoot, 'typescript')
     };
 }
 
-function ensureYarnPnpCompatibility(projectRoot: string, opentelemetryCoreVersion: string): YarnPnpCompatibilityResult {
+function ensureYarnPnpCompatibility(projectRoot: string): YarnPnpCompatibilityResult {
     const configPath = join(projectRoot, '.yarnrc.yml');
     const document = parseDocument(existsSync(configPath) ? readFileSync(configPath, 'utf8') : '');
     if (document.errors.length > 0) throw document.errors[0];
@@ -203,11 +198,6 @@ function ensureYarnPnpCompatibility(projectRoot: string, opentelemetryCoreVersio
     let changed = false;
     if (document.get('pnpEnableEsmLoader') !== true) {
         document.set('pnpEnableEsmLoader', true);
-        changed = true;
-    }
-    const dependencyPath = ['packageExtensions', '@sentry/node@*', 'dependencies', '@opentelemetry/core'];
-    if (document.getIn(dependencyPath) !== opentelemetryCoreVersion) {
-        document.setIn(dependencyPath, opentelemetryCoreVersion);
         changed = true;
     }
     if (changed) writeFileSync(configPath, String(document));
