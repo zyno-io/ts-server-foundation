@@ -79,7 +79,7 @@ describe('packed Yarn PnP consumer', () => {
                     ttsc: rootPackage.devDependencies.ttsc,
                     typescript: rootPackage.devDependencies.typescript
                 },
-                packageManager: 'yarn@4.17.1'
+                packageManager: 'yarn@4.18.1'
             })
         );
         // Use the repository's release-age policy for freshly published dependencies.

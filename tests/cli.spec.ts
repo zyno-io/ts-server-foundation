@@ -380,7 +380,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     name: 'fixture',
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     dependencies: {
                         ttsc: '^0.1',
                         typescript: '~5.9'
@@ -438,7 +438,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     name: 'fixture',
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     scripts: {
                         tsf: 'NODE_OPTIONS=--require=./.pnp.cjs tsf-dev'
                     },
@@ -654,7 +654,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     private: true,
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     workspaces: ['packages/*'],
                     tsf: { compiler: false },
                     devDependencies: { '@zyno-io/ts-server-foundation': '*' }
@@ -750,7 +750,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     name: 'fixture',
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     devDependencies: {
                         '@zyno-io/ts-server-foundation': '*',
                         ttsc: '^0.1',
@@ -822,7 +822,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     private: true,
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     workspaces: ['packages/*'],
                     tsf: { compiler: false },
                     devDependencies: { '@zyno-io/ts-server-foundation': '*' }
@@ -946,7 +946,7 @@ describe('CLI', () => {
         mkdirSync(excludedWorkspace, { recursive: true });
         writeFileSync(
             join(root, 'package.json'),
-            JSON.stringify({ private: true, packageManager: 'yarn@4.17.1', workspaces: ['packages/*'] }, null, 4)
+            JSON.stringify({ private: true, packageManager: 'yarn@4.18.1', workspaces: ['packages/*'] }, null, 4)
         );
         writeFileSync(
             join(includedWorkspace, 'package.json'),
@@ -998,7 +998,7 @@ describe('CLI', () => {
             JSON.stringify(
                 {
                     name: 'fixture',
-                    packageManager: 'yarn@4.17.1',
+                    packageManager: 'yarn@4.18.1',
                     devDependencies: {
                         '@zyno-io/ts-server-foundation': '*'
                     }
