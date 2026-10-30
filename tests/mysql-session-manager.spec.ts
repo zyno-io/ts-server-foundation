@@ -24,6 +24,7 @@ import {
 } from '../src';
 import { connectRpc, listenRpc } from '../src/database/drivers/mysql-session-rpc';
 import { MySQLSessionManager } from '../src/testing/mysql-session-manager';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
@@ -31,7 +32,7 @@ describe('MySQL shared session manager', () => {
     const mysqlConfig = readMySQLConfig();
 
     afterEach(() => {
-        process.env = { ...originalEnv };
+        restoreProcessEnv(originalEnv);
         createDebug.disable();
         resetLogSink();
     });

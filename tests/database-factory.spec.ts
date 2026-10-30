@@ -13,6 +13,7 @@ import {
     PgClientLike,
     PgPoolLike
 } from '../src';
+import { restoreProcessEnv } from './environment';
 
 @entity.name('factory_users')
 class FactoryUser extends BaseEntity {
@@ -60,7 +61,7 @@ const originalEnv = { ...process.env };
 
 describe('database factories', () => {
     afterEach(() => {
-        process.env = { ...originalEnv };
+        restoreProcessEnv(originalEnv);
     });
 
     it('creates MySQL and PostgreSQL database classes with supplied pools', () => {

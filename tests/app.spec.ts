@@ -39,6 +39,7 @@ import {
     WorkerJob,
     WorkerRunnerService
 } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 const originalExecArgv = [...process.execArgv];
@@ -51,7 +52,7 @@ const tmpDirs: string[] = [];
 
 afterEach(() => {
     process.chdir(originalCwd);
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     process.execArgv.splice(0, process.execArgv.length, ...originalExecArgv);
     process.argv.splice(0, process.argv.length, ...originalArgv);
     console.log = originalConsoleLog;

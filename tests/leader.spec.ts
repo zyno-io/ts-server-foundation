@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it, type TestContext } from 'node:test';
 
 import { createApp, LeaderService, resetLogSink, setLogSink } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
 afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     resetLogSink();
 });
 

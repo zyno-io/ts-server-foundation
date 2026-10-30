@@ -39,6 +39,7 @@ import {
 } from '../src/cli/dev-state';
 import { runReplCli } from '../src/cli/tsf-repl';
 import { createReplContext, disposeReplContext } from '../src/devconsole/repl';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
@@ -81,7 +82,7 @@ class DevConsoleReplDriver implements DatabaseDriver {
 }
 
 afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
 });
 
 describe('devconsole', () => {

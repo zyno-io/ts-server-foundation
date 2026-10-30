@@ -24,12 +24,13 @@ import {
     WorkerService
 } from '../src';
 import type { RenderedSql } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 const redisNamespaceSuffix = process.env.TSF_TEST_NAMESPACE ? `:test:${process.env.TSF_TEST_NAMESPACE}` : '';
 
 afterEach(async () => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     resetLogSink();
     await WorkerQueueRegistry.closeQueues();
 });

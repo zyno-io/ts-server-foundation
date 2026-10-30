@@ -15,11 +15,12 @@ import {
     WorkerRecorderService
 } from '../src';
 import type { DatabaseDriver } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
 afterEach(async () => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     resetLogSink();
     await WorkerQueueRegistry.closeQueues();
 });

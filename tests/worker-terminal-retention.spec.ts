@@ -3,11 +3,12 @@ import { afterEach, describe, it } from 'node:test';
 
 import { BaseAppConfig, BaseJob, createApp, resetLogSink, setLogSink, WorkerQueueRegistry, WorkerRunnerService } from '../src';
 import { bullMqTerminalKeepJobs } from '../src/services/worker/queue';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
 afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     resetLogSink();
 });
 

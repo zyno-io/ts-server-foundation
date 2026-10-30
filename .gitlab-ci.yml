@@ -1,4 +1,6 @@
-image: node:24-alpine
+image:
+  name: node:26-alpine
+  pull_policy: always
 
 default:
   interruptible: true
@@ -27,6 +29,7 @@ build:devconsole:
   stage: build
   needs: []
   script:
+    - npm install --global corepack
     - corepack enable
     - yarn --immutable
     - yarn build:devconsole
@@ -76,6 +79,7 @@ test-and-build:
       export MYSQL_USER=root
       export MYSQL_PASSWORD_SECRET=secret
 
+      npm install --global corepack
       corepack enable
       yarn --immutable
 

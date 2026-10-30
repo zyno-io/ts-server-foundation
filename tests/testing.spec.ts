@@ -37,12 +37,13 @@ import {
     type MySQLDatabaseConfig,
     type PostgresDatabaseConfig
 } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
 describe('TestingHelpers', () => {
     afterEach(() => {
-        process.env = { ...originalEnv };
+        restoreProcessEnv(originalEnv);
         resetLogSink();
         mock.restoreAll();
     });

@@ -21,6 +21,7 @@ import {
     WorkerService,
     type MySQLDatabaseConfig
 } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 const SAMPLE_TABLE = 'tsf_full_stack_smoke_samples';
@@ -121,7 +122,7 @@ class FullStackSmokeController {
 }
 
 afterEach(async () => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
     await WorkerQueueRegistry.closeQueues();
 });
 

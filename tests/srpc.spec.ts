@@ -40,6 +40,7 @@ import {
 } from '../src/srpc/types';
 import { DevConsoleClientMessage, DevConsoleServerMessage, PingPong, PingPongType } from '../src/devconsole/generated/devconsole';
 import { LegacyEnvelope } from './fixtures/generated/srpc-legacy';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 const secret = 'srpc-test-secret';
@@ -95,7 +96,7 @@ const JsonMessage: SrpcMessageFns<any> = {
 };
 
 afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
 });
 
 describe('srpc', () => {

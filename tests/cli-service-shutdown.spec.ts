@@ -3,11 +3,12 @@ import { afterEach, describe, it } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
 
 import { CliServiceCommand, createApp, MySQLDriver, type MySQLPoolLike, onServerShutdown, onServerShutdownRequested } from '../src';
+import { restoreProcessEnv } from './environment';
 
 const originalEnv = { ...process.env };
 
 afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreProcessEnv(originalEnv);
 });
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {

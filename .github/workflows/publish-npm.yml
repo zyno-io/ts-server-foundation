@@ -25,7 +25,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: '26.x'
+          check-latest: true
           registry-url: https://registry.npmjs.org/
           package-manager-cache: false
 
@@ -34,7 +35,9 @@ jobs:
         run: npm install --global npm@11 --registry https://registry.npmjs.org/
 
       - name: Enable Corepack
-        run: corepack enable
+        run: |
+          npm install --global corepack
+          corepack enable
 
       - name: Install dependencies
         run: yarn install --immutable
