@@ -67,7 +67,8 @@ jobs:
 
       - name: Enable Corepack
         run: |
-          npm install --global corepack
+          # Windows runners already contain Yarn 1 command shims.
+          npm install --global corepack --force
           corepack enable
 
       - name: Install dependencies
