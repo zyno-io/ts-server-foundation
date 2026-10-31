@@ -93,7 +93,7 @@ TSF adds these resource attributes to installed trace and metric providers:
 | `host.name`              | Operating-system hostname.                                          |
 | `process.pid`            | Current process ID.                                                 |
 
-Incoming HTTP server spans have their `http.url`, `http.target`, `url.full` and `url.query` attributes rewritten when the span ends, before any exporting processor runs: values of query parameters matching `redactQueryKeys` (default `DEFAULT_REDACTED_QUERY_KEYS`, the same rules as request logging) become `REDACTED`, and an undecodable query fails closed to the path plus `?REDACTED`. Pass `redactQueryKeys: []` to export query strings unchanged.
+Incoming HTTP server spans have their `http.url`, `http.target`, `url.full` and `url.query` attributes rewritten when the span ends, before any exporting processor runs: values of query parameters matching `redactQueryKeys` (default `DEFAULT_REDACTED_QUERY_KEYS`, the same rules as request logging) become `REDACTED`, a fragment becomes `#REDACTED`, and an undecodable query fails closed to the path plus `?REDACTED`. Pass `redactQueryKeys: []` to export URLs unchanged. `DEFAULT_REDACTED_QUERY_KEYS` is exported from `@zyno-io/ts-server-foundation/otel` so a bootstrap can extend the list before importing the main package.
 
 The default OTLP trace exporter uses a `SimpleSpanProcessor` in development and a `BatchSpanProcessor` otherwise. OTLP metrics use a periodic reader with a 10-second export interval. Passing custom `spanProcessors` or `metricReaders` replaces the corresponding default processor/reader choice while retaining any separately enabled Prometheus endpoint.
 

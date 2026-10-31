@@ -17,7 +17,7 @@ export interface HttpRequestLoggingOptions {
      * `_`/`-`/`.` separators. Defaults to `DEFAULT_REDACTED_QUERY_KEYS`; pass a list to replace it (spread the
      * default to extend it) or `[]` to log query strings unchanged.
      */
-    redactQueryKeys?: string[];
+    redactQueryKeys?: readonly string[];
 }
 
 interface RequestLoggingState {

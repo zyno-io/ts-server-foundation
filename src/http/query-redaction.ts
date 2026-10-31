@@ -25,10 +25,21 @@ export const DEFAULT_REDACTED_QUERY_KEYS: readonly string[] = [
     'token',
     'code',
     'state',
-    'password'
+    'password',
+    'jwt',
+    'accessToken',
+    'idToken',
+    'refreshToken',
+    'apiKey',
+    'secret',
+    'signature',
+    'sig'
 ];
 
-export type QueryKeyMatcher = (key: string) => boolean;
+export type QueryKeyMatcher = ((key: string) => boolean) & {
+    /** True when the key list is empty: URLs are then returned unchanged, without decoding or failing closed. */
+    readonly disabled: boolean;
+};
 
 function normalizeQueryKey(key: string): string {
     return key.toLowerCase().replace(/[_.-]/g, '');
@@ -37,12 +48,12 @@ function normalizeQueryKey(key: string): string {
 /** Builds a matcher for the given parameter names (defaults to {@link DEFAULT_REDACTED_QUERY_KEYS}). */
 export function createQueryKeyMatcher(keys: readonly string[] = DEFAULT_REDACTED_QUERY_KEYS): QueryKeyMatcher {
     const normalized = new Set(keys.map(normalizeQueryKey));
-    return key =>
-        normalized.size > 0 &&
+    const matches = (key: string) =>
         key
             .split(/[[\]]+/)
             .filter(Boolean)
             .some(segment => normalized.has(normalizeQueryKey(segment)));
+    return Object.assign(matches, { disabled: normalized.size === 0 });
 }
 
 function decodeQueryComponent(value: string): string {
@@ -67,25 +78,29 @@ function redactQueryString(query: string, matches: QueryKeyMatcher): string {
 }
 
 /**
- * Returns `url` (absolute or origin-relative) with matched query values replaced. If the query cannot be parsed
- * it fails closed to the path followed by `?REDACTED`.
+ * Returns `url` (absolute or origin-relative) with matched query values replaced and any fragment replaced by
+ * `#REDACTED` (fragments are never sent by browsers, so one in a request target is unusual and may carry
+ * credentials). If the query cannot be parsed it fails closed to the path followed by `?REDACTED`. A disabled
+ * matcher (empty key list) returns `url` unchanged.
  */
 export function redactUrlQuery(url: string, matches: QueryKeyMatcher): string {
-    const queryStart = url.indexOf('?');
-    if (queryStart === -1) return url;
-    const hashStart = url.indexOf('#', queryStart);
-    const query = url.slice(queryStart + 1, hashStart === -1 ? undefined : hashStart);
-    const suffix = hashStart === -1 ? '' : url.slice(hashStart);
-    const base = url.slice(0, queryStart);
+    if (matches.disabled) return url;
+    const hashStart = url.indexOf('#');
+    const withoutFragment = hashStart === -1 ? url : url.slice(0, hashStart);
+    const fragment = hashStart === -1 ? '' : `#${REDACTED_QUERY_VALUE}`;
+    const queryStart = withoutFragment.indexOf('?');
+    if (queryStart === -1) return `${withoutFragment}${fragment}`;
+    const base = withoutFragment.slice(0, queryStart);
     try {
-        return `${base}?${redactQueryString(query, matches)}${suffix}`;
+        return `${base}?${redactQueryString(withoutFragment.slice(queryStart + 1), matches)}${fragment}`;
     } catch {
         return `${base}?${REDACTED_QUERY_VALUE}`;
     }
 }
 
-/** Redacts a bare query string (no leading `?`), failing closed to `REDACTED`. */
+/** Redacts a bare query string (no leading `?`), failing closed to `REDACTED`; unchanged when disabled. */
 export function redactQuery(query: string, matches: QueryKeyMatcher): string {
+    if (matches.disabled) return query;
     try {
         return redactQueryString(query, matches);
     } catch {

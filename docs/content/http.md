@@ -139,7 +139,7 @@ createApp({
 });
 ```
 
-Request log lines (`Request`, `Response`, aborts and 5xx errors) write the URL with sensitive query parameter values replaced by `REDACTED`; keys and other parameters are kept as sent. The default names are exported as `DEFAULT_REDACTED_QUERY_KEYS` (`q`, `query`, `search`, `text`, `phone`, `phones`, `phoneNumber`, `phoneNumbers`, `email`, `name`, `token`, `code`, `state`, `password`). Matching ignores case and `_`, `-` and `.` separators and checks each segment of bracketed keys such as `filter[phoneNumbers][]`. A query that cannot be decoded is logged as the path followed by `?REDACTED`. Set `redactQueryKeys` to replace the list, spread the default to extend it, or pass `[]` to log query strings unchanged:
+Request log lines (`Request`, `Response`, aborts and 5xx errors) write the URL with sensitive query parameter values replaced by `REDACTED`; keys and other parameters are kept as sent. The default names are exported as `DEFAULT_REDACTED_QUERY_KEYS` (`q`, `query`, `search`, `text`, `phone`, `phones`, `phoneNumber`, `phoneNumbers`, `email`, `name`, `token`, `code`, `state`, `password`, `jwt`, `accessToken`, `idToken`, `refreshToken`, `apiKey`, `secret`, `signature`, `sig`), also from the `@zyno-io/ts-server-foundation/otel` entry. Matching ignores case and `_`, `-` and `.` separators and checks each segment of bracketed keys such as `filter[phoneNumbers][]`. A URL fragment is logged as `#REDACTED`. A query that cannot be decoded is logged as the path followed by `?REDACTED`. Set `redactQueryKeys` to replace the list, spread the default to extend it, or pass `[]` to log URLs exactly as received (no decoding, fragment or fail-closed rewriting):
 
 ```ts
 createApp({

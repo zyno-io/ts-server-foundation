@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import { afterEach, describe, it } from 'node:test';
 
 import { SpanKind } from '@opentelemetry/api';
@@ -12,12 +13,14 @@ import {
     DEFAULT_REDACTED_QUERY_KEYS,
     getTracer,
     http,
+    type HttpResponse,
+    redactQuery,
     redactUrlQuery,
     resetLogSink,
     setLogSink,
     type LogEntry
 } from '../src';
-import { init, resetTelemetryForTests } from '../src/telemetry/otel';
+import { DEFAULT_REDACTED_QUERY_KEYS as OtelDefaultRedactedQueryKeys, init, resetTelemetryForTests } from '../src/telemetry/otel';
 
 const requireFromTest = createRequire(__filename);
 
@@ -38,6 +41,14 @@ function get(port: number, path: string): Promise<number> {
     });
 }
 
+async function waitFor(condition: () => boolean, timeoutMs = 1_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!condition()) {
+        if (Date.now() > deadline) throw new Error('condition not met in time');
+        await new Promise(resolve => setTimeout(resolve, 5));
+    }
+}
+
 describe('query redaction', () => {
     const matches = createQueryKeyMatcher();
 
@@ -48,7 +59,7 @@ describe('query redaction', () => {
         );
         assert.equal(
             redactUrlQuery('/x?filter[email]=a%40b.c&filter%5Bstatus%5D=open#frag', matches),
-            '/x?filter[email]=REDACTED&filter%5Bstatus%5D=open#frag'
+            '/x?filter[email]=REDACTED&filter%5Bstatus%5D=open#REDACTED'
         );
         assert.equal(redactUrlQuery('https://h.example/tts?text=hello+world&voice=Rex', matches), 'https://h.example/tts?text=REDACTED&voice=Rex');
         assert.equal(redactUrlQuery('/plain', matches), '/plain');
@@ -59,13 +70,29 @@ describe('query redaction', () => {
         );
     });
 
+    it('redacts credential parameters and URL fragments', () => {
+        assert.equal(
+            redactUrlQuery('/cb?jwt=a&access_token=b&idToken=c&refresh-token=d&api_key=e&secret=f&signature=g&sig=h&page=1', matches),
+            '/cb?jwt=REDACTED&access_token=REDACTED&idToken=REDACTED&refresh-token=REDACTED&api_key=REDACTED&secret=REDACTED&signature=REDACTED&sig=REDACTED&page=1'
+        );
+        assert.equal(redactUrlQuery('/x?a=1#&q=secret', matches), '/x?a=1#REDACTED');
+        assert.equal(redactUrlQuery('/x#access_token=secret', matches), '/x#REDACTED');
+        assert.equal(redactUrlQuery('/x#frag?q=secret', matches), '/x#REDACTED');
+    });
+
     it('fails closed when a key cannot be decoded', () => {
         assert.equal(redactUrlQuery('/x?%E0%A4%A=secret&page=1', matches), '/x?REDACTED');
     });
 
     it('supports custom and empty key lists', () => {
         assert.equal(redactUrlQuery('/x?mrn=1&q=2', createQueryKeyMatcher([...DEFAULT_REDACTED_QUERY_KEYS, 'mrn'])), '/x?mrn=REDACTED&q=REDACTED');
-        assert.equal(redactUrlQuery('/x?mrn=1&q=2', createQueryKeyMatcher([])), '/x?mrn=1&q=2');
+        const disabled = createQueryKeyMatcher([]);
+        assert.equal(redactUrlQuery('/x?mrn=1&q=2', disabled), '/x?mrn=1&q=2');
+        // An empty list logs URLs exactly as received: no fail-closed rewrite and no fragment rewrite.
+        assert.equal(redactUrlQuery('/x?%E0%A4%A=secret&page=1#frag', disabled), '/x?%E0%A4%A=secret&page=1#frag');
+        assert.equal(redactQuery('%E0%A4%A=secret', disabled), '%E0%A4%A=secret');
+        // The /otel entry exposes the same default list so a bootstrap can extend it before loading the root package.
+        assert.equal(OtelDefaultRedactedQueryKeys, DEFAULT_REDACTED_QUERY_KEYS);
     });
 
     it('redacts query values in real request log lines', async () => {
@@ -113,12 +140,14 @@ describe('query redaction', () => {
             }
         }
 
+        // `as const` lists (and the readonly default) must be accepted.
+        const customKeys = ['mrn'] as const;
         process.env.APP_ENV = 'test';
         setLogSink(entry => entries.push(entry));
         const app = createApp({
             controllers: [QueryRedactionCustomController],
             defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' },
-            requestLogging: { redactQueryKeys: ['mrn'] }
+            requestLogging: { redactQueryKeys: customKeys }
         });
         const server = await app.http.listen(0, '127.0.0.1');
         const { port } = server.address() as AddressInfo;
@@ -127,6 +156,55 @@ describe('query redaction', () => {
             await get(port, '/query-redaction-custom?mrn=123&q=visible');
             assert.equal(entries.find(entry => entry.message === 'Request')?.data?.url, '/query-redaction-custom?mrn=REDACTED&q=visible');
         } finally {
+            await app.stop();
+        }
+    });
+
+    it('redacts the URL on stream-hook, abort and 5xx log lines', async () => {
+        const entries: LogEntry[] = [];
+        let stream: Readable | undefined;
+
+        @http.controller('/query-redaction-lines')
+        class QueryRedactionLinesController {
+            @http.GET('/stream')
+            stream(response: HttpResponse): void {
+                response.writeHead(200, { 'content-type': 'text/plain' });
+                stream = new Readable({ read() {} });
+                stream.pipe(response).once('error', () => {});
+            }
+
+            @http.GET('/fail')
+            fail(): never {
+                throw new Error('boom');
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({ controllers: [QueryRedactionLinesController], defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' } });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const { port } = server.address() as AddressInfo;
+        const nodeHttp = requireFromTest('http') as typeof import('node:http');
+        const aborted = nodeHttp.request({ host: '127.0.0.1', port, path: '/query-redaction-lines/stream?q=Jane&page=1', method: 'GET' });
+        aborted.on('error', () => {});
+        aborted.end();
+
+        try {
+            await waitFor(() => entries.some(entry => entry.message === 'Response stream hooked by controller'));
+            aborted.destroy();
+            await waitFor(() => entries.some(entry => entry.message === 'Request aborted during processing'));
+            assert.equal(await get(port, '/query-redaction-lines/fail?phoneNumbers=%2B15555550123'), 500);
+            await waitFor(() => entries.some(entry => entry.message === 'Request processing error'));
+
+            const urlsByMessage = Object.fromEntries(entries.map(entry => [entry.message, entry.data?.url]));
+            assert.equal(urlsByMessage['Response stream hooked by controller'], '/query-redaction-lines/stream?q=REDACTED&page=1');
+            assert.equal(urlsByMessage['Request aborted during processing'], '/query-redaction-lines/stream?q=REDACTED&page=1');
+            assert.equal(urlsByMessage['Request processing error'], '/query-redaction-lines/fail?phoneNumbers=REDACTED');
+            assert.ok(!JSON.stringify(entries).includes('Jane'));
+            assert.ok(!JSON.stringify(entries).includes('15555550123'));
+        } finally {
+            stream?.destroy();
+            aborted.destroy();
             await app.stop();
         }
     });

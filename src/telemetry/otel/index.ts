@@ -43,6 +43,7 @@ import { IncomingHttpQueryRedactionSpanProcessor } from './query-redaction';
 
 export * from './helpers';
 export { IncomingHttpQueryRedactionSpanProcessor } from './query-redaction';
+export { DEFAULT_REDACTED_QUERY_KEYS, REDACTED_QUERY_VALUE } from '../../http/query-redaction';
 
 const requireFromTelemetry = createRequire(__filename);
 
@@ -95,7 +96,7 @@ export interface TelemetryInitOptions {
      * `url.full`, `url.query`). Defaults to `DEFAULT_REDACTED_QUERY_KEYS`, matching `requestLogging.redactQueryKeys`;
      * pass `[]` to export query strings unchanged.
      */
-    redactQueryKeys?: string[];
+    redactQueryKeys?: readonly string[];
     metricReaders?: MetricReader[];
     pyroscope?: boolean | PyroscopeOptions;
 }
