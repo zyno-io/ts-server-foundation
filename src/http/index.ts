@@ -14,6 +14,7 @@ export * from './base';
 export * from './context';
 export * from './uploads';
 export * from './request-logging';
+export * from './query-redaction';
 export * from './parameter-resolvers';
 export * from './startup-logging';
 export * from './static-files';

@@ -139,6 +139,16 @@ createApp({
 });
 ```
 
+Request log lines (`Request`, `Response`, aborts and 5xx errors) write the URL with sensitive query parameter values replaced by `REDACTED`; keys and other parameters are kept as sent. The default names are exported as `DEFAULT_REDACTED_QUERY_KEYS` (`q`, `query`, `search`, `text`, `phone`, `phones`, `phoneNumber`, `phoneNumbers`, `email`, `name`, `token`, `code`, `state`, `password`). Matching ignores case and `_`, `-` and `.` separators and checks each segment of bracketed keys such as `filter[phoneNumbers][]`. A query that cannot be decoded is logged as the path followed by `?REDACTED`. Set `redactQueryKeys` to replace the list, spread the default to extend it, or pass `[]` to log query strings unchanged:
+
+```ts
+createApp({
+    requestLogging: {
+        redactQueryKeys: [...DEFAULT_REDACTED_QUERY_KEYS, 'mrn']
+    }
+});
+```
+
 `HttpLogPayloadMiddleware` is an opt-in diagnostic middleware that reads and logs the request body as text along with the method, URL, and content type. Because it can record credentials, tokens, personal data, and large payloads, use it only on deliberately selected routes and with a logger whose destination and retention are appropriate for that data.
 
 ### Client Address And Trusted Proxies

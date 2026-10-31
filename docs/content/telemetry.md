@@ -42,6 +42,7 @@ Options:
 | `enableRedisInstrumentation`       | Set to `true` to enable built-in ioredis tracing.            |
 | `enableMetricsEndpoint`            | Enables the Prometheus `/metrics` endpoint.                  |
 | `spanProcessors`                   | Custom trace span processors.                                |
+| `redactQueryKeys`                  | Query parameters redacted from incoming HTTP span URLs.      |
 | `metricReaders`                    | Custom metric readers.                                       |
 | `pyroscope`                        | Enables Grafana Pyroscope after tracing is installed.        |
 
@@ -91,6 +92,8 @@ TSF adds these resource attributes to installed trace and metric providers:
 | `deployment.environment` | `APP_ENV`.                                                          |
 | `host.name`              | Operating-system hostname.                                          |
 | `process.pid`            | Current process ID.                                                 |
+
+Incoming HTTP server spans have their `http.url`, `http.target`, `url.full` and `url.query` attributes rewritten when the span ends, before any exporting processor runs: values of query parameters matching `redactQueryKeys` (default `DEFAULT_REDACTED_QUERY_KEYS`, the same rules as request logging) become `REDACTED`, and an undecodable query fails closed to the path plus `?REDACTED`. Pass `redactQueryKeys: []` to export query strings unchanged.
 
 The default OTLP trace exporter uses a `SimpleSpanProcessor` in development and a `BatchSpanProcessor` otherwise. OTLP metrics use a periodic reader with a 10-second export interval. Passing custom `spanProcessors` or `metricReaders` replaces the corresponding default processor/reader choice while retaining any separately enabled Prometheus endpoint.
 
