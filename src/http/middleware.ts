@@ -2,6 +2,7 @@ import type { HttpRequest } from './request';
 import type { HttpResponse, HttpResponseResult } from './response';
 import type { ScopedLogger } from '../services/logger';
 import type { ClassType } from '../types';
+import { REDACTED, redactRequestBodyForLog, type IRedactedRequestBodyLog, type PayloadRedactionPolicy } from './payload-redaction';
 
 export type HttpMiddlewareResult = void | HttpResponseResult | Promise<void | HttpResponseResult>;
 
@@ -25,5 +26,27 @@ export class HttpLogPayloadMiddleware extends HttpMiddleware {
             contentType: request.headers['content-type'] ?? '',
             body: await request.readBodyText()
         });
+    }
+}
+
+/** Logs a policy-redacted body, or redacts it wholesale when no policy is provided. Query strings are omitted. */
+export class RedactedPayloadLogMiddleware extends HttpMiddleware {
+    constructor(
+        private readonly logger: ScopedLogger,
+        private readonly policy?: PayloadRedactionPolicy
+    ) {
+        super();
+    }
+
+    async handle(request: HttpRequest, _response: HttpResponse): Promise<void> {
+        const contentType = request.headers['content-type'] ?? '';
+        let body: IRedactedRequestBodyLog | { body: string; bodyUnavailable: true };
+        try {
+            const rawBody = await request.readBodyBuffer();
+            body = redactRequestBodyForLog(contentType, rawBody, this.policy);
+        } catch {
+            body = { body: REDACTED, bodyUnavailable: true };
+        }
+        this.logger.info('Logging request', { method: request.method, url: request.path, contentType, ...body });
     }
 }

@@ -4,6 +4,7 @@ import type { BaseAppConfig } from '../app/config';
 import { isTestEnvironment } from '../app/const';
 import { projectLoggerHttpContext, type ScopedLogger } from '../services/logger';
 import { HttpError } from './errors';
+import { createQueryKeyMatcher, redactUrlQuery, type QueryKeyMatcher, type RedactQueryKeys } from './query-redaction';
 import { getHttpRequestErrorState } from './request-error-state';
 import type { HttpRequest } from './request';
 
@@ -11,6 +12,12 @@ type RequestLoggingMode = BaseAppConfig['HTTP_REQUEST_LOGGING_MODE'];
 
 export interface HttpRequestLoggingOptions {
     excludePaths?: (string | RegExp)[];
+    /**
+     * Query parameter names whose values are logged as `REDACTED` in the request `url`. Matching ignores case and
+     * `_`/`-`/`.` separators. Set to `true` for the default list, or an array to replace it. Unset, `false`
+     * and `[]` leave URLs unchanged.
+     */
+    redactQueryKeys?: RedactQueryKeys;
 }
 
 interface RequestLoggingState {
@@ -32,11 +39,20 @@ interface ResponseLoggingTarget {
 }
 
 export class HttpRequestLogger {
+    private readonly redactQueryKey: QueryKeyMatcher;
+
     constructor(
         private readonly config: BaseAppConfig,
         private readonly logger: ScopedLogger,
         private readonly options: HttpRequestLoggingOptions = {}
-    ) {}
+    ) {
+        this.redactQueryKey = createQueryKeyMatcher(options.redactQueryKeys);
+    }
+
+    /** The request URL as written to logs, with configured query parameter values redacted. */
+    loggedUrl(request: Pick<HttpRequest, 'url'>): string {
+        return redactUrlQuery(request.url, this.redactQueryKey);
+    }
 
     createState(request: HttpRequest, outgoing: ServerResponse): RequestLoggingState {
         const state: RequestLoggingState = {
@@ -55,7 +71,7 @@ export class HttpRequestLogger {
             if (this.shouldLogAbort(state)) {
                 this.loggerFor(state).warn('Request aborted during processing', {
                     method: request.method,
-                    url: request.url,
+                    url: this.loggedUrl(request),
                     duration: Date.now() - state.startedAt
                 });
             }
@@ -77,7 +93,7 @@ export class HttpRequestLogger {
         if (state.mode !== 'e2e' || state.skipped) return;
         this.loggerFor(state).info('Request', {
             method: state.request.method,
-            url: state.request.url,
+            url: this.loggedUrl(state.request),
             remoteAddress: state.request.getRemoteAddress(),
             contentLength: state.request.headers['content-length']
         });
@@ -89,7 +105,7 @@ export class HttpRequestLogger {
         if (!this.shouldLogFinish(state, response.statusCode)) return;
         this.loggerFor(state).info('Response', {
             method: state.request.method,
-            url: state.request.url,
+            url: this.loggedUrl(state.request),
             statusCode: response.statusCode,
             duration: Date.now() - state.startedAt
         });
@@ -101,7 +117,7 @@ export class HttpRequestLogger {
         if (!this.shouldLogFinish(state, response.statusCode)) return;
         this.loggerFor(state).info('Response stream hooked by controller', {
             method: state.request.method,
-            url: state.request.url,
+            url: this.loggedUrl(state.request),
             statusCode: response.statusCode,
             duration: Date.now() - state.startedAt
         });
@@ -119,7 +135,7 @@ export class HttpRequestLogger {
         if (response.statusCode < 500) return;
         this.loggerFor(state).error('Request processing error', error, {
             method: state.request.method,
-            url: state.request.url,
+            url: this.loggedUrl(state.request),
             statusCode: response.statusCode,
             duration: Date.now() - state.startedAt
         });

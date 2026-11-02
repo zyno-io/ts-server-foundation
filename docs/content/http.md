@@ -139,7 +139,29 @@ createApp({
 });
 ```
 
-`HttpLogPayloadMiddleware` is an opt-in diagnostic middleware that reads and logs the request body as text along with the method, URL, and content type. Because it can record credentials, tokens, personal data, and large payloads, use it only on deliberately selected routes and with a logger whose destination and retention are appropriate for that data.
+Query redaction is opt-in and applies to TSF request log URLs. Set `redactQueryKeys: true` to use `DEFAULT_REDACTED_QUERY_KEYS`, or pass a list to replace the defaults. Unset, `false`, or `[]` leaves URLs unchanged. Configure incoming telemetry spans separately.
+
+```ts
+createApp({
+    requestLogging: {
+        redactQueryKeys: [...DEFAULT_REDACTED_QUERY_KEYS, 'mrn']
+    }
+});
+```
+
+Matching ignores case and `_`, `-`, and `.` separators and checks each segment of bracketed keys. When enabled, URL fragments are replaced with `#REDACTED` and undecodable queries fail closed to `?REDACTED`. The default names include common search, contact and credential fields; inspect the exported list and add application-specific names.
+
+`HttpLogPayloadMiddleware` logs the raw body and URL and is intended only for carefully selected diagnostics. `RedactedPayloadLogMiddleware` logs the pathname and applies a caller-supplied `PayloadRedactionPolicy` to JSON and form bodies. Without a policy, or if parsing or redaction fails, it redacts the whole body; unavailable bodies do not interrupt the request. `redactPayload` and `redactRequestBodyForLog` accept the same policy for other log sites. A policy chooses protected fields and any safe subtree leaves; review it against the actual payload schema before logging.
+
+```ts
+const policy: PayloadRedactionPolicy = {
+    classifyKey: key => (key === 'secret' ? [] : undefined)
+};
+
+const middleware = new RedactedPayloadLogMiddleware(logger, policy);
+```
+
+`classifyKey` receives lowercase keys with `_` and `-` removed, including each segment of bracketed form keys. Return `[]` to redact every leaf under a field, a list of safe leaf names to retain those values, or `undefined` to leave the field to normal traversal. An optional `classifyObject` handles schema-specific objects in arrays.
 
 ### Client Address And Trusted Proxies
 

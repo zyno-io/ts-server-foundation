@@ -39,8 +39,11 @@ import { getPackageJson } from '../../helpers/io/package';
 import { getHttpContextResolver, setHttpContextResolver } from '../../http/context';
 import { OtelState, getTraceContext } from './helpers';
 import { isOtelMetricsEndpointEnabled } from './metrics';
+import { IncomingHttpQueryRedactionSpanProcessor } from './query-redaction';
 
 export * from './helpers';
+export { IncomingHttpQueryRedactionSpanProcessor } from './query-redaction';
+export { DEFAULT_REDACTED_QUERY_KEYS, REDACTED_QUERY_VALUE } from '../../http/query-redaction';
 
 const requireFromTelemetry = createRequire(__filename);
 
@@ -88,6 +91,12 @@ export interface TelemetryInitOptions {
     enableRedisInstrumentation?: boolean;
     enableMetricsEndpoint?: boolean;
     spanProcessors?: SpanProcessor[];
+    /**
+     * Query parameter names redacted from incoming HTTP span URL attributes (`http.url`, `http.target`,
+     * `url.full`, `url.query`). Set `true` for the default list or an array to replace it. Unset, `false`
+     * and `[]` export URLs unchanged. Configure request logging separately.
+     */
+    redactQueryKeys?: boolean | readonly string[];
     metricReaders?: MetricReader[];
     pyroscope?: boolean | PyroscopeOptions;
 }
@@ -138,7 +147,11 @@ export function init(options: TelemetryInitOptions = {}): void {
                 attributePerEventCountLimit: readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_PER_EVENT_COUNT_LIMIT'),
                 attributePerLinkCountLimit: readTelemetryNumber('OTEL_SPAN_ATTRIBUTE_PER_LINK_COUNT_LIMIT')
             },
-            spanProcessors: options.spanProcessors?.length ? [...options.spanProcessors] : [createDefaultSpanProcessor()]
+            // The redaction processor runs first so exporters only ever see redacted URL attributes.
+            spanProcessors: [
+                new IncomingHttpQueryRedactionSpanProcessor(options.redactQueryKeys),
+                ...(options.spanProcessors?.length ? options.spanProcessors : [createDefaultSpanProcessor()])
+            ]
         });
         trace.setGlobalTracerProvider(tracerProvider);
         context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());

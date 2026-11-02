@@ -42,6 +42,7 @@ Options:
 | `enableRedisInstrumentation`       | Set to `true` to enable built-in ioredis tracing.            |
 | `enableMetricsEndpoint`            | Enables the Prometheus `/metrics` endpoint.                  |
 | `spanProcessors`                   | Custom trace span processors.                                |
+| `redactQueryKeys`                  | Opt-in query redaction for incoming HTTP span URLs.          |
 | `metricReaders`                    | Custom metric readers.                                       |
 | `pyroscope`                        | Enables Grafana Pyroscope after tracing is installed.        |
 
@@ -91,6 +92,8 @@ TSF adds these resource attributes to installed trace and metric providers:
 | `deployment.environment` | `APP_ENV`.                                                          |
 | `host.name`              | Operating-system hostname.                                          |
 | `process.pid`            | Current process ID.                                                 |
+
+Incoming HTTP server span query redaction is opt-in and configured separately from request logging. Set `redactQueryKeys: true` for `DEFAULT_REDACTED_QUERY_KEYS`, or pass a list to replace it. Unset, `false`, and `[]` export URLs unchanged. When enabled, `http.url`, `http.target`, `url.full`, and `url.query` are rewritten before export; matching values and fragments are redacted, and undecodable queries fail closed. The default list is exported from `@zyno-io/ts-server-foundation/otel` for bootstrap configuration.
 
 The default OTLP trace exporter uses a `SimpleSpanProcessor` in development and a `BatchSpanProcessor` otherwise. OTLP metrics use a periodic reader with a 10-second export interval. Passing custom `spanProcessors` or `metricReaders` replaces the corresponding default processor/reader choice while retaining any separately enabled Prometheus endpoint.
 
