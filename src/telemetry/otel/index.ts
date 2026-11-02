@@ -88,8 +88,6 @@ export interface TelemetryInitOptions {
     disabled?: boolean;
     instrumentations?: Instrumentation[];
     httpIncomingRequestAttributeHook?: HttpIncomingRequestAttributeHook;
-    /** Suppress instrumentation for selected incoming requests, in addition to the built-in health and metrics exclusions. */
-    httpIncomingRequestIgnoreHook?: (request: IncomingMessage) => boolean;
     enableRedisInstrumentation?: boolean;
     enableMetricsEndpoint?: boolean;
     spanProcessors?: SpanProcessor[];
@@ -312,11 +310,7 @@ function createDefaultInstrumentations(options: TelemetryInitOptions): Instrumen
         new HttpInstrumentation({
             startIncomingSpanHook: options.httpIncomingRequestAttributeHook,
             ignoreIncomingRequestHook: (request: IncomingMessage) =>
-                request.url === '/healthz' ||
-                request.url === '/readyz' ||
-                request.url === '/livez' ||
-                request.url === '/metrics' ||
-                options.httpIncomingRequestIgnoreHook?.(request) === true,
+                request.url === '/healthz' || request.url === '/readyz' || request.url === '/livez' || request.url === '/metrics',
             ignoreOutgoingRequestHook: (request: RequestOptions) => !!String(request.host ?? request.hostname ?? '').match(/sentry\./)
         }),
         new UndiciInstrumentation({

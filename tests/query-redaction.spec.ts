@@ -250,7 +250,6 @@ describe('query redaction', () => {
         init({
             serviceName: 'query-redaction',
             redactQueryKeys: true,
-            httpIncomingRequestIgnoreHook: request => request.url?.startsWith('/query-redaction-span/secret/') === true,
             spanProcessors: [new SimpleSpanProcessor({ exporter })]
         });
         // `http` was loaded before telemetry init; requiring it again lets the HTTP instrumentation patch
@@ -276,8 +275,6 @@ describe('query redaction', () => {
         try {
             const status = await get(port, '/query-redaction-span?text=call+me&phoneNumbers=%2B15555550123&page=2');
             assert.equal(status, 200);
-            const ignoredStatus = await get(port, '/query-redaction-span/secret/token');
-            assert.equal(ignoredStatus, 404);
             const deadline = Date.now() + 1_000;
             while (!exporter.getFinishedSpans().some(span => span.kind === SpanKind.SERVER) && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 10));
