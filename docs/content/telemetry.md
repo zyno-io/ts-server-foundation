@@ -202,3 +202,5 @@ Relevant environment keys:
 | `SENTRY_DSN`               | Sentry project DSN.                           |
 | `APP_ENV`                  | Sentry environment.                           |
 | `ALERTS_SLACK_WEBHOOK_URL` | Optional Slack webhook used by alert logging. |
+
+Incoming HTTP instrumentation also accepts `httpIncomingRequestIgnoreHook`, a predicate for suppressing spans on selected request paths. Use it where a URL path itself contains a credential; query redaction does not conceal path segments. Health and metrics exclusions still apply.
