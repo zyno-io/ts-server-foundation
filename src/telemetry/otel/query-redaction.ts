@@ -1,7 +1,14 @@
 import { SpanKind, type Context } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace';
 
-import { createQueryKeyMatcher, REDACTED_QUERY_VALUE, redactQuery, redactUrlQuery, type QueryKeyMatcher } from '../../http/query-redaction';
+import {
+    createQueryKeyMatcher,
+    REDACTED_QUERY_VALUE,
+    redactQuery,
+    redactUrlQuery,
+    type QueryKeyMatcher,
+    type RedactQueryKeys
+} from '../../http/query-redaction';
 
 /** Incoming-request span attributes that carry the request URL or its query string. */
 const URL_ATTRIBUTES = ['http.url', 'http.target', 'url.full'] as const;
@@ -14,7 +21,7 @@ const QUERY_ATTRIBUTE = 'url.query';
 export class IncomingHttpQueryRedactionSpanProcessor implements SpanProcessor {
     private readonly matches: QueryKeyMatcher;
 
-    constructor(redactQueryKeys?: readonly string[]) {
+    constructor(redactQueryKeys?: RedactQueryKeys) {
         this.matches = createQueryKeyMatcher(redactQueryKeys);
     }
 

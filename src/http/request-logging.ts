@@ -4,7 +4,7 @@ import type { BaseAppConfig } from '../app/config';
 import { isTestEnvironment } from '../app/const';
 import { projectLoggerHttpContext, type ScopedLogger } from '../services/logger';
 import { HttpError } from './errors';
-import { createQueryKeyMatcher, redactUrlQuery, type QueryKeyMatcher } from './query-redaction';
+import { createQueryKeyMatcher, redactUrlQuery, type QueryKeyMatcher, type RedactQueryKeys } from './query-redaction';
 import { getHttpRequestErrorState } from './request-error-state';
 import type { HttpRequest } from './request';
 
@@ -14,10 +14,10 @@ export interface HttpRequestLoggingOptions {
     excludePaths?: (string | RegExp)[];
     /**
      * Query parameter names whose values are logged as `REDACTED` in the request `url`. Matching ignores case and
-     * `_`/`-`/`.` separators. Defaults to `DEFAULT_REDACTED_QUERY_KEYS`; pass a list to replace it (spread the
-     * default to extend it) or `[]` to log query strings unchanged.
+     * `_`/`-`/`.` separators. Set to `true` for the default list, or an array to replace it. Unset, `false`
+     * and `[]` leave URLs unchanged.
      */
-    redactQueryKeys?: readonly string[];
+    redactQueryKeys?: RedactQueryKeys;
 }
 
 interface RequestLoggingState {

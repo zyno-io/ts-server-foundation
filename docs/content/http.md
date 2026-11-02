@@ -139,7 +139,7 @@ createApp({
 });
 ```
 
-Request log lines (`Request`, `Response`, aborts and 5xx errors) write the URL with sensitive query parameter values replaced by `REDACTED`; keys and other parameters are kept as sent. The default names are exported as `DEFAULT_REDACTED_QUERY_KEYS` (`q`, `query`, `search`, `text`, `phone`, `phones`, `phoneNumber`, `phoneNumbers`, `email`, `name`, `token`, `code`, `state`, `password`, `jwt`, `accessToken`, `idToken`, `refreshToken`, `apiKey`, `secret`, `signature`, `sig`), also from the `@zyno-io/ts-server-foundation/otel` entry. Matching ignores case and `_`, `-` and `.` separators and checks each segment of bracketed keys such as `filter[phoneNumbers][]`. A URL fragment is logged as `#REDACTED`. A query that cannot be decoded is logged as the path followed by `?REDACTED`. Set `redactQueryKeys` to replace the list, spread the default to extend it, or pass `[]` to log URLs exactly as received (no decoding, fragment or fail-closed rewriting):
+Query redaction is opt-in and applies to TSF request log URLs. Set `redactQueryKeys: true` to use `DEFAULT_REDACTED_QUERY_KEYS`, or pass a list to replace the defaults. Unset, `false`, or `[]` leaves URLs unchanged. Configure incoming telemetry spans separately.
 
 ```ts
 createApp({
@@ -149,7 +149,9 @@ createApp({
 });
 ```
 
-`HttpLogPayloadMiddleware` is an opt-in diagnostic middleware that reads and logs the request body as text along with the method, URL, and content type. Because it can record credentials, tokens, personal data, and large payloads, use it only on deliberately selected routes and with a logger whose destination and retention are appropriate for that data.
+Matching ignores case and `_`, `-`, and `.` separators and checks each segment of bracketed keys. When enabled, URL fragments are replaced with `#REDACTED` and undecodable queries fail closed to `?REDACTED`. The default names include common search, contact and credential fields; inspect the exported list and add application-specific names.
+
+`HttpLogPayloadMiddleware` logs the raw body and URL and is intended only for carefully selected diagnostics. `RedactedPayloadLogMiddleware` logs the pathname and redacts known carrier webhook fields in JSON and form bodies. Unparseable bodies are redacted wholesale; unavailable bodies do not interrupt the request. `redactPayload` and `redactRequestBodyForLog` expose the same rules for other log sites. These are known-key filters, not a guarantee that arbitrary payloads contain no sensitive data: review each provider's schema and logging destination before use.
 
 ### Client Address And Trusted Proxies
 

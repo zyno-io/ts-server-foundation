@@ -50,7 +50,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 1_000): Promise<voi
 }
 
 describe('query redaction', () => {
-    const matches = createQueryKeyMatcher();
+    const matches = createQueryKeyMatcher(true);
 
     it('redacts default keys case/separator-insensitively and keeps everything else as sent', () => {
         assert.equal(
@@ -86,6 +86,10 @@ describe('query redaction', () => {
 
     it('supports custom and empty key lists', () => {
         assert.equal(redactUrlQuery('/x?mrn=1&q=2', createQueryKeyMatcher([...DEFAULT_REDACTED_QUERY_KEYS, 'mrn'])), '/x?mrn=REDACTED&q=REDACTED');
+        for (const keys of [undefined, false, []] as const) {
+            const matcher = createQueryKeyMatcher(keys);
+            assert.equal(redactUrlQuery('/x?q=visible#frag', matcher), '/x?q=visible#frag');
+        }
         const disabled = createQueryKeyMatcher([]);
         assert.equal(redactUrlQuery('/x?mrn=1&q=2', disabled), '/x?mrn=1&q=2');
         // An empty list logs URLs exactly as received: no fail-closed rewrite and no fragment rewrite.
@@ -93,6 +97,28 @@ describe('query redaction', () => {
         assert.equal(redactQuery('%E0%A4%A=secret', disabled), '%E0%A4%A=secret');
         // The /otel entry exposes the same default list so a bootstrap can extend it before loading the root package.
         assert.equal(OtelDefaultRedactedQueryKeys, DEFAULT_REDACTED_QUERY_KEYS);
+    });
+
+    it('leaves request logs unchanged by default', async () => {
+        const entries: LogEntry[] = [];
+        @http.controller('/query-redaction-default')
+        class DefaultController {
+            @http.GET()
+            get() {
+                return { ok: true };
+            }
+        }
+        process.env.APP_ENV = 'test';
+        setLogSink(entry => entries.push(entry));
+        const app = createApp({ controllers: [DefaultController], defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' } });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const { port } = server.address() as AddressInfo;
+        try {
+            await get(port, '/query-redaction-default?q=visible');
+            assert.equal(entries.find(entry => entry.message === 'Request')?.data?.url, '/query-redaction-default?q=visible');
+        } finally {
+            await app.stop();
+        }
     });
 
     it('redacts query values in real request log lines', async () => {
@@ -108,12 +134,17 @@ describe('query redaction', () => {
 
         process.env.APP_ENV = 'test';
         setLogSink(entry => entries.push(entry));
-        const app = createApp({ controllers: [QueryRedactionLoggingController], defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' } });
+        const app = createApp({
+            controllers: [QueryRedactionLoggingController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' },
+            requestLogging: { redactQueryKeys: true }
+        });
         const server = await app.http.listen(0, '127.0.0.1');
         const { port } = server.address() as AddressInfo;
 
         try {
-            assert.equal(await get(port, '/query-redaction-logging?q=Jane&phoneNumbers=%2B15555550123&page=2'), 200);
+            const status = await get(port, '/query-redaction-logging?q=Jane&phoneNumbers=%2B15555550123&page=2');
+            assert.equal(status, 200);
             const lines = entries.filter(entry => entry.message === 'Request' || entry.message === 'Response');
             assert.deepEqual(
                 lines.map(entry => [entry.message, entry.data?.url]),
@@ -181,7 +212,11 @@ describe('query redaction', () => {
 
         process.env.APP_ENV = 'test';
         setLogSink(entry => entries.push(entry));
-        const app = createApp({ controllers: [QueryRedactionLinesController], defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' } });
+        const app = createApp({
+            controllers: [QueryRedactionLinesController],
+            defaultConfig: { HTTP_REQUEST_LOGGING_MODE: 'e2e' },
+            requestLogging: { redactQueryKeys: true }
+        });
         const server = await app.http.listen(0, '127.0.0.1');
         const { port } = server.address() as AddressInfo;
         const nodeHttp = requireFromTest('http') as typeof import('node:http');
@@ -193,7 +228,8 @@ describe('query redaction', () => {
             await waitFor(() => entries.some(entry => entry.message === 'Response stream hooked by controller'));
             aborted.destroy();
             await waitFor(() => entries.some(entry => entry.message === 'Request aborted during processing'));
-            assert.equal(await get(port, '/query-redaction-lines/fail?phoneNumbers=%2B15555550123'), 500);
+            const status = await get(port, '/query-redaction-lines/fail?phoneNumbers=%2B15555550123');
+            assert.equal(status, 500);
             await waitFor(() => entries.some(entry => entry.message === 'Request processing error'));
 
             const urlsByMessage = Object.fromEntries(entries.map(entry => [entry.message, entry.data?.url]));
@@ -211,7 +247,7 @@ describe('query redaction', () => {
 
     it('redacts incoming HTTP span URL attributes before export', async () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'query-redaction', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+        init({ serviceName: 'query-redaction', redactQueryKeys: true, spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         // `http` was loaded before telemetry init; requiring it again lets the HTTP instrumentation patch
         // `Server.prototype.emit`, as it would when init runs first in an application bootstrap.
         const instrumentedHttp = requireFromTest('http') as typeof import('node:http');
@@ -233,7 +269,8 @@ describe('query redaction', () => {
         // Read spans before stopping the app: app shutdown also shuts telemetry down, which clears the exporter.
         let serverSpans: ReturnType<InMemorySpanExporter['getFinishedSpans']>;
         try {
-            assert.equal(await get(port, '/query-redaction-span?text=call+me&phoneNumbers=%2B15555550123&page=2'), 200);
+            const status = await get(port, '/query-redaction-span?text=call+me&phoneNumbers=%2B15555550123&page=2');
+            assert.equal(status, 200);
             const deadline = Date.now() + 1_000;
             while (!exporter.getFinishedSpans().some(span => span.kind === SpanKind.SERVER) && Date.now() < deadline) {
                 await new Promise(resolve => setTimeout(resolve, 10));
@@ -257,7 +294,7 @@ describe('query redaction', () => {
 
     it('rewrites every URL attribute on server spans, fails closed, and leaves client spans alone', () => {
         const exporter = new InMemorySpanExporter();
-        init({ serviceName: 'query-redaction-manual', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+        init({ serviceName: 'query-redaction-manual', redactQueryKeys: true, spanProcessors: [new SimpleSpanProcessor({ exporter })] });
         const tracer = getTracer();
         assert.ok(tracer);
 
@@ -282,5 +319,14 @@ describe('query redaction', () => {
             'url.query': 'q=REDACTED&page=1'
         });
         assert.equal(clientSpan.attributes['url.full'], 'http://vendor.example/lookup?q=Jane');
+    });
+    it('leaves incoming spans unchanged by default', () => {
+        const exporter = new InMemorySpanExporter();
+        init({ serviceName: 'query-redaction-default', spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+        const tracer = getTracer();
+        assert.ok(tracer);
+        const span = tracer.startSpan('GET', { kind: SpanKind.SERVER, attributes: { 'url.query': 'q=visible' } });
+        span.end();
+        assert.equal(exporter.getFinishedSpans()[0].attributes['url.query'], 'q=visible');
     });
 });

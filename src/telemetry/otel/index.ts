@@ -93,10 +93,10 @@ export interface TelemetryInitOptions {
     spanProcessors?: SpanProcessor[];
     /**
      * Query parameter names redacted from incoming HTTP span URL attributes (`http.url`, `http.target`,
-     * `url.full`, `url.query`). Defaults to `DEFAULT_REDACTED_QUERY_KEYS`, matching `requestLogging.redactQueryKeys`;
-     * pass `[]` to export query strings unchanged.
+     * `url.full`, `url.query`). Set `true` for the default list or an array to replace it. Unset, `false`
+     * and `[]` export URLs unchanged. Configure request logging separately.
      */
-    redactQueryKeys?: readonly string[];
+    redactQueryKeys?: boolean | readonly string[];
     metricReaders?: MetricReader[];
     pyroscope?: boolean | PyroscopeOptions;
 }

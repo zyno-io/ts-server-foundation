@@ -45,9 +45,13 @@ function normalizeQueryKey(key: string): string {
     return key.toLowerCase().replace(/[_.-]/g, '');
 }
 
-/** Builds a matcher for the given parameter names (defaults to {@link DEFAULT_REDACTED_QUERY_KEYS}). */
-export function createQueryKeyMatcher(keys: readonly string[] = DEFAULT_REDACTED_QUERY_KEYS): QueryKeyMatcher {
-    const normalized = new Set(keys.map(normalizeQueryKey));
+/** `true` selects the default list; an array replaces it. Unset, false and an empty array disable redaction. */
+export type RedactQueryKeys = boolean | readonly string[];
+
+/** Builds a matcher for the given parameter names. Redaction is disabled unless explicitly enabled. */
+export function createQueryKeyMatcher(keys?: RedactQueryKeys): QueryKeyMatcher {
+    const selected = keys === true ? DEFAULT_REDACTED_QUERY_KEYS : keys || [];
+    const normalized = new Set(selected.map(normalizeQueryKey));
     const matches = (key: string) =>
         key
             .split(/[[\]]+/)
