@@ -151,7 +151,17 @@ createApp({
 
 Matching ignores case and `_`, `-`, and `.` separators and checks each segment of bracketed keys. When enabled, URL fragments are replaced with `#REDACTED` and undecodable queries fail closed to `?REDACTED`. The default names include common search, contact and credential fields; inspect the exported list and add application-specific names.
 
-`HttpLogPayloadMiddleware` logs the raw body and URL and is intended only for carefully selected diagnostics. `RedactedPayloadLogMiddleware` logs the pathname and redacts known carrier webhook fields in JSON and form bodies. Unparseable bodies are redacted wholesale; unavailable bodies do not interrupt the request. `redactPayload` and `redactRequestBodyForLog` expose the same rules for other log sites. These are known-key filters, not a guarantee that arbitrary payloads contain no sensitive data: review each provider's schema and logging destination before use.
+`HttpLogPayloadMiddleware` logs the raw body and URL and is intended only for carefully selected diagnostics. `RedactedPayloadLogMiddleware` logs the pathname and applies a caller-supplied `PayloadRedactionPolicy` to JSON and form bodies. Without a policy, or if parsing or redaction fails, it redacts the whole body; unavailable bodies do not interrupt the request. `redactPayload` and `redactRequestBodyForLog` accept the same policy for other log sites. A policy chooses protected fields and any safe subtree leaves; review it against the actual payload schema before logging.
+
+```ts
+const policy: PayloadRedactionPolicy = {
+    classifyKey: key => (key === 'secret' ? [] : undefined)
+};
+
+const middleware = new RedactedPayloadLogMiddleware(logger, policy);
+```
+
+`classifyKey` receives lowercase keys with `_` and `-` removed, including each segment of bracketed form keys. Return `[]` to redact every leaf under a field, a list of safe leaf names to retain those values, or `undefined` to leave the field to normal traversal. An optional `classifyObject` handles schema-specific objects in arrays.
 
 ### Client Address And Trusted Proxies
 
