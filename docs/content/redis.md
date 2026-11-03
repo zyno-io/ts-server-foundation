@@ -38,7 +38,7 @@ Sentinel connections keep one subscription to Sentinel's `+switch-master` notifi
 
 Sentinel-mode TCP connections and Sentinel discovery commands each have a one-second timeout by default. This bounds attempts against retired pod addresses and Sentinels that accept connections but stop answering. Application commands retain their existing retry and timeout behavior; the mesh's five-second heartbeat and fifteen-second lease remain unchanged.
 
-When `REDIS_SENTINEL_HOST` is a highly available endpoint such as a Kubernetes Service backed by all Sentinels, set `REDIS_SENTINEL_DISCOVER_PEERS=false`. Reconnects then query that endpoint instead of accumulating discovered pod addresses. Keep peer discovery enabled when the configured host is an individual Sentinel whose peers provide redundancy. These settings allow fast recovery during planned handoffs; a genuine outage that outlasts the lease still fences mesh work.
+Peer discovery is disabled by default (`REDIS_SENTINEL_DISCOVER_PEERS=false`). When `REDIS_SENTINEL_HOST` is a highly available endpoint such as a Kubernetes Service backed by all Sentinels, reconnects query that endpoint without accumulating discovered pod addresses; no discover-peers environment setting is needed. When the configured host is an individual Sentinel whose peers provide redundancy, opt into peer discovery with `REDIS_SENTINEL_DISCOVER_PEERS=true` (or the matching utility setting, such as `MESH_REDIS_SENTINEL_DISCOVER_PEERS=true`). Utility settings inherit the shared setting unless explicitly overridden. These settings allow fast recovery during planned handoffs; a genuine outage that outlasts the lease still fences mesh work.
 
 ## Cache
 
@@ -197,7 +197,7 @@ Common variables for each prefix:
 | `*_REDIS_SENTINEL_NAME`               | Redis Sentinel master name                                                | unset        |
 | `*_REDIS_SENTINEL_CONNECT_TIMEOUT_MS` | TCP connection timeout in Sentinel mode (including the master connection) | `1000`       |
 | `*_REDIS_SENTINEL_COMMAND_TIMEOUT_MS` | Per-command timeout for Sentinel discovery                                | `1000`       |
-| `*_REDIS_SENTINEL_DISCOVER_PEERS`     | Add discovered Sentinels to the reconnect list                            | `true`       |
+| `*_REDIS_SENTINEL_DISCOVER_PEERS`     | Add discovered Sentinels to the reconnect list                            | `false`      |
 
 For the default shared connection, omit the utility prefix and use `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD_SECRET`, `REDIS_PREFIX`, and `REDIS_SENTINEL_*`.
 

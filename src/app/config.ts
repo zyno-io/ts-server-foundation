@@ -51,7 +51,7 @@ export class BaseAppConfig {
     REDIS_SENTINEL_PASSWORD_SECRET?: string;
     REDIS_SENTINEL_CONNECT_TIMEOUT_MS: number = 1_000;
     REDIS_SENTINEL_COMMAND_TIMEOUT_MS: number = 1_000;
-    REDIS_SENTINEL_DISCOVER_PEERS: boolean = true;
+    REDIS_SENTINEL_DISCOVER_PEERS: boolean = false;
     REDIS_HOST?: string;
     REDIS_PORT?: number;
     REDIS_USERNAME?: string;

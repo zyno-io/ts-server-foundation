@@ -4,7 +4,7 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { performance } from 'node:perf_hooks';
 import { describe, it } from 'node:test';
 
-import { BaseAppConfig, createApp, createRedis, createRedisOptions, disconnectAllRedis, MeshService, sleepMs } from '../src';
+import { BaseAppConfig, createApp, createRedis, createRedisOptions, disconnectAllRedis, getAppConfig, MeshService, sleepMs } from '../src';
 
 type Fixture = { server: Server; port: number; sockets: Set<Socket> };
 
@@ -63,6 +63,34 @@ function resp(value: string | number | Array<unknown> | null): string {
 }
 
 describe('Sentinel recovery', () => {
+    for (const discoverPeers of ['default', 'unset', true, false] as const) {
+        it(`resolves shared and utility peer discovery policy (${discoverPeers})`, async () => {
+            class Config extends BaseAppConfig {
+                REDIS_SENTINEL_HOST = 'sentinel.example';
+                REDIS_SENTINEL_NAME = 'redis';
+            }
+            const app = createApp({ config: Config, enableHealthcheck: false });
+            try {
+                const config = getAppConfig();
+                if (discoverPeers === 'default') assert.equal(config.REDIS_SENTINEL_DISCOVER_PEERS, false);
+                else if (discoverPeers === 'unset') Reflect.deleteProperty(config, 'REDIS_SENTINEL_DISCOVER_PEERS');
+                else config.REDIS_SENTINEL_DISCOVER_PEERS = discoverPeers;
+
+                for (const prefix of [undefined, 'CACHE', 'MUTEX', 'BROADCAST', 'MESH', 'BULL']) {
+                    const { options } = createRedisOptions(prefix);
+                    assert.equal(options.updateSentinels, discoverPeers === true, prefix ?? 'shared');
+                    if (prefix) {
+                        Object.assign(config, { [`${prefix}_REDIS_SENTINEL_DISCOVER_PEERS`]: discoverPeers !== true });
+                        const overridden = createRedisOptions(prefix).options;
+                        assert.equal(overridden.updateSentinels, discoverPeers !== true, prefix);
+                    }
+                }
+            } finally {
+                await app.stop();
+            }
+        });
+    }
+
     it('inherits timeout and discovery policy with independent utility overrides', async () => {
         class Config extends BaseAppConfig {
             REDIS_SENTINEL_HOST = 'sentinel.example';
