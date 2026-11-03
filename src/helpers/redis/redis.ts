@@ -55,7 +55,7 @@ export function createRedisOptions(configPrefix?: string): {
                 sentinelCommandTimeout: Number(config.REDIS_SENTINEL_COMMAND_TIMEOUT_MS ?? 1_000),
                 // An HA service already selects a live Sentinel. Importing
                 // retired pod IPs bypasses that service on later reconnects.
-                updateSentinels: Boolean(config.REDIS_SENTINEL_DISCOVER_PEERS ?? true),
+                updateSentinels: Boolean(config.REDIS_SENTINEL_DISCOVER_PEERS ?? false),
                 failoverDetector: true,
                 sentinelMaxConnections: 1,
                 reconnectOnError: error => (error.message.startsWith('READONLY') ? 2 : false)
