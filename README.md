@@ -29,3 +29,7 @@ Repository development commands and contribution conventions are documented in [
 TS Server Foundation owes a great deal to the open-source projects that made its architecture possible. [Deepkit](https://github.com/marcj/deepkit) inspired many of the design ideas behind its runtime type reflection, dependency injection, and metadata-driven server APIs. We are especially grateful to Deepkit's maintainer, [Marc J. Schmidt](https://github.com/marcj), for showing how powerful a cohesive, type-aware TypeScript framework can be.
 
 [Typia](https://typia.io/) and [ttsc](https://github.com/samchon/ttsc) provided the essential compiler groundwork for bringing those ideas to TypeScript 7. TSF builds on their type-analysis and transform infrastructure to generate the runtime metadata at the heart of the framework. Our sincere thanks to Jeongho Nam and every contributor to these projects for making that work available to the TypeScript community.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

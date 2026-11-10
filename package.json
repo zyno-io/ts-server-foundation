@@ -33,7 +33,8 @@
         "template-app/**/*",
         "types.d.ts",
         "package.json",
-        "!docs/.vitepress/dist/"
+        "!docs/.vitepress/dist/",
+        "LICENSE"
     ],
     "type": "commonjs",
     "main": "./dist/src/index.js",
