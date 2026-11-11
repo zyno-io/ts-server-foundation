@@ -1,11 +1,13 @@
 import type { Socket } from 'node:net';
-import { PassThrough, Readable, Transform, pipeline } from 'node:stream';
+import { addAbortSignal, PassThrough, Readable, Transform, pipeline } from 'node:stream';
 import { createGunzip } from 'node:zlib';
 
 import { HttpBadRequestError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
 import { defaultFormBodyLimits, type FormBodyLimits } from './form-body';
 import { getHeaderValue } from './headers';
-import type { UploadedFiles } from './uploads';
+import { assertRequestActive, getRequestSignal, setRequestDeadline } from './request-lifecycle';
+import { getRequestTemporaryWorkspace, type UploadedFiles } from './uploads';
+import type { TemporaryWorkspace, TemporaryWorkspaceOptions } from '../helpers/io/temporary-files';
 
 export type KnownHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD';
 export type HttpMethod = KnownHttpMethod | (string & {});
@@ -121,6 +123,25 @@ export class HttpRequest extends Readable {
         return new HttpRequest('HEAD', url, headers);
     }
 
+    /** Stable cancellation signal for this request's disconnect/deadline, including response work. */
+    get signal(): AbortSignal {
+        return getRequestSignal(this);
+    }
+
+    /** Set a deadline in milliseconds from now. An existing earlier deadline is preserved. */
+    setDeadline(timeoutMs: number): void {
+        setRequestDeadline(this, timeoutMs);
+    }
+
+    /** Lazily share the multipart workspace; the router disposes it after awaited request work settles. */
+    async workspace(options: TemporaryWorkspaceOptions = {}): Promise<TemporaryWorkspace> {
+        assertRequestActive(this);
+        const workspace = await getRequestTemporaryWorkspace(this);
+        if (options.replayable) await workspace.setReplayable();
+        assertRequestActive(this);
+        return workspace;
+    }
+
     build(): this {
         return this;
     }
@@ -173,7 +194,8 @@ export class HttpRequest extends Readable {
     }
 
     async readBodyText(): Promise<string> {
-        return (await this.readBodyBuffer()).toString();
+        const body = await this.readBodyBuffer();
+        return body.toString();
     }
 
     async readBody(): Promise<Buffer> {
@@ -184,7 +206,10 @@ export class HttpRequest extends Readable {
         if (this.body) {
             if (this.bodyGuardBypass || this.cachedBodyDecoded) return this.body;
             if (this.bodyRead) return this.bodyRead;
-            this.bodyRead = readStreamBody(createGuardedRequestBodyStream(Readable.from([this.body]), this.headers, this.bodyLimits)).then(body => {
+            this.bodyRead = readStreamBody(
+                createGuardedRequestBodyStream(Readable.from([this.body]), this.headers, this.bodyLimits),
+                this.signal
+            ).then(body => {
                 this.body = body;
                 this.cachedBodyDecoded = true;
                 return body;
@@ -194,7 +219,7 @@ export class HttpRequest extends Readable {
         if (!this.bodyStream) return Buffer.alloc(0);
         if (this.bodyRead) return this.bodyRead;
         if (this.streamAttached) throw new Error('Request body stream is already being consumed');
-        this.bodyRead = readStreamBody(this.createBodyReadStream()).then(body => {
+        this.bodyRead = readStreamBody(this.createBodyReadStream(), this.signal).then(body => {
             this.body = body;
             this.cachedBodyDecoded = true;
             return body;
@@ -423,7 +448,8 @@ function escapeMultipartName(value: string): string {
     return value.replace(/["\r\n]/g, '_');
 }
 
-function readStreamBody(stream: Readable): Promise<Buffer> {
+function readStreamBody(stream: Readable, signal: AbortSignal): Promise<Buffer> {
+    addAbortSignal(signal, stream);
     return new Promise((resolve, reject) => {
         const chunks: Buffer[] = [];
         stream.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));

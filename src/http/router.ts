@@ -33,6 +33,7 @@ import type { HttpMiddleware, HttpMiddlewareInput } from './middleware';
 import { HttpRequest, HttpRequestStream } from './request';
 import type { HttpMethod } from './request';
 import { clearHttpRequestErrorState, setHttpRequestErrorState } from './request-error-state';
+import { finishRequestLifecycle, isRequestDisconnectError, startRequestLifecycle } from './request-lifecycle';
 import { HttpResponse, isHttpResponseResult, MemoryHttpResponse } from './response';
 import { clearCachedValue, getCachedValue, setCachedValue } from './store';
 import {
@@ -188,7 +189,9 @@ export class HttpRouter {
         let route: HttpRoutePlan | undefined;
         let matchedRoute = false;
         clearHttpRequestErrorState(request);
+        startRequestLifecycle(request, response);
         try {
+            request.signal.throwIfAborted();
             route = this.match(request, () => {
                 matchedRoute = true;
             });
@@ -228,12 +231,17 @@ export class HttpRouter {
 
             if (!response.destroyed && !response.writableEnded && !response.headersSent) this.writeResult(response, result, route);
         } catch (error) {
-            setHttpRequestErrorState(request, error, matchedRoute);
-            this.writeError(response, error);
+            if (!isRequestDisconnectError(request, error)) {
+                setHttpRequestErrorState(request, error, matchedRoute);
+                this.writeError(response, error);
+            }
         } finally {
             try {
                 await this.dispatchWorkflow(httpWorkflow.onResponse, request, response);
+            } catch (error) {
+                if (!isRequestDisconnectError(request, error)) throw error;
             } finally {
+                finishRequestLifecycle(request);
                 await cleanupUploadedFiles(request);
             }
         }
@@ -258,7 +266,7 @@ export class HttpRouter {
 
         const controller = this.container.get(FallbackController, context);
         const result = await controller.handle(request, response);
-        if (!response.writableEnded && !response.headersSent) this.writeResult(response, result);
+        if (!response.destroyed && !response.writableEnded && !response.headersSent) this.writeResult(response, result);
     }
 
     private createRequestContext(request: HttpRequest, response: HttpResponse): RequestContext {
@@ -601,7 +609,7 @@ export class HttpRouter {
     }
 
     private writeError(response: HttpResponse, error: unknown): void {
-        if (response.writableEnded) return;
+        if (response.destroyed || response.writableEnded) return;
         if (response.headersSent) {
             response.end();
             return;

@@ -33,15 +33,14 @@ sole remaining copy and must not be marked replayable merely because it is old o
 
 ## Multipart And Request Work
 
-TSF stores multipart uploads in a managed request workspace. `getRequestTemporaryWorkspace(request)`
-returns that same workspace, including for a request without multipart data. The router disposes it
-after the controller and response workflow settle. Derived and partial files alongside upload paths
-are included automatically; neither successful nor failed handlers need to enumerate those files.
-
-Use the request helper when response disconnects or deadlines must cancel work:
+TSF stores multipart uploads in a managed request workspace. `await request.workspace()` lazily
+returns that same workspace, including for a request without multipart data. Concurrent calls share
+one allocation. The router disposes it after the controller and response workflow settle. Derived
+and partial files alongside upload paths are included automatically. Reading `request.signal` alone
+does not allocate a temporary directory.
 
 ```ts
-import { execProcess, FileUpload, http, HttpBody, HttpRequest, HttpResponse, withRequestTemporaryWorkspace } from '@zyno-io/ts-server-foundation';
+import { execProcess, FileUpload, http, HttpBody, HttpRequest, HttpResponse } from '@zyno-io/ts-server-foundation';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 
@@ -49,29 +48,39 @@ import { pipeline } from 'node:stream/promises';
 class ConversionController {
     @http.POST('/convert')
     async convert(body: HttpBody<{ file: FileUpload }>, request: HttpRequest, response: HttpResponse): Promise<void> {
-        await withRequestTemporaryWorkspace(
-            request,
-            response,
-            async (workspace, signal) => {
-                const output = workspace.path('result.mp3');
-                await execProcess('ffmpeg', ['-i', body.file.path, output], { signal });
-                response.setHeader('content-type', 'audio/mpeg');
-                await pipeline(createReadStream(output), response, { signal });
-            },
-            { replayable: true, timeoutMs: 120_000 }
-        );
+        request.setDeadline(120_000);
+        const files = await request.workspace({ replayable: true });
+        const output = files.path('result.mp3');
+        await execProcess('ffmpeg', ['-i', body.file.path, output], { signal: request.signal });
+        response.setHeader('content-type', 'audio/mpeg');
+        await pipeline(createReadStream(output), response, { signal: request.signal });
     }
 }
 ```
 
-The helper shares the router-owned directory rather than disposing multipart inputs early. It aborts
-its signal on an unfinished response closing or failing, and optionally combines a deadline or caller
-signal. Expected abort errors from a client disconnect are suppressed because no response remains;
-independent failures and deadlines still propagate. Pass the signal to every process and stream, and
-await their completion. Simply racing a promise against cancellation cannot safely stop its writers.
+The request owns the lifetime; no callback wrapper or extra injected provider is required. Every request
+has one stable `signal`, which aborts when an unfinished response disconnects or fails. Normal body
+consumption and successful response completion do not abort it. Multipart parsing and buffered body
+reads honor that signal too. Expected errors caused by the disconnect are suppressed because no
+response remains; independent errors and deadline failures remain recorded.
 
-No timeout is imposed unless `timeoutMs` is provided. Recovery remains conservative unless the app
-explicitly opts into `replayable`; ordinary multipart uploads preserve crash leftovers by default.
+`setDeadline(timeoutMs)` explicitly bounds the remaining request work, including response workflow
+listeners. It accepts a positive integer timer duration in milliseconds from the call. Repeated calls
+can shorten the deadline but cannot extend an earlier one. No deadline applies by default. Cancellation
+keeps its first reason; a response closing after a deadline does not turn the timeout into a suppressed
+disconnect. The router clears the timer and disconnect listeners after awaited response work, then
+releases its files. Pass `request.signal` to every process/stream and await all users before returning.
+Cancellation alone does not wait for arbitrary work started without awaiting it.
+
+Workspace crash recovery defaults to preservation. Opt into `workspace({ replayable: true })` only when
+retained sources allow replay of the whole request workspace. This also updates a directory already
+created by multipart parsing. Workspace allocation and deadline configuration are rejected after the
+request lifecycle finishes. CLI/background work should use `withTemporaryWorkspace()` or explicitly
+owned `temporaryFiles` instead of retaining a completed request's paths.
+
+`getRequestTemporaryWorkspace(request)` and `withRequestTemporaryWorkspace(request, response, fn, options)`
+remain compatible functional APIs. The callback helper combines the request signal with its optional
+caller signal/deadline; new controllers can use the request methods directly.
 
 ## Returning A Temporary File
 

@@ -524,3 +524,11 @@ Concrete controller routes always win. If `staticFiles` is configured, real file
 `fallbackController` implicitly disables static `index.html` and SPA-fallback handling so Vite's browser entrypoint cannot bypass SSR. Supplying `staticFiles.spaFallback` together with `fallbackController` fails startup because both would answer the same unmatched request. Existing `onRouteNotFound` workflow listeners run first and can end the response before the fallback controller runs.
 
 The framework does not depend on React, Vue, or Vite. Build the browser bundle into `dist/client`, load the framework-specific SSR bundle from the fallback controller, and hydrate it with the matching browser entrypoint. Render data should be intentionally public and safely serialized before it is embedded into the HTML.
+
+## Request Cancellation And Temporary Workspaces
+
+Controllers can use `request.signal` for disconnect cancellation and `request.setDeadline(timeoutMs)`
+for an explicit deadline. `await request.workspace({ replayable: true })` lazily shares the multipart
+workspace. The router releases it after awaited controller and response workflow work; callbacks are
+not required. See [Temporary Workspaces](./temporary-files.md) for replayability, stream/process
+ownership, deadlines, and cleanup guarantees.

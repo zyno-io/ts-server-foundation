@@ -10,6 +10,7 @@ import { HttpBadRequestError, HttpError, HttpPayloadTooLargeError, HttpUnsupport
 import { assertTopLevelFormFieldName, FormBodyBuilder } from './form-body';
 import { getRequestHeader } from './headers';
 import type { HttpRequest } from './request';
+import { assertRequestActive } from './request-lifecycle';
 
 export type FileUploadAllowedTypes = readonly string[] | string;
 
@@ -140,7 +141,7 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
             return;
         }
 
-        const write = writeMultipartFile(uploadDir, name, file, info, filePolicy).then(upload => ({ name, upload }));
+        const write = writeMultipartFile(uploadDir, name, file, info, filePolicy, request.signal).then(upload => ({ name, upload }));
         write.catch(error => {
             fileWriteErrors.add(error);
         });
@@ -149,13 +150,13 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
 
     let completedFiles: Array<{ name: string; upload: FileUpload }>;
     try {
-        await pipeline(request.stream, parser);
+        await pipeline(request.stream, parser, { signal: request.signal });
         if (multipartError) throw multipartError;
         if (jsonPayload) fields.mergeObject(jsonPayload);
         completedFiles = await Promise.all(fileWrites);
     } catch (error) {
         await Promise.allSettled(fileWrites);
-        if (error instanceof HttpError || fileWriteErrors.has(error)) throw error;
+        if (request.signal.aborted || error instanceof HttpError || fileWriteErrors.has(error)) throw error;
         throw new HttpBadRequestError('Failed to parse multipart body');
     }
     // Promise.all preserves the parser's file-event order even when a later,
@@ -204,7 +205,8 @@ async function writeMultipartFile(
     name: string,
     file: NodeJS.ReadableStream,
     info: { filename?: string; mimeType?: string },
-    policy?: FileUploadPolicy
+    policy?: FileUploadPolicy,
+    signal?: AbortSignal
 ): Promise<FileUpload> {
     const declaredType = normalizeMimeType(info.mimeType || 'application/octet-stream');
     if (!mimeMatchesAllowedTypes(declaredType, policy?.allowedTypes)) {
@@ -228,7 +230,7 @@ async function writeMultipartFile(
         detect: fileType ? buffer => fileType.fileTypeFromBuffer(buffer) as Promise<FileTypeResult | undefined> : undefined
     });
 
-    await pipeline(file, validator, createWriteStream(upload.path));
+    await pipeline(file, validator, createWriteStream(upload.path), { signal });
     return upload;
 }
 
@@ -377,6 +379,7 @@ function sanitizeFilename(filename: string): string {
 
 /** Shares the multipart directory and its router-owned cleanup, including derived/partial outputs. */
 export function getRequestTemporaryWorkspace(request: HttpRequest): Promise<TemporaryWorkspace> {
+    assertRequestActive(request);
     const existing = request.store[RequestTemporaryWorkspaceSymbol] as Promise<TemporaryWorkspace> | undefined;
     if (existing) return existing;
     const pending = temporaryFiles.createWorkspace();
