@@ -127,6 +127,8 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
     });
 
     parser.on('file', (name, file, info) => {
+        // Parser cancellation can destroy a part before MIME detection has loaded its writer pipeline.
+        file.on('error', error => parser.destroy(error));
         try {
             assertTopLevelFormFieldName(name, request.bodyLimits);
         } catch (error) {
@@ -222,6 +224,7 @@ async function writeMultipartFile(
     upload.originalName = info.filename || 'upload';
 
     const fileType = policy?.allowedTypes?.length ? await loadFileTypeModule() : undefined;
+    signal?.throwIfAborted();
     const validator = new FileUploadValidationTransform({
         name,
         upload,

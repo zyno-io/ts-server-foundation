@@ -29,6 +29,7 @@ describe('HTTP request lifecycle', () => {
         const signal = request.signal;
         try {
             delete require.cache[filename];
+            // oxlint-disable-next-line typescript/no-require-imports -- Exercise a fresh module after deliberately clearing its cache.
             const reloaded = require(filename) as typeof import('../src/http/request-lifecycle');
             assert.equal(reloaded.getRequestSignal(request), signal);
             request.setDeadline(10);
@@ -241,10 +242,11 @@ describe('HTTP request lifecycle', () => {
         }
     });
 
-    for (const multipart of [false, true]) {
-        it(`cancels an unfinished ${multipart ? 'multipart' : 'JSON'} body before controller invocation`, async t => {
+    for (const kind of ['JSON', 'multipart', 'MIME'] as const) {
+        const multipart = kind !== 'JSON';
+        it(`cancels an unfinished ${kind} body before controller invocation`, async t => {
             const body = multipart
-                ? '--test\r\nContent-Disposition: form-data; name="file"; filename="input.raw"\r\nContent-Type: application/octet-stream\r\n\r\npartial'
+                ? '--test\r\nContent-Disposition: form-data; name="file"; filename="input.raw"\r\nContent-Type: image/png\r\n\r\npartial'
                 : '{"value":"partial';
             let started = false;
             let reading!: () => void;
@@ -260,7 +262,7 @@ describe('HTTP request lifecycle', () => {
                 }
             });
             const headers = { 'content-type': multipart ? 'multipart/form-data; boundary=test' : 'application/json' };
-            const request = new HttpRequest('POST', '/body', headers, undefined, source);
+            const request = new HttpRequest('POST', kind === 'MIME' ? '/mime' : '/body', headers, undefined, source);
             const create = t.mock.method(temporaryFiles, 'createWorkspace');
             let invoked = false;
             @http.controller()
@@ -270,18 +272,25 @@ describe('HTTP request lifecycle', () => {
                     invoked = true;
                     return { ok: true };
                 }
+
+                @http.POST('/mime')
+                mime(_body: HttpBody<{ file: FileUpload<{ allowedTypes: 'image/png' }> }>) {
+                    invoked = true;
+                    return { ok: true };
+                }
             }
             const app = createApp({ config: BaseAppConfig, controllers: [Controller] });
             try {
                 request.setDeadline(10_000);
                 const pending = app.http.request(request);
                 await ready;
-                request.setDeadline(20);
+                request.setDeadline(kind === 'MIME' ? 1 : 20);
                 const response = await pending;
                 assert.equal(response.statusCode, 500);
                 assert.equal(request.signal.reason.name, 'TimeoutError');
                 assert.equal(source.destroyed, true);
                 assert.equal(invoked, false);
+                assert.equal(create.mock.callCount(), multipart ? 1 : 0);
                 for (const call of create.mock.calls) {
                     const files = await call.result;
                     assert.ok(files);
