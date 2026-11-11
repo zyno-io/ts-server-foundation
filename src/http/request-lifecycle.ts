@@ -10,13 +10,13 @@ interface RequestLifecycle {
     detach?: () => void;
 }
 
-const lifecycles = new WeakMap<HttpRequest, RequestLifecycle>();
+const RequestLifecycleSymbol = Symbol.for('@zyno-io/ts-server-foundation:http-request-lifecycle');
 
 function lifecycle(request: HttpRequest): RequestLifecycle {
-    let state = lifecycles.get(request);
+    let state = request.store[RequestLifecycleSymbol] as RequestLifecycle | undefined;
     if (!state) {
         state = { controller: new AbortController(), completed: false };
-        lifecycles.set(request, state);
+        request.store[RequestLifecycleSymbol] = state;
     }
     return state;
 }
@@ -54,7 +54,7 @@ export function startRequestLifecycle(request: HttpRequest, response: HttpRespon
     // Testing request builders may be dispatched again after the previous dispatch has completed.
     if (state.completed) {
         state = { controller: new AbortController(), completed: false };
-        lifecycles.set(request, state);
+        request.store[RequestLifecycleSymbol] = state;
     }
     if (state.detach) throw new Error('HTTP request is already being handled');
     const disconnect = (message: string) => {
