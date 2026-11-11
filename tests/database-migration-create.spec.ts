@@ -1068,7 +1068,13 @@ describe('migration create comparison and DDL', () => {
         }
 
         const changedDb = new Map([
-            ['events', table('events', [...dbSchema.get('events')!.columns.slice(0, 2), col({ name: 'seenAt', type: 'datetime', defaultValue: 'legacy', ordinalPosition: 3 })])]
+            [
+                'events',
+                table('events', [
+                    ...dbSchema.get('events')!.columns.slice(0, 2),
+                    col({ name: 'seenAt', type: 'datetime', defaultValue: 'legacy', ordinalPosition: 3 })
+                ])
+            ]
         ]);
         const diff = compareSchemas(entitySchema, changedDb, 'postgres');
         assert.equal(diff.modifiedTables[0].modifiedColumns.find(modification => modification.name === 'seenAt')?.defaultChanged, true);
