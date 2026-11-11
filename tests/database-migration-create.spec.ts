@@ -1041,6 +1041,39 @@ describe('migration create comparison and DDL', () => {
         assert.match(ddl, /ALTER TABLE "settings" ALTER COLUMN "label" DROP DEFAULT/);
     });
 
+    it('matches entity default expressions against DB-reported defaults', () => {
+        const entitySchema = new Map([
+            [
+                'events',
+                table('events', [
+                    col({ name: 'id', type: 'int', primaryKey: true }),
+                    col({ name: 'createdAt', type: 'datetime', defaultExpression: 'CURRENT_TIMESTAMP', ordinalPosition: 2 }),
+                    col({ name: 'seenAt', type: 'datetime', defaultExpression: 'CURRENT_TIMESTAMP', ordinalPosition: 3 })
+                ])
+            ]
+        ]);
+        const dbSchema = new Map([
+            [
+                'events',
+                table('events', [
+                    col({ name: 'id', type: 'int', primaryKey: true }),
+                    col({ name: 'createdAt', type: 'datetime', defaultValue: 'CURRENT_TIMESTAMP', ordinalPosition: 2 }),
+                    col({ name: 'seenAt', type: 'datetime', defaultValue: 'now()', ordinalPosition: 3 })
+                ])
+            ]
+        ]);
+
+        for (const dialect of ['mysql', 'postgres'] as const) {
+            assert.equal(compareSchemas(entitySchema, dbSchema, dialect).modifiedTables.length, 0, dialect);
+        }
+
+        const changedDb = new Map([
+            ['events', table('events', [...dbSchema.get('events')!.columns.slice(0, 2), col({ name: 'seenAt', type: 'datetime', defaultValue: 'legacy', ordinalPosition: 3 })])]
+        ]);
+        const diff = compareSchemas(entitySchema, changedDb, 'postgres');
+        assert.equal(diff.modifiedTables[0].modifiedColumns.find(modification => modification.name === 'seenAt')?.defaultChanged, true);
+    });
+
     it('emits default and nullability changes for both dialects', () => {
         const entitySchema = new Map([
             [
