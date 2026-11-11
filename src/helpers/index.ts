@@ -8,6 +8,7 @@ export * from './data/serialization';
 export * from './data/transformer';
 export * from './io/package';
 export * from './io/stream';
+export * from './io/temporary-files';
 export * from './redis/availability';
 export * from './redis/cache';
 export * from './redis/broadcast';

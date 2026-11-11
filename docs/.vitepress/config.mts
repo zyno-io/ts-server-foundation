@@ -64,6 +64,7 @@ export default defineConfig({
                 text: 'Utilities',
                 items: [
                     { text: 'Helpers', link: '/helpers' },
+                    { text: 'Temporary Workspaces', link: '/temporary-files' },
                     { text: 'Telemetry', link: '/telemetry' },
                     { text: 'Testing', link: '/testing' },
                     { text: 'CLI Tools', link: '/cli' }

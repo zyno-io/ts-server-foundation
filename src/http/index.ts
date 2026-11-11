@@ -13,6 +13,7 @@ export * from './auth';
 export * from './base';
 export * from './context';
 export * from './uploads';
+export * from './temporary-workspace';
 export * from './request-logging';
 export * from './query-redaction';
 export * from './payload-redaction';

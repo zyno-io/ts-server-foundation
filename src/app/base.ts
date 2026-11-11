@@ -33,6 +33,7 @@ import {
     WorkerService
 } from '../services';
 import { MailService } from '../services/mail';
+import { TemporaryFileCleanupService } from '../services/temporary-files';
 import { sql } from '../database/sql';
 import { OpenApiController, dumpOpenApiSchema, shouldDumpOpenApiSchema, shouldExposeOpenApi } from '../openapi';
 import { MetricsController } from '../telemetry/otel/metrics.controller';
@@ -138,6 +139,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
             ...configProviders,
             ...createLoggerProviders(),
             MailService,
+            TemporaryFileCleanupService,
             ...(options.enableHealthcheck === false ? [] : [HealthcheckService]),
             ...(options.db ? [options.db, { provide: BaseDatabase, useExisting: options.db }] : []),
             ...(options.enableWorker

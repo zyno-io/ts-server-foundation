@@ -4464,6 +4464,6 @@ function makeMultipartBody(parts: Array<{ name: string; value: string | Buffer; 
 
 function listUploadTempDirs(): string[] {
     return readdirSync(tmpdir())
-        .filter(name => name.startsWith('tsf-upload-'))
+        .filter(name => name.startsWith('tsf-temp-v1-'))
         .sort();
 }

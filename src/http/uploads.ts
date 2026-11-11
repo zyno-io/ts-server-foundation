@@ -1,12 +1,11 @@
 import busboy from 'busboy';
 import { createWriteStream } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 import { uuid7 } from '../helpers';
+import { temporaryFiles, type TemporaryWorkspace } from '../helpers/io/temporary-files';
 import { HttpBadRequestError, HttpError, HttpPayloadTooLargeError, HttpUnsupportedMediaTypeError } from './errors';
 import { assertTopLevelFormFieldName, FormBodyBuilder } from './form-body';
 import { getRequestHeader } from './headers';
@@ -52,7 +51,7 @@ export interface ParsedMultipartBody {
 }
 
 const multipartJsonKey = '_payload';
-const UploadTempDirsSymbol = Symbol.for('@zyno-io/ts-server-foundation:http-upload-temp-dirs');
+const RequestTemporaryWorkspaceSymbol = Symbol.for('@zyno-io/ts-server-foundation:http-temporary-workspace');
 
 export function isMultipartRequest(request: HttpRequest): boolean {
     const contentType = getContentType(request);
@@ -86,8 +85,8 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
     const fields = new FormBodyBuilder(request.bodyLimits);
     const uploadedFiles: UploadedFiles = Object.create(null);
     const fileWrites: Array<Promise<{ name: string; upload: FileUpload }>> = [];
-    const uploadDir = await mkdtemp(join(tmpdir(), 'tsf-upload-'));
-    getUploadTempDirs(request).push(uploadDir);
+    const workspace = await getRequestTemporaryWorkspace(request);
+    const uploadDir = workspace.directory;
     const fileWriteErrors = new Set<unknown>();
     let multipartError: HttpError | undefined;
     let jsonPayload: Record<string, unknown> | undefined;
@@ -323,12 +322,12 @@ function loadFileTypeModule(): Promise<FileTypeModule> {
 }
 
 export async function cleanupUploadedFiles(request: HttpRequest): Promise<void> {
-    const uploadDirs = getUploadTempDirs(request);
-    if (!uploadDirs.length) return;
-
-    request.store[UploadTempDirsSymbol] = [];
+    const pending = request.store[RequestTemporaryWorkspaceSymbol] as Promise<TemporaryWorkspace> | undefined;
+    if (!pending) return;
+    delete request.store[RequestTemporaryWorkspaceSymbol];
     request.uploadedFiles = Object.create(null);
-    await Promise.all(uploadDirs.map(dir => rm(dir, { recursive: true, force: true })));
+    const workspace = await pending.catch(() => undefined);
+    await workspace?.dispose().catch(() => {});
 }
 
 function getContentType(request: HttpRequest): string {
@@ -376,10 +375,11 @@ function sanitizeFilename(filename: string): string {
     return filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'upload';
 }
 
-function getUploadTempDirs(request: HttpRequest): string[] {
-    const existing = request.store[UploadTempDirsSymbol];
-    if (Array.isArray(existing)) return existing as string[];
-    const dirs: string[] = [];
-    request.store[UploadTempDirsSymbol] = dirs;
-    return dirs;
+/** Shares the multipart directory and its router-owned cleanup, including derived/partial outputs. */
+export function getRequestTemporaryWorkspace(request: HttpRequest): Promise<TemporaryWorkspace> {
+    const existing = request.store[RequestTemporaryWorkspaceSymbol] as Promise<TemporaryWorkspace> | undefined;
+    if (existing) return existing;
+    const pending = temporaryFiles.createWorkspace();
+    request.store[RequestTemporaryWorkspaceSymbol] = pending;
+    return pending;
 }
