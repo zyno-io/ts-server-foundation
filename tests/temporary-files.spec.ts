@@ -197,7 +197,8 @@ describe('managed temporary files', () => {
             await orphans(root, [...Array<boolean>(110).fill(false), ...Array<boolean>(30).fill(true)]);
             const first = files.sweep();
             assert.equal(files.sweep(), first);
-            const passes = [await first];
+            const initial = await first;
+            const passes = [initial];
             for (let pass = 0; pass < 4; pass++) passes.push(await files.sweep());
             assert.ok(passes.every(pass => pass.scanned <= 100 && pass.removed <= 25));
             assert.equal(

@@ -80,7 +80,7 @@ describe('temporary workspace scopes', () => {
         });
     }
 
-    it('kills and awaits a writing process on response disconnect before the router releases its directory', async () => {
+    it('kills and awaits a writing process on response disconnect before the router releases its directory', async t => {
         let pid = 0;
         let directory = '';
         let closedBeforeReturn = false;
@@ -114,9 +114,11 @@ describe('temporary workspace scopes', () => {
         }
         const app = createApp({ config: BaseAppConfig, controllers: [Controller] });
         const response = new MemoryHttpResponse();
+        const end = t.mock.method(response, 'end');
         await app.router.handle(HttpRequest.GET('/work'), response);
         assert.ok(pid);
         assert.equal(closedBeforeReturn, true);
+        assert.equal(end.mock.callCount(), 0, 'the router must not try to finalize a disconnected response');
         assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
         await assert.rejects(access(directory), { code: 'ENOENT' });
         await app.stop();

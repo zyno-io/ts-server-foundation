@@ -4465,5 +4465,13 @@ function makeMultipartBody(parts: Array<{ name: string; value: string | Buffer; 
 function listUploadTempDirs(): string[] {
     return readdirSync(tmpdir())
         .filter(name => name.startsWith('tsf-temp-v1-'))
+        .filter(name => {
+            try {
+                const owner = JSON.parse(readFileSync(join(tmpdir(), name, 'owner.json'), 'utf8')) as { pid?: number };
+                return owner.pid === process.pid;
+            } catch {
+                return false;
+            }
+        })
         .sort();
 }
