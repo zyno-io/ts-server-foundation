@@ -22,6 +22,25 @@ import {
 import { getHttpRequestErrorState } from '../src/http/request-error-state';
 
 describe('HTTP request lifecycle', () => {
+    it('shares request cancellation and completion across module reloads', async () => {
+        const filename = require.resolve('../src/http/request-lifecycle');
+        const cached = require.cache[filename];
+        const request = HttpRequest.GET('/reload');
+        const signal = request.signal;
+        try {
+            delete require.cache[filename];
+            const reloaded = require(filename) as typeof import('../src/http/request-lifecycle');
+            assert.equal(reloaded.getRequestSignal(request), signal);
+            request.setDeadline(10);
+            await delay(20);
+            assert.equal(reloaded.getRequestSignal(request).aborted, true);
+            reloaded.finishRequestLifecycle(request);
+            await assert.rejects(request.workspace(), /completed/);
+        } finally {
+            if (cached) require.cache[filename] = cached;
+        }
+    });
+
     it('allocates lazily, shares concurrent workspace access, and refuses allocation after completion', async t => {
         const create = t.mock.method(temporaryFiles, 'createWorkspace');
         let directory = '';
