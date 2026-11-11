@@ -507,7 +507,7 @@ describe('reflection utility type metadata', () => {
             {
                 type: 'string',
                 format: 'uuid',
-                pattern: '^(?:urn:uuid:)?[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+                pattern: '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
             }
         ]);
     });
@@ -705,7 +705,7 @@ describe('reflection utility type metadata', () => {
         assert.deepStrictEqual(schema, {
             type: 'string',
             format: 'uuid',
-            pattern: '^(?:urn:uuid:)?[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
+            pattern: '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
         });
     });
 
