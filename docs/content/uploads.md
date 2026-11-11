@@ -1,5 +1,9 @@
 # Uploads
 
+Multipart files and their derived outputs share a managed request workspace. See
+[Temporary Workspaces](./temporary-files.md) for scoped files, response cancellation, process deadlines,
+and conservative recovery of safely replayable leftovers.
+
 Multipart upload parsing is integrated with the HTTP parameter resolver. File parts are accepted only when a route explicitly declares matching `FileUpload` fields through a `FileUpload` parameter or a `FileUpload` property in `HttpBody<T>`.
 
 ## File Parameters

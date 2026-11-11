@@ -226,7 +226,7 @@ export class HttpRouter {
             }
             const result = await (controller as any)[route.propertyKey](...args);
 
-            if (!response.writableEnded && !response.headersSent) this.writeResult(response, result, route);
+            if (!response.destroyed && !response.writableEnded && !response.headersSent) this.writeResult(response, result, route);
         } catch (error) {
             setHttpRequestErrorState(request, error, matchedRoute);
             this.writeError(response, error);

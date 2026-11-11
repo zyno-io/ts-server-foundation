@@ -6,3 +6,4 @@ export * from './mesh';
 export * from './mesh-client';
 export * from './mesh-link';
 export * from './worker';
+export * from './temporary-files';
