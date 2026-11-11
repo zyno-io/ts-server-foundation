@@ -58,6 +58,19 @@ async function orphans(root: string, replayable: boolean[]): Promise<string[]> {
 }
 
 describe('managed temporary files', () => {
+    it('does not dispose workspace siblings when removing a file named data', async () => {
+        await withFiles(async files => {
+            const workspace = await files.createWorkspace();
+            await writeFile(workspace.path(), 'finished input');
+            await writeFile(workspace.path('still-active'), 'another operation owns this');
+            await files.remove(workspace.path());
+            await access(workspace.path('still-active'));
+            await access(join(workspace.directory, 'owner.json'));
+            await assert.rejects(access(workspace.path()), { code: 'ENOENT' });
+            await workspace.dispose();
+        });
+    });
+
     it('does not mistake malformed or impossible Linux start metadata for an exited owner', { skip: process.platform !== 'linux' }, async () => {
         await withFiles(async files => {
             const path = await files.create(true);

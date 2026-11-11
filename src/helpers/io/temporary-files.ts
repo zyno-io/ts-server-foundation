@@ -25,6 +25,7 @@ export interface TemporaryFileCleanupResult {
 }
 
 interface Owner {
+    kind: 'file' | 'workspace';
     pid: number;
     host: string;
     boot: string | null;
@@ -69,10 +70,21 @@ export class TemporaryFiles {
     }
 
     async createWorkspace(options: TemporaryWorkspaceOptions = {}): Promise<TemporaryWorkspace> {
+        return this.allocateWorkspace(options, 'workspace');
+    }
+
+    private async allocateWorkspace(options: TemporaryWorkspaceOptions, kind: Owner['kind']): Promise<TemporaryWorkspace> {
         const directory = await mkdtemp(join(this.root, PREFIX));
         try {
             const identity = await processIdentity(process.pid);
-            const owner: Owner = { ...identity, pid: process.pid, host: hostname(), createdAt: Date.now(), replayable: options.replayable === true };
+            const owner: Owner = {
+                ...identity,
+                kind,
+                pid: process.pid,
+                host: hostname(),
+                createdAt: Date.now(),
+                replayable: options.replayable === true
+            };
             await writeFile(join(directory, 'owner.json'), JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
             return new TemporaryWorkspace(directory, this);
         } catch (error) {
@@ -93,7 +105,7 @@ export class TemporaryFiles {
 
     /** A reserved single-file workspace. Successful return transfers its lifetime to the caller. */
     async create(replayable = false): Promise<string> {
-        const workspace = await this.createWorkspace({ replayable });
+        const workspace = await this.allocateWorkspace({ replayable }, 'file');
         try {
             const file = await open(workspace.path(), 'wx', 0o600);
             await file.close();
@@ -129,7 +141,17 @@ export class TemporaryFiles {
     /** Explicit release by the caller, never a filename/age-based ownership inference. */
     async remove(path: string): Promise<void> {
         const directory = dirname(path);
-        if (basename(path) !== 'data' || !this.ownsDirectory(directory)) {
+        let singleFile = false;
+        if (basename(path) === 'data' && this.ownsDirectory(directory)) {
+            try {
+                const content = await readFile(join(directory, 'owner.json'), 'utf8');
+                const owner = JSON.parse(content) as Owner;
+                singleFile = owner.kind === 'file';
+            } catch {
+                /* Unknown workspace ownership never permits disposing its siblings. */
+            }
+        }
+        if (!singleFile) {
             await unlink(path).catch(error => {
                 if (!isMissing(error)) throw error;
             });
@@ -250,6 +272,7 @@ export class TemporaryFiles {
         const owner = JSON.parse(content) as Owner;
         if (
             !owner ||
+            !['file', 'workspace'].includes(owner.kind) ||
             !Number.isSafeInteger(owner.pid) ||
             owner.pid <= 0 ||
             owner.host !== hostname() ||

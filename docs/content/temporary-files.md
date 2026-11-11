@@ -91,7 +91,8 @@ try {
 `create(replayable?)` reserves a single `data` file with mode `0600`; `fromStream()` additionally waits
 for a pipeline and removes failed/aborted partial output. The creator owns failures before return;
 the caller owns the successfully returned path. `remove()` releases a managed single-file workspace.
-For an ordinary explicitly caller-owned path it only unlinks that path; this is never used to infer
+For an ordinary explicitly caller-owned path or a member of a multi-file workspace it only unlinks
+that path; a filename such as `data` never implies ownership of its siblings. This is never used to infer
 ownership during an automatic sweep. `createWorkspace()` similarly transfers a whole workspace until
 the caller calls `dispose()`. Keep a potentially sole-copy result until the domain's durable handoff
 has succeeded. Generic TSF code does not decide whether an object-store or database commit did that.
