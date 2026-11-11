@@ -29,7 +29,7 @@ export async function withRequestTemporaryWorkspace<T>(
     const onError = () => disconnected.abort(new Error('Client response failed'));
     response.on('close', onClose);
     response.on('error', onError);
-    const signals = [disconnected.signal];
+    const signals = [request.signal, disconnected.signal];
     if (options.signal) signals.push(options.signal);
     if (options.timeoutMs !== undefined) signals.push(AbortSignal.timeout(options.timeoutMs));
     const signal = AbortSignal.any(signals);

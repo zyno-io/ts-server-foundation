@@ -52,22 +52,17 @@ describe('temporary workspace scopes', () => {
             class Controller {
                 @http.POST('/convert')
                 async convert(body: HttpBody<{ file: FileUpload }>, request: HttpRequest, response: HttpResponse): Promise<void> {
-                    await withRequestTemporaryWorkspace(
-                        request,
-                        response,
-                        async (workspace, signal) => {
-                            directory = workspace.directory;
-                            assert.equal(dirname(body.file.path), directory);
-                            const content = await readFile(body.file.path, 'utf8');
-                            assert.equal(content, 'input');
-                            await writeFile(`${body.file.path}.partial`, 'unregistered output');
-                            const metadata = await readFile(join(directory, 'owner.json'), 'utf8');
-                            assert.equal(JSON.parse(metadata).replayable, true);
-                            if (fails) throw new Error('conversion failed');
-                            await pipeline(Readable.from(['converted']), response, { signal });
-                        },
-                        { replayable: true, timeoutMs: 5000 }
-                    );
+                    request.setDeadline(5000);
+                    const workspace = await request.workspace({ replayable: true });
+                    directory = workspace.directory;
+                    assert.equal(dirname(body.file.path), directory);
+                    const content = await readFile(body.file.path, 'utf8');
+                    assert.equal(content, 'input');
+                    await writeFile(`${body.file.path}.partial`, 'unregistered output');
+                    const metadata = await readFile(join(directory, 'owner.json'), 'utf8');
+                    assert.equal(JSON.parse(metadata).replayable, true);
+                    if (fails) throw new Error('conversion failed');
+                    await pipeline(Readable.from(['converted']), response, { signal: request.signal });
                 }
             }
             const app = createApp({ config: BaseAppConfig, controllers: [Controller] });
@@ -88,28 +83,27 @@ describe('temporary workspace scopes', () => {
         class Controller {
             @http.GET('/work')
             async work(request: HttpRequest, response: HttpResponse): Promise<void> {
-                await withRequestTemporaryWorkspace(request, response, async (workspace, signal) => {
-                    directory = workspace.directory;
-                    const same = await getRequestTemporaryWorkspace(request);
-                    assert.equal(same, workspace);
-                    const output = workspace.path('partial.raw');
-                    const script =
-                        "const fs=require('node:fs');fs.writeFileSync(process.argv[1],'partial');process.stdout.write('ready');setInterval(()=>fs.appendFileSync(process.argv[1],'more'),10)";
-                    const processWork = execProcess(process.execPath, ['-e', script, output], {
-                        signal,
-                        onSpawn(child) {
-                            pid = child.pid!;
-                            child.once('close', () => {
-                                closedBeforeReturn = true;
-                            });
-                            child.stdout?.once('data', () => {
-                                assert.equal(existsSync(output), true);
-                                response.destroy();
-                            });
-                        }
-                    });
-                    await processWork;
+                const workspace = await request.workspace();
+                directory = workspace.directory;
+                const same = await getRequestTemporaryWorkspace(request);
+                assert.equal(same, workspace);
+                const output = workspace.path('partial.raw');
+                const script =
+                    "const fs=require('node:fs');fs.writeFileSync(process.argv[1],'partial');process.stdout.write('ready');setInterval(()=>fs.appendFileSync(process.argv[1],'more'),10)";
+                const processWork = execProcess(process.execPath, ['-e', script, output], {
+                    signal: request.signal,
+                    onSpawn(child) {
+                        pid = child.pid!;
+                        child.once('close', () => {
+                            closedBeforeReturn = true;
+                        });
+                        child.stdout?.once('data', () => {
+                            assert.equal(existsSync(output), true);
+                            response.destroy();
+                        });
+                    }
                 });
+                await processWork;
             }
         }
         const app = createApp({ config: BaseAppConfig, controllers: [Controller] });
@@ -122,6 +116,26 @@ describe('temporary workspace scopes', () => {
         assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
         await assert.rejects(access(directory), { code: 'ENOENT' });
         await app.stop();
+    });
+
+    it('keeps the functional request helper compatible', async () => {
+        @http.controller()
+        class Controller {
+            @http.GET('/legacy')
+            async legacy(request: HttpRequest, response: HttpResponse): Promise<void> {
+                await withRequestTemporaryWorkspace(request, response, async (files, signal) => {
+                    await writeFile(files.path('legacy'), 'legacy output');
+                    await pipeline(Readable.from(['legacy']), response, { signal });
+                });
+            }
+        }
+        const app = createApp({ config: BaseAppConfig, controllers: [Controller] });
+        try {
+            const response = await app.http.request(HttpRequest.GET('/legacy'));
+            assert.equal(response.bodyString, 'legacy');
+        } finally {
+            await app.stop();
+        }
     });
 
     it('preserves a live workspace during a sweep and releases it through request cleanup', async () => {
