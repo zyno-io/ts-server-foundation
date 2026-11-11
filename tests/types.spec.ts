@@ -228,6 +228,20 @@ describe('custom types', () => {
         assert.equal(EMAIL_REGEX.test('test@sgnl24'), false);
     });
 
+    it('accepts only canonical UUID strings for UuidString', () => {
+        type UuidInput = { id: UuidString };
+        assert.equal(validate<UuidInput>({ id: '0190c6a4-7b2e-7c3d-8e4f-123456789abc' }).length, 0);
+        assert.equal(validate<UuidInput>({ id: '0190C6A4-7B2E-7C3D-8E4F-123456789ABC' }).length, 0);
+        assert.deepEqual(
+            validate<UuidInput>({ id: 'urn:uuid:0190c6a4-7b2e-7c3d-8e4f-123456789abc' }).map(error => error.path),
+            ['id']
+        );
+        assert.deepEqual(
+            validate<UuidInput>({ id: 'not-a-uuid' }).map(error => error.path),
+            ['id']
+        );
+    });
+
     it('injects metadata for validatedDeserialize calls', () => {
         const value = validatedDeserialize<{ platform: 'ios' | 'android'; features: string[] }>({
             platform: 'ios',

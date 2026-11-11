@@ -339,7 +339,9 @@ function defaultsMatch(a: ColumnSchema, b: ColumnSchema): boolean {
     const bHasDefault = b.defaultValue !== undefined || b.defaultExpression !== undefined;
     if (!aHasDefault || !bHasDefault) return aHasDefault === bHasDefault;
     if (a.defaultExpression || b.defaultExpression) {
-        return normalizeExpression(a.defaultExpression) === normalizeExpression(b.defaultExpression);
+        // DB readers can't tell an expression default from a string literal, so they report
+        // e.g. CURRENT_TIMESTAMP as defaultValue; compare it against the entity's expression.
+        return normalizeExpression(defaultAsExpression(a)) === normalizeExpression(defaultAsExpression(b));
     }
     if (a.defaultValue === b.defaultValue) return true;
     if (a.defaultValue === undefined || b.defaultValue === undefined) return false;
@@ -378,8 +380,18 @@ function normalizeAction(action: string | undefined): string {
     return (action || 'CASCADE').toUpperCase();
 }
 
+function defaultAsExpression(column: ColumnSchema): string | undefined {
+    if (column.defaultExpression) return column.defaultExpression;
+    return typeof column.defaultValue === 'string' ? column.defaultValue : undefined;
+}
+
+const EXPRESSION_ALIASES: Record<string, string> = {
+    NOW: 'CURRENT_TIMESTAMP'
+};
+
 function normalizeExpression(value: string | undefined): string | undefined {
-    return value?.trim().toUpperCase().replace(/\(\)/g, '');
+    const normalized = value?.trim().toUpperCase().replace(/\(\)/g, '');
+    return normalized === undefined ? undefined : (EXPRESSION_ALIASES[normalized] ?? normalized);
 }
 
 function arraysEqual<T>(a: readonly T[], b: readonly T[]): boolean {

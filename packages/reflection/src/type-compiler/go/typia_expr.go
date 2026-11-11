@@ -2171,7 +2171,7 @@ func typiaFormatPatternArg(format string) string {
 	case "email":
 		return "{kind: 10, literal: \"^[a-zA-Z0-9_+.-]+@[a-zA-Z0-9-.]+\\\\.[a-zA-Z]+$\"}"
 	case "uuid":
-		return "{kind: 10, literal: \"^(?:urn:uuid:)?[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$\"}"
+		return "{kind: 10, literal: \"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$\"}"
 	default:
 		return ""
 	}
