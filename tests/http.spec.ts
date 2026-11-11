@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { request as nodeHttpRequest, type ServerResponse } from 'node:http';
+import { request as nodeHttpRequest, type ClientRequest, type ServerResponse } from 'node:http';
 import { request as nodeHttpsRequest } from 'node:https';
 import { Socket, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -2607,6 +2607,74 @@ describe('http router', () => {
         );
         assert.equal(streamResponse.statusCode, 200);
         assert.deepStrictEqual(streamResponse.json, { sawFileName: true, sawFileBytes: true });
+    });
+
+    it('returns 413 over a real socket when a multipart file exceeds maxSize and the body arrives in many chunks', async () => {
+        @http.controller('/chunked-upload')
+        class ChunkedUploadController {
+            @http.POST()
+            upload(file: FileUpload<{ maxSize: '256KB' }>) {
+                return { size: file.size };
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [ChunkedUploadController] });
+        const server = await app.http.listen(0, '127.0.0.1');
+        const address = server.address() as AddressInfo;
+        try {
+            const multipart = makeMultipartBody([
+                { name: 'file', filename: 'big.bin', contentType: 'application/octet-stream', value: Buffer.alloc(4 * 1024 * 1024, 1) }
+            ]);
+            const chunkSize = 64 * 1024;
+            let clientRequest: ClientRequest | undefined;
+            const outcome = new Promise<{ statusCode: number; text: string }>((resolve, reject) => {
+                const request = nodeHttpRequest(
+                    {
+                        host: '127.0.0.1',
+                        port: address.port,
+                        path: '/chunked-upload',
+                        method: 'POST',
+                        agent: false,
+                        headers: { 'content-type': multipart.contentType, 'content-length': String(multipart.body.length), connection: 'close' }
+                    },
+                    response => {
+                        const chunks: Buffer[] = [];
+                        response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+                        response.on('end', () => resolve({ statusCode: response.statusCode ?? 0, text: Buffer.concat(chunks).toString() }));
+                        response.on('error', reject);
+                    }
+                );
+                request.on('error', reject);
+                clientRequest = request;
+                void (async () => {
+                    for (let offset = 0; offset < multipart.body.length; offset += chunkSize) {
+                        if (request.destroyed) return;
+                        if (!request.write(multipart.body.subarray(offset, offset + chunkSize))) await once(request, 'drain');
+                    }
+                    request.end();
+                })().catch(() => {});
+            });
+
+            let timer: NodeJS.Timeout | undefined;
+            const timeout = new Promise<never>((_, reject) => {
+                timer = setTimeout(() => reject(new Error('Request hung instead of returning 413')), 5000);
+            });
+            try {
+                const response = await Promise.race([outcome, timeout]);
+                assert.equal(response.statusCode, 413);
+                assert.deepStrictEqual(JSON.parse(response.text), { error: 'File field "file" is too large' });
+            } finally {
+                clearTimeout(timer);
+                // A hung request would otherwise keep app.stop() waiting on the open connection.
+                clientRequest?.destroy();
+                outcome.catch(() => {});
+            }
+        } finally {
+            // Force-close so a hung request fails the test instead of blocking shutdown.
+            server.closeAllConnections();
+            await app.stop();
+        }
     });
 
     it('accepts a bodyless multipart POST over Node HTTP', async () => {

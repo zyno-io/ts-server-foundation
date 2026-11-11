@@ -144,6 +144,9 @@ export async function parseMultipartRequest(request: HttpRequest, policy: Multip
         const write = writeMultipartFile(uploadDir, name, file, info, filePolicy).then(upload => ({ name, upload }));
         write.catch(error => {
             fileWriteErrors.add(error);
+            // A failed write destroys busboy's file stream, which leaves busboy waiting on it
+            // forever; abort the parser so the pipeline below rejects instead of hanging.
+            parser.destroy(error instanceof Error ? error : new Error(String(error)));
         });
         fileWrites.push(write);
     });
