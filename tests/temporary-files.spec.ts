@@ -58,6 +58,34 @@ async function orphans(root: string, replayable: boolean[]): Promise<string[]> {
 }
 
 describe('managed temporary files', () => {
+    it('does not mistake malformed or impossible Linux start metadata for an exited owner', { skip: process.platform !== 'linux' }, async () => {
+        await withFiles(async files => {
+            const path = await files.create(true);
+            await writeFile(path, 'live input');
+            const content = await readFile(join(dirname(path), 'owner.json'), 'utf8');
+            const owner = JSON.parse(content) as { start: string };
+            for (const start of ['not-a-process-start-tick', String(BigInt(owner.start) + 1n), `0${owner.start}`]) {
+                await age(path, { start });
+                const result = await files.sweep();
+                assert.equal(result.removed, 0);
+                await access(path);
+            }
+            await files.remove(path);
+        });
+    });
+
+    it('distinguishes a reused Linux PID by its recorded start tick', { skip: process.platform !== 'linux' }, async () => {
+        await withFiles(async files => {
+            const path = await files.create(true);
+            const content = await readFile(join(dirname(path), 'owner.json'), 'utf8');
+            const owner = JSON.parse(content) as { start: string };
+            await age(path, { start: String(BigInt(owner.start) - 1n) });
+            const result = await files.sweep();
+            assert.equal(result.removed, 1);
+            await assert.rejects(access(path), { code: 'ENOENT' });
+        });
+    });
+
     it('allows only the creating process to mark a workspace replayable', async () => {
         await withFiles(async files => {
             const workspace = await files.createWorkspace();

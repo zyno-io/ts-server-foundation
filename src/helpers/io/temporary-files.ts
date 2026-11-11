@@ -255,7 +255,7 @@ export class TemporaryFiles {
             owner.host !== hostname() ||
             typeof owner.replayable !== 'boolean' ||
             ![owner.boot, owner.namespace, owner.start].every(value => value === null || typeof value === 'string') ||
-            (process.platform === 'linux' && (!owner.boot || !owner.namespace || !owner.start)) ||
+            (process.platform === 'linux' && (!owner.boot || !owner.namespace || typeof owner.start !== 'string' || !/^\d+$/.test(owner.start))) ||
             typeof owner.createdAt !== 'number' ||
             !Number.isFinite(owner.createdAt) ||
             owner.createdAt < 0 ||
@@ -285,7 +285,9 @@ async function ownerExited(owner: Owner): Promise<boolean> {
         process.kill(owner.pid, 0);
         if (process.platform !== 'linux') return false;
         const identity = await processIdentity(owner.pid);
-        return typeof owner.start === 'string' && owner.start !== identity.start;
+        // A reused PID can only have a later start tick in this same boot/namespace.
+        // Future/impossible metadata is not proof that an owner exited.
+        return typeof owner.start === 'string' && identity.start !== null && BigInt(owner.start) < BigInt(identity.start);
     } catch (error) {
         return (error as NodeJS.ErrnoException).code === 'ESRCH';
     }
