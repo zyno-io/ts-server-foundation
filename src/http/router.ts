@@ -211,7 +211,7 @@ export class HttpRouter {
             if (route.bodyMode === 'stream') request.enableBodyGuardBypass();
             else await this.guardRequestBody(route, request);
             await this.runMiddlewares(route.middlewares, context, request, response, route.moduleId);
-            if (response.writableEnded) return response;
+            if (response.writableEnded || response.destroyed) return response;
             await this.dispatchWorkflow(httpWorkflow.onController, request, response, route);
             if (response.writableEnded) return response;
 
@@ -229,7 +229,7 @@ export class HttpRouter {
             }
             const result = await (controller as any)[route.propertyKey](...args);
 
-            if (!response.destroyed && !response.writableEnded && !response.headersSent) this.writeResult(response, result, route);
+            if (!response.destroyed && !response.writableEnded && !response.headersSent) await this.writeResult(response, result, route);
         } catch (error) {
             if (!isRequestDisconnectError(request, error)) {
                 setHttpRequestErrorState(request, error, matchedRoute);
@@ -260,13 +260,13 @@ export class HttpRouter {
         await this.dispatchWorkflow(httpWorkflow.onRoute, request, response);
         if (response.writableEnded) return;
         await this.runMiddlewares(fallback.middlewares, context, request, response);
-        if (response.writableEnded) return;
+        if (response.writableEnded || response.destroyed) return;
         await this.dispatchWorkflow(httpWorkflow.onController, request, response);
         if (response.writableEnded) return;
 
         const controller = this.container.get(FallbackController, context);
         const result = await controller.handle(request, response);
-        if (!response.destroyed && !response.writableEnded && !response.headersSent) this.writeResult(response, result);
+        if (!response.destroyed && !response.writableEnded && !response.headersSent) await this.writeResult(response, result);
     }
 
     private createRequestContext(request: HttpRequest, response: HttpResponse): RequestContext {
@@ -339,8 +339,8 @@ export class HttpRouter {
             const result = isHttpMiddlewareClass(input)
                 ? await this.resolveMiddleware(input, context, moduleId).handle(request, response)
                 : await input(request, response);
-            if (isHttpResponseResult(result)) result.writeTo(response);
-            if (response.writableEnded) return;
+            if (isHttpResponseResult(result)) await result.writeTo(response);
+            if (response.writableEnded || response.destroyed) return;
         }
     }
 
@@ -589,9 +589,9 @@ export class HttpRouter {
         return allFiles.length === 1 ? allFiles[0] : undefined;
     }
 
-    private writeResult(response: HttpResponse, result: unknown, route?: HttpRoutePlan): void {
+    private async writeResult(response: HttpResponse, result: unknown, route?: HttpRoutePlan): Promise<void> {
         if (isHttpResponseResult(result)) {
-            result.writeTo(response);
+            await result.writeTo(response);
             return;
         }
 

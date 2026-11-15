@@ -193,6 +193,61 @@ export class HttpRequest extends Readable {
         return this.remoteAddress;
     }
 
+    /**
+     * Builds a WHATWG `Request` for handing this request to a fetch-style handler, such as an SDK
+     * transport. The body is read through the guarded reader, so it is decoded and size-limited;
+     * `content-encoding`, `content-length`, and hop-by-hop headers are dropped to match. The URL
+     * origin comes from the `host` header, or `x-forwarded-proto`/`x-forwarded-host` when proxy
+     * headers are trusted. The request's cancellation signal is forwarded.
+     */
+    async toWebRequest(): Promise<Request> {
+        let url: URL;
+        try {
+            // Only the path and query come from the request target: resolving it against the origin
+            // would let a target such as `//other.host/x` replace the host.
+            const { pathname, search } = new URL(this.url, 'http://localhost');
+            url = new URL(this.getWebOrigin());
+            // The host header must be a bare authority; anything else could alter the path or carry credentials.
+            if (url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new Error('Invalid host');
+            url.pathname = pathname;
+            url.search = search;
+            url.hash = '';
+        } catch {
+            throw new HttpBadRequestError('Invalid request URL');
+        }
+
+        // Routes that bypass the body guard (HttpRequestStream) forward the raw, still-encoded body.
+        const raw = this.bodyGuardBypass;
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(this.headers)) {
+            if (webRequestHopByHopHeaders.has(name)) continue;
+            if (!raw && name === 'content-encoding') continue;
+            headers.set(name, value);
+        }
+
+        if (this.method === 'GET' || this.method === 'HEAD') return new Request(url, { method: this.method, headers, signal: this.signal });
+        if (this.body === undefined && this.streamAttached && !this.bodyRead) {
+            // e.g. a multipart body already parsed into uploaded files by the router.
+            throw new HttpUnsupportedMediaTypeError('This request body cannot be forwarded');
+        }
+        if (raw && this.body === undefined && this.bodyStream) {
+            return new Request(url, {
+                method: this.method,
+                headers,
+                body: Readable.toWeb(this.createBodyReadStream()) as unknown as ReadableStream<Uint8Array>,
+                duplex: 'half',
+                signal: this.signal
+            } as RequestInit);
+        }
+        const body = await this.readBodyBuffer();
+        return new Request(url, {
+            method: this.method,
+            headers,
+            body: body.length ? body : undefined,
+            signal: this.signal
+        });
+    }
+
     async readBodyText(): Promise<string> {
         const body = await this.readBodyBuffer();
         return body.toString();
@@ -292,6 +347,14 @@ export class HttpRequest extends Readable {
         this.attachReadable(this.createBodyReadStream());
     }
 
+    private getWebOrigin(): string {
+        const forwardedProto = this.trustProxyHeaders ? firstForwardedValue(this.headers['x-forwarded-proto']) : undefined;
+        const forwardedHost = this.trustProxyHeaders ? firstForwardedValue(this.headers['x-forwarded-host']) : undefined;
+        const encrypted = 'encrypted' in this.socket && this.socket.encrypted === true;
+        const protocol = forwardedProto === 'https' || forwardedProto === 'http' ? forwardedProto : encrypted ? 'https' : 'http';
+        return `${protocol}://${forwardedHost ?? this.headers.host ?? 'localhost'}`;
+    }
+
     private attachReadable(stream: Readable): void {
         if (this.attachedStream) {
             this.attachedStream.resume();
@@ -336,6 +399,22 @@ export class HttpRequest extends Readable {
 }
 
 export class HttpRequestStream extends HttpRequest {}
+
+// Hop-by-hop headers, plus content-length, which the forwarded body determines.
+const webRequestHopByHopHeaders = new Set([
+    'connection',
+    'content-length',
+    'keep-alive',
+    'proxy-connection',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade'
+]);
+
+function firstForwardedValue(value: string | undefined): string | undefined {
+    return value?.split(',')[0]?.trim().toLowerCase() || undefined;
+}
 
 function createHeaderStore(headers: HttpHeaderInput, request: HttpRequest): HttpRequestHeaders {
     const store = ((nextHeaders: HttpHeaderInput) => {

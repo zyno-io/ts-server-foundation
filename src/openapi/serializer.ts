@@ -8,7 +8,7 @@ import { stringify } from 'yaml';
 import { getPackageJson } from '../helpers';
 import type { BaseAppConfig } from '../app/config';
 import { Env } from '../env';
-import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult } from '../http';
+import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult, WebResponseResult } from '../http';
 import type { HttpRouteParameterPlan, HttpRoutePlan } from '../http';
 import { getOpenApiResponses, isOpenApiIgnored } from './decorators';
 import {
@@ -421,7 +421,7 @@ function buildInferredResponses(route: HttpRoutePlan, schemaContext: ReturnType<
         };
     }
 
-    if (isClassType(returnType, RawResponseResult)) {
+    if (isClassType(returnType, RawResponseResult) || isClassType(returnType, WebResponseResult)) {
         return {
             default: {
                 description: 'OK'
