@@ -1619,6 +1619,52 @@ describe('http router', () => {
         }
     });
 
+    it('adds configured headers to static files and the SPA fallback', async () => {
+        const staticDir = mkdtempSync(join(tmpdir(), 'tsf-static-headers-'));
+        writeFileSync(join(staticDir, 'index.html'), '<main>Index</main>');
+        writeFileSync(join(staticDir, 'app.js'), 'console.log(1);');
+
+        try {
+            process.env.APP_ENV = 'test';
+            const fixed = createApp({ staticFiles: { directory: staticDir, headers: { 'x-frame-options': 'DENY' } } });
+            assert.equal((await fixed.request(HttpRequest.GET('/app.js'))).getHeader('x-frame-options'), 'DENY');
+
+            const seen: { path: string; fallback: boolean; contentType: string }[] = [];
+            const app = createApp({
+                staticFiles: {
+                    directory: staticDir,
+                    headers: ({ path, fallback, contentType }) => {
+                        seen.push({ path, fallback, contentType });
+                        return contentType.startsWith('text/html')
+                            ? { 'content-security-policy': "frame-ancestors 'none'", 'content-length': '1', 'content-type': 'text/plain' }
+                            : undefined;
+                    }
+                }
+            });
+            const root = await app.request(HttpRequest.GET('/'));
+            const spa = await app.request(HttpRequest.GET('/client/route'));
+            const script = await app.request(HttpRequest.GET('/app.js'));
+
+            for (const html of [root, spa]) {
+                assert.equal(html.getHeader('content-security-policy'), "frame-ancestors 'none'");
+                assert.match(String(html.getHeader('content-type')), /^text\/html/);
+                assert.equal(html.getHeader('content-length'), String(Buffer.byteLength('<main>Index</main>')));
+                assert.equal(html.text, '<main>Index</main>');
+            }
+            assert.equal(script.getHeader('content-security-policy'), undefined);
+            assert.deepStrictEqual(
+                seen.map(entry => [entry.path, entry.fallback]),
+                [
+                    ['/', false],
+                    ['/client/route', true],
+                    ['/app.js', false]
+                ]
+            );
+        } finally {
+            rmSync(staticDir, { recursive: true, force: true });
+        }
+    });
+
     it('uses a request-scoped fallback controller after static assets and concrete routes', async () => {
         const staticDir = mkdtempSync(join(tmpdir(), 'tsf-fallback-controller-'));
         mkdirSync(join(staticDir, 'assets'));
