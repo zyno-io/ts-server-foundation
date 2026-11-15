@@ -4,10 +4,24 @@ import { extname, resolve, sep } from 'node:path';
 import type { HttpRequest } from './request';
 import type { HttpResponse } from './response';
 
+export interface StaticFileHeaderContext {
+    /** The decoded request path. */
+    path: string;
+    /** The absolute path of the file being served. */
+    file: string;
+    contentType: string;
+    /** True when the SPA fallback is served because no concrete file matched. */
+    fallback: boolean;
+}
+
+/** Extra response headers for static files: a fixed set, or a function of the file being served. */
+export type StaticFileHeaders = Record<string, string> | ((context: StaticFileHeaderContext) => Record<string, string> | undefined);
+
 export interface StaticFilesOptions {
     directory?: string;
     index?: string;
     spaFallback?: string | false;
+    headers?: StaticFileHeaders;
 }
 
 export interface ResolvedStaticFilesOptions {
@@ -15,6 +29,7 @@ export interface ResolvedStaticFilesOptions {
     index: string;
     spaFallback?: string;
     serveIndex: boolean;
+    headers?: StaticFileHeaders;
 }
 
 export function resolveStaticFilesOptions(
@@ -32,7 +47,8 @@ export function resolveStaticFilesOptions(
         directory: config.directory ?? 'static',
         index,
         spaFallback,
-        serveIndex: !fallbackControllerEnabled
+        serveIndex: !fallbackControllerEnabled,
+        headers: config.headers
     };
 }
 
@@ -55,6 +71,7 @@ export async function serveStaticFile(
 
     const relative = path === '/' ? options.index : path.replace(/^\/+/, '');
     let file = resolve(base, relative);
+    let fallback = false;
     if (!isPathInside(base, file)) {
         response.writeHead(400, { 'content-type': 'text/plain' });
         response.end('Bad request');
@@ -68,6 +85,7 @@ export async function serveStaticFile(
         if (!isNotFoundError(error)) throw error;
         if (!options.spaFallback) return undefined;
         file = resolve(base, options.spaFallback);
+        fallback = true;
         if (!isPathInside(base, file)) {
             response.writeHead(400, { 'content-type': 'text/plain' });
             response.end('Bad request');
@@ -83,9 +101,12 @@ export async function serveStaticFile(
         throw error;
     }
 
+    const contentType = getStaticContentType(file);
+    const extraHeaders = typeof options.headers === 'function' ? options.headers({ path, file, contentType, fallback }) : options.headers;
     response.writeHead(200, {
+        ...extraHeaders,
         'content-length': String(body.length),
-        'content-type': getStaticContentType(file)
+        'content-type': contentType
     });
     response.end(body);
     return response;

@@ -512,6 +512,15 @@ const app = createApp({
 
 Set `spaFallback: false` to serve only concrete files and leave a missing path to the normal router `404` flow.
 
+`headers` adds response headers to static files, as a fixed object or a function of `{ path, file, contentType, fallback }` that returns headers or `undefined`. `content-type` and `content-length` are always set by TSF. Static files are served before routing, so route middleware and workflows can't add headers to them; use this instead, for example to stop the SPA being framed:
+
+```typescript
+staticFiles: {
+    headers: ({ contentType }) =>
+        contentType.startsWith('text/html') ? { 'content-security-policy': "frame-ancestors 'none'", 'x-frame-options': 'DENY' } : undefined;
+}
+```
+
 ## Fallback Controllers And SSR
 
 An app can register one request-scoped fallback controller for frontend SSR or another default HTML response. It receives every unmatched `GET` or `HEAD` request, including nested paths, without declaring a route for each frontend page:
