@@ -1,4 +1,4 @@
-import type { ServerResponse } from 'node:http';
+import { validateHeaderName, validateHeaderValue, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
 
@@ -257,7 +257,7 @@ function normalizeWriteHeadHeaders(headers?: HttpWriteHeadHeaders): [string, str
 }
 
 export interface HttpResponseResult {
-    writeTo(response: HttpResponse): void;
+    writeTo(response: HttpResponse): void | Promise<void>;
 }
 
 export class JsonResponseResult implements HttpResponseResult {
@@ -311,6 +311,102 @@ export class RawResponseResult implements HttpResponseResult {
     }
 }
 
+/**
+ * Writes a WHATWG `Response` (e.g. from a fetch-style handler) to the HTTP response: status, headers
+ * (including repeated `set-cookie`), and the body, streamed chunk by chunk. The router awaits the
+ * body, so request cleanup runs after it finishes. Status and headers are applied with the first
+ * body chunk, so a body that fails before then becomes an ordinary 500; event streams commit their
+ * headers immediately. A failure after the first chunk aborts the connection and is logged as a 500.
+ * A client disconnect cancels the source.
+ */
+export class WebResponseResult implements HttpResponseResult {
+    constructor(readonly response: Response) {}
+
+    async writeTo(target: HttpResponse): Promise<void> {
+        const source = this.response;
+        const headers = collectWebResponseHeaders(source.headers);
+        let started = false;
+        const start = () => {
+            if (started) return;
+            started = true;
+            target.statusCode = source.status;
+            for (const [name, value] of headers) target.setHeader(name, value);
+        };
+
+        if (!source.body) {
+            start();
+            target.end();
+            return;
+        }
+        if (target.destroyed) {
+            await source.body.cancel().catch(() => undefined);
+            return;
+        }
+
+        const reader = source.body.getReader();
+        const cancel = () => void reader.cancel().catch(() => undefined);
+        target.once('close', cancel);
+        try {
+            if (/^text\/event-stream(?:\s*;|$)/i.test(source.headers.get('content-type') ?? '')) {
+                start();
+                target.flushHeaders();
+            }
+            for (;;) {
+                const { done, value } = await reader.read();
+                // A client disconnect destroys the response; 'close' may not have fired yet, so cancel here too.
+                if (target.destroyed) {
+                    cancel();
+                    return;
+                }
+                if (done) break;
+                start();
+                if (!target.write(value)) await drainOrClose(target);
+            }
+            start();
+            target.end();
+        } catch (error) {
+            if (target.destroyed) return;
+            if (started) {
+                // Headers may already be on the wire: abort so the client sees a truncated body, and
+                // report a 500 so the failure is logged.
+                target.statusCode = 500;
+                // The error is rethrown to the router; the emitted 'error' event must not go unhandled.
+                target.on('error', () => undefined);
+                target.destroy(error instanceof Error ? error : new Error(String(error)));
+            }
+            throw error;
+        } finally {
+            target.off('close', cancel);
+        }
+    }
+}
+
+function collectWebResponseHeaders(source: Headers): [string, string | string[]][] {
+    const headers: [string, string | string[]][] = [];
+    for (const [name, value] of source) {
+        if (name === 'set-cookie') continue;
+        validateHeaderName(name);
+        validateHeaderValue(name, value);
+        headers.push([name, value]);
+    }
+    const cookies = source.getSetCookie();
+    for (const cookie of cookies) validateHeaderValue('set-cookie', cookie);
+    if (cookies.length) headers.push(['set-cookie', cookies]);
+    return headers;
+}
+
+function drainOrClose(target: HttpResponse): Promise<void> {
+    return new Promise(resolve => {
+        const done = () => {
+            target.off('drain', done);
+            target.off('close', done);
+            resolve();
+        };
+        target.once('drain', done);
+        target.once('close', done);
+    });
+}
+
 export function jsonResponse(value: unknown, statusCode = 200): JsonResponseResult {
     return new JsonResponseResult(value, statusCode);
 }
@@ -338,6 +434,10 @@ export function rawResponse(
     } = {}
 ): RawResponseResult {
     return new RawResponseResult(body, options);
+}
+
+export function webResponse(response: Response): WebResponseResult {
+    return new WebResponseResult(response);
 }
 
 export function isHttpResponseResult(value: unknown): value is HttpResponseResult {

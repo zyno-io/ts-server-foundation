@@ -390,6 +390,27 @@ return emptyResponse(204);
 return rawResponse(Buffer.from('data'), { contentType: 'application/octet-stream' });
 ```
 
+### Fetch-Style Handlers
+
+Libraries built on WHATWG `Request`/`Response` (SDK transports, auth libraries, webhook verifiers) can be mounted on a route with `request.toWebRequest()` and `webResponse()`:
+
+```typescript
+import { HttpRequest, http, webResponse } from '@zyno-io/ts-server-foundation';
+
+@http.controller('/rpc')
+class RpcController {
+    @http.POST()
+    async handle(request: HttpRequest) {
+        const response = await handler.fetch(await request.toWebRequest());
+        return webResponse(response);
+    }
+}
+```
+
+`toWebRequest()` reads the body through the guarded reader, so it is decoded and size-limited, and drops `content-encoding`, `content-length`, and hop-by-hop headers to match. On `HttpRequestStream` routes the body bypasses the guard: it is forwarded as a raw stream with its `content-encoding` intact. Only the path and query come from the request target; the origin comes from the `host` header, or from `x-forwarded-proto`/`x-forwarded-host` when `USE_REAL_IP_HEADER` trusts proxy headers. The request's cancellation `signal` is forwarded. A body the router has already consumed, such as a multipart body parsed into uploads, cannot be forwarded and returns `415`.
+
+`webResponse()` copies the status and headers, including repeated `set-cookie`, and streams the body with backpressure. The router awaits the stream, so request cleanup runs after the body finishes. Status and headers are applied with the first body chunk, so a body that fails before then becomes an ordinary `500`; `text/event-stream` responses commit their headers immediately. A failure after the first chunk aborts the connection and is logged as a `500`. A client disconnect cancels the source stream and ends the middleware chain.
+
 The package also exports `OkResponse`, `RedirectResponse`, `EmptyResponse`, and `AnyResponse` return-type helpers. OpenAPI-specific response typing is documented in [OpenAPI](./openapi.md).
 
 For imperative responses, `setHeader()` and `getHeader()` are case-insensitive, `headers` exposes comma-joined values, and `rawHeaders` preserves array values. `writeHead()` accepts an object or header tuples and sets the status before data is written. Call `response.write()`/`response.end()` to stream raw output; after a Node response commits, `headersSent` becomes true and later header changes are ignored. The in-memory response buffers writes and does not model header commitment, so `headersSent` remains false there. A handler that starts a Node stream owns ending it.
