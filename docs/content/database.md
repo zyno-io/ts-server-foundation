@@ -40,6 +40,16 @@ Factory config accepts the native driver pool config plus TSF options:
 
 When pool options are omitted, connection settings are read from config/environment keys such as `MYSQL_HOST`, `MYSQL_DATABASE`, `PG_HOST`, and `PG_DATABASE`.
 
+## MySQL Connection Recovery
+
+MySQL pool acquisition retries transient network failures and explicit WSREP readiness rejections automatically. A dead connection is destroyed and replaced before retrying. The schedule starts at 100 ms and caps at 500 ms, with at most 44 retries and a 21-second retry scheduling budget. Native connection and query timeouts still apply to each attempt.
+
+The query layer also retries a lost response for the first plain, read-only `SELECT` on a fresh lease. Classification is conservative: supported read-only builtins and bound parameters are accepted; locking reads, variables, unknown/stored functions, SQL comments, quoted literals, and multiple statements are excluded. Before sending the first non-replayable statement, the native connection is pinged so a stale lease can be replaced without sending the application write. Explicit WSREP readiness rejections can retry the first statement because the server rejected its execution.
+
+Recovery applies equally to HTTP requests, BullMQ jobs, CLI workers, and background scanners using the foundation database. Intermediate failures stay inside the driver and emit only optional debug messages through `DEBUG=tsf:mysql:recovery`, without SQL or bindings. Only the final failure reaches the caller and normal error reporting.
+
+A connection with a successful statement has session state that cannot safely be reconstructed. Active transactions, lost write responses, and uncertain commits therefore surface immediately after discarding the failed connection. Transaction callbacks and entire jobs are never replayed automatically; they may include external side effects. Applications that need retries across those boundaries must establish their own idempotency policy. A pool closed by shutdown stays closed.
+
 ## Entities
 
 Registered database entity classes must extend `BaseEntity`; database construction rejects other classes. `BaseEntity` supplies the active-record helpers and lets the database bind each entity class to its owning database.
