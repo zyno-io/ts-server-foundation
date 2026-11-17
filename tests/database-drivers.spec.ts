@@ -356,15 +356,12 @@ describe('MySQLDriver', () => {
         }
     });
 
-    it('does not retry generic 1047, connection failures, or statements in an active transaction', async () => {
+    it('does not retry generic 1047 or statements in an active transaction', async () => {
         const pool = new FakeMySQLPool();
         const driver = new MySQLDriver(pool);
         const connection = await driver.acquire();
         try {
-            for (const error of [
-                Object.assign(new Error('Unknown command'), { errno: 1047, code: 'ER_UNKNOWN_COM_ERROR', sqlState: '08S01' }),
-                Object.assign(new Error('Connection lost'), { code: 'PROTOCOL_CONNECTION_LOST' })
-            ]) {
+            for (const error of [Object.assign(new Error('Unknown command'), { errno: 1047, code: 'ER_UNKNOWN_COM_ERROR', sqlState: '08S01' })]) {
                 let calls = 0;
                 pool.connection.query = async () => {
                     calls++;

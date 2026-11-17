@@ -172,6 +172,11 @@ class SharedMySQLSessionConnection implements MySQLConnectionLike {
         return [result, undefined];
     }
 
+    destroy(): void {
+        this.released = true;
+        this.peer.close();
+    }
+
     async release(): Promise<void> {
         if (this.released) return;
         this.released = true;
