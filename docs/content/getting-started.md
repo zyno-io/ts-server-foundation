@@ -180,6 +180,8 @@ Run custom commands through the same compiled entrypoint:
 node . receipts:requeue
 ```
 
+`execute()` may return a number: a nonzero integer becomes the process exit code, so scripts and Jobs see the failure. A thrown error also sets exit code 1. Returning nothing or `0` leaves the exit code unchanged.
+
 Long-running commands can extend `CliServiceCommand`. These commands start an HTTP listener with only the enabled `/healthz`, `/readyz`, `/livez`, and `/metrics` controllers; application, OpenAPI, and DevConsole controllers are not exposed by the service process.
 
 ## `createApp()` Options
