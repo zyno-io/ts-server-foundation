@@ -47,6 +47,7 @@ import type { RenderedSql } from '../src';
 class FakeConnection implements DriverConnection {
     released = false;
     commands: string[] = [];
+    private transactionDeadlockError?: Error;
 
     constructor(private driver: FakeDriver) {}
 
@@ -61,7 +62,7 @@ class FakeConnection implements DriverConnection {
     async execute(query: RenderedSql): Promise<ExecuteResult> {
         this.commands.push('execute');
         this.driver.executes.push(query);
-        if (this.driver.executeError) throw this.driver.executeError;
+        this.throwDriverError(this.driver.executeError);
         return this.driver.executeResult;
     }
 
@@ -71,11 +72,16 @@ class FakeConnection implements DriverConnection {
 
     async commit(): Promise<void> {
         this.commands.push('commit');
-        if (this.driver.commitError) throw this.driver.commitError;
+        this.throwDriverError(this.driver.commitError);
     }
 
     async rollback(): Promise<void> {
         this.commands.push('rollback');
+        this.transactionDeadlockError = undefined;
+    }
+
+    getTransactionDeadlockError(): unknown {
+        return this.transactionDeadlockError;
     }
 
     async savepoint(name: string): Promise<void> {
@@ -90,6 +96,12 @@ class FakeConnection implements DriverConnection {
         this.commands.push('release');
         this.released = true;
     }
+
+    private throwDriverError(error: unknown): void {
+        if (!error) return;
+        if (error === this.driver.deadlockError) this.transactionDeadlockError = this.driver.deadlockError;
+        throw error;
+    }
 }
 
 class FakeDriver implements DatabaseDriver {
@@ -100,6 +112,7 @@ class FakeDriver implements DatabaseDriver {
     executeError?: unknown;
     queryError?: unknown;
     commitError?: unknown;
+    deadlockError?: Error;
     queries: RenderedSql[] = [];
     executes: RenderedSql[] = [];
     connections: FakeConnection[] = [];
@@ -2719,6 +2732,164 @@ describe('database query builder and persistence', () => {
         assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'rollback', 'release']);
     });
 
+    it('replays all writes after a MySQL deadlock during the final flush', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User]);
+        const deadlock = Object.assign(new Error('Deadlock found when trying to get lock'), { errno: 1213, sqlState: '40001' });
+        driver.deadlockError = deadlock;
+        const user = createEntity(User, { name: 'Alice', email: null });
+        const sessions: DatabaseSession[] = [];
+        const committedAttempts: number[] = [];
+
+        const result = await db.transaction(
+            async session => {
+                sessions.push(session);
+                const attempt = sessions.length;
+                if (attempt > 1) assert.equal(driver.connections[0].released, true);
+                assert.equal(hasEntitySnapshot(user), false);
+                assert.equal(user.id, 0);
+                driver.executeError = undefined;
+                driver.executeResult = { affectedRows: 1, insertId: 10 * attempt };
+                session.add(user);
+                await session.flush();
+                session.add(createEntity(User, { name: 'Bob', email: null }));
+                session.addPostCommitHook(async () => {
+                    committedAttempts.push(attempt);
+                });
+                if (attempt === 1) driver.executeError = deadlock;
+                return user.id;
+            },
+            { retryDeadlocks: true }
+        );
+
+        assert.equal(result, 20);
+        assert.equal(sessions.length, 2);
+        assert.notEqual(sessions[0], sessions[1]);
+        assert.deepStrictEqual(committedAttempts, [2]);
+        assert.deepStrictEqual(
+            driver.executes.map(query => query.bindings),
+            [
+                ['Alice', null],
+                ['Bob', null],
+                ['Alice', null],
+                ['Bob', null]
+            ]
+        );
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [
+                ['begin', 'execute', 'execute', 'rollback', 'release'],
+                ['begin', 'execute', 'execute', 'commit', 'release']
+            ]
+        );
+    });
+
+    it('retains pending updates to an existing entity across a deadlock at commit', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [User], { retryDeadlocks: true });
+        driver.deadlockError = Object.assign(new Error('deadlock at commit'), { code: 'ER_LOCK_DEADLOCK' });
+        const user = createEntity(User, { id: 7, name: 'Before', email: null });
+        markEntityClean(user);
+        user.name = 'After';
+        let attempts = 0;
+
+        await db.withTransaction(undefined, async session => {
+            driver.commitError = ++attempts === 1 ? driver.deadlockError : undefined;
+            session.add(user);
+        });
+
+        assert.equal(attempts, 2);
+        assert.deepStrictEqual(
+            driver.executes.map(query => query.bindings),
+            [
+                ['After', 7],
+                ['After', 7]
+            ]
+        );
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [
+                ['begin', 'execute', 'commit', 'rollback', 'release'],
+                ['begin', 'execute', 'commit', 'release']
+            ]
+        );
+    });
+
+    it('stops retrying persistent MySQL deadlocks after three attempts', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [], { retryDeadlocks: true });
+        const errors: Error[] = [];
+
+        await assert.rejects(
+            db.transaction(async session => {
+                const error = Object.assign(new Error(`deadlock ${errors.length + 1}`), { errno: 1213, sqlState: '40001' });
+                errors.push(error);
+                driver.deadlockError = error;
+                driver.executeError = error;
+                await session.rawExecuteUnsafe('UPDATE users SET name = ? WHERE id = ?', ['A', 1]);
+            }),
+            error => error === errors[2]
+        );
+
+        assert.equal(errors.length, 3);
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [
+                ['begin', 'execute', 'rollback', 'release'],
+                ['begin', 'execute', 'rollback', 'release'],
+                ['begin', 'execute', 'rollback', 'release']
+            ]
+        );
+    });
+
+    it('does not retry by default or when a transaction opts out of its database default', async () => {
+        const cases = [
+            { database: undefined, transaction: undefined },
+            { database: true, transaction: false }
+        ] as const;
+
+        for (const { database, transaction } of cases) {
+            const driver = new FakeDriver('mysql');
+            const db = new BaseDatabase(driver, [], { retryDeadlocks: database });
+            const error = Object.assign(new Error('deadlock on first write'), { errno: 1213 });
+            driver.deadlockError = error;
+            driver.executeError = error;
+            await assert.rejects(
+                db.transaction(
+                    async session => {
+                        await session.rawExecuteUnsafe('UPDATE users SET name = ? WHERE id = ?', ['A', 1]);
+                    },
+                    { retryDeadlocks: transaction }
+                ),
+                caught => caught === error
+            );
+            assert.deepStrictEqual(
+                driver.connections.map(connection => connection.commands),
+                [['begin', 'execute', 'rollback', 'release']]
+            );
+        }
+    });
+
+    it('does not replay a committed transaction when a post-commit hook throws a deadlock', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [], { retryDeadlocks: true });
+        const error = Object.assign(new Error('deadlock in a post-commit hook'), { errno: 1213 });
+
+        await assert.rejects(
+            db.transaction(async session => {
+                session.addPostCommitHook(async () => {
+                    throw error;
+                });
+            }),
+            caught => caught === error
+        );
+
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [['begin', 'commit', 'release']]
+        );
+    });
+
     it('skips post-commit hooks when a transaction rolls back after flush', async () => {
         const driver = new FakeDriver('mysql');
         const db = new BaseDatabase(driver, [User]);
@@ -2783,6 +2954,31 @@ describe('database query builder and persistence', () => {
         });
 
         assert.deepStrictEqual(driver.connections[0].commands, ['begin', 'savepoint:sp1', 'execute', 'commit', 'release']);
+    });
+
+    it('replays the entire MySQL transaction on a deadlock inside a savepoint', async () => {
+        const driver = new FakeDriver('mysql');
+        const db = new BaseDatabase(driver, [], { retryDeadlocks: true });
+        driver.deadlockError = Object.assign(new Error('deadlock in savepoint'), { errno: 1213 });
+        let attempts = 0;
+
+        await db.transaction(async session => {
+            driver.executeError = ++attempts === 1 ? driver.deadlockError : undefined;
+            await db.withTransaction(session, async joinedSession => {
+                assert.equal(joinedSession, session);
+                await joinedSession.withSavepoint('sp1', async () => {
+                    await joinedSession.rawExecuteUnsafe('UPDATE users SET name = ? WHERE id = ?', ['A', 1]);
+                });
+            });
+        });
+
+        assert.deepStrictEqual(
+            driver.connections.map(connection => connection.commands),
+            [
+                ['begin', 'savepoint:sp1', 'execute', 'rollback', 'release'],
+                ['begin', 'savepoint:sp1', 'execute', 'commit', 'release']
+            ]
+        );
     });
 
     it('rolls back failed savepoint work and keeps the outer transaction alive', async () => {

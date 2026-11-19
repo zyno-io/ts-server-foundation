@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { deserialize, isReflectedType, type ReceiveType, type Type } from '../reflection';
 
@@ -29,6 +30,13 @@ export type MutexKey = any;
 export interface BaseDatabaseOptions {
     enableLocksTable?: boolean;
     lockTableName?: string;
+    /** Default for MySQL transactions. Disabled when omitted. */
+    retryDeadlocks?: boolean;
+}
+
+export interface DatabaseTransactionOptions {
+    /** Overrides the database default for the transaction opened by this call. */
+    retryDeadlocks?: boolean;
 }
 
 export interface DatabaseQueryObservation {
@@ -51,6 +59,7 @@ let databaseQueryObservationId = 1;
 const mysqlLocksTableInit = new WeakMap<BaseDatabase, Promise<void>>();
 const mysqlLocksTableInitByName = new Map<string, Promise<void>>();
 const databaseConnectionScope = new AsyncLocalStorage<Map<BaseDatabase, DriverConnection>>();
+const MYSQL_DEADLOCK_RETRY_DELAYS_MS = [10, 20];
 
 export function registerDatabaseQueryObserver(observer: DatabaseQueryObserver): () => void {
     databaseQueryObservers.add(observer);
@@ -72,7 +81,8 @@ export class BaseDatabase {
         this.entityRegistry = entities;
         this.options = {
             enableLocksTable: options.enableLocksTable ?? false,
-            lockTableName: options.lockTableName ?? '_locks'
+            lockTableName: options.lockTableName ?? '_locks',
+            retryDeadlocks: options.retryDeadlocks ?? false
         };
         this.schema = new DatabaseSchemaBuilder(this);
         for (const entity of entities) bindEntityDatabase(entity, this);
@@ -82,39 +92,54 @@ export class BaseDatabase {
         return new QueryBuilder(this, Entity, session);
     }
 
-    async transaction<T>(worker: (session: DatabaseSession) => Promise<T>): Promise<T> {
+    /**
+     * When enabled, MySQL deadlock recovery can run the worker and pre-commit hooks up to three times.
+     * Rebuild mutable input on each attempt and defer external effects to post-commit hooks or make them idempotent.
+     */
+    async transaction<T>(worker: (session: DatabaseSession) => Promise<T>, options: DatabaseTransactionOptions = {}): Promise<T> {
         // MySQL session locks require a small lock table. Ensure it is ready
         // before reserving a transaction connection: concurrent first-use
         // transactions otherwise fill a bounded pool while the initializer is
         // itself waiting to acquire a connection.
         await ensureMySQLLocksTable(this);
-        const connection = await this.driver.acquire();
-        const session = new DatabaseSession(this, connection, { transactional: true });
-        let transactionStarted = false;
-        let committed = false;
-        try {
-            await connection.begin();
-            transactionStarted = true;
-            const result = await worker(session);
-            await session.waitForPendingOperations();
-            await session.flush();
-            await session.runPreCommitHooks();
-            await this.runMutationInterceptors(session);
-            await session.waitForPendingOperations();
-            await session.flush();
-            await connection.commit();
-            committed = true;
-            await session.runPostCommitHooks();
-            return result;
-        } catch (error) {
-            const normalizedError = normalizeDatabaseError(error);
-            if (transactionStarted && !committed) await connection.rollback();
-            throw normalizedError;
-        } finally {
-            await connection.release();
+        const retryDeadlocks = this.driver.dialect === 'mysql' && (options.retryDeadlocks ?? this.options.retryDeadlocks);
+        for (let attempt = 0; ; attempt++) {
+            const retryDelay = retryDeadlocks ? MYSQL_DEADLOCK_RETRY_DELAYS_MS[attempt] : undefined;
+            const connection = await this.driver.acquire();
+            const session = new DatabaseSession(this, connection, { transactional: true, restoreEntitiesOnRetry: retryDelay !== undefined });
+            let transactionStarted = false;
+            let committed = false;
+            try {
+                await connection.begin();
+                transactionStarted = true;
+                const result = await worker(session);
+                await session.waitForPendingOperations();
+                await session.flush();
+                await session.runPreCommitHooks();
+                await this.runMutationInterceptors(session);
+                await session.waitForPendingOperations();
+                await session.flush();
+                await connection.commit();
+                committed = true;
+                await session.runPostCommitHooks();
+                return result;
+            } catch (error) {
+                if (!transactionStarted || committed) throw normalizeDatabaseError(error);
+                const deadlock = connection.getTransactionDeadlockError?.();
+                const shouldRetry = retryDelay !== undefined && deadlock !== undefined && error === deadlock;
+                if (shouldRetry) await session.settlePendingOperations();
+                await connection.rollback();
+                if (!shouldRetry) throw normalizeDatabaseError(error);
+                session.restoreEntityStatesForRetry();
+            } finally {
+                await connection.release();
+            }
+            // Release the pool slot before backing off, with jitter to stagger competing attempts.
+            await sleep(retryDelay * (1 + Math.random()));
         }
     }
 
+    /** A supplied session participates in the retry policy of its enclosing transaction. */
     async withTransaction<T>(session: DatabaseSession | undefined, worker: (session: DatabaseSession) => Promise<T>): Promise<T> {
         return session ? worker(session) : this.transaction(worker);
     }
@@ -335,6 +360,7 @@ export class BaseDatabase {
                   ? sql`INSERT INTO ${sql.identifier(metadata.tableName)} DEFAULT VALUES`
                   : sql`INSERT INTO ${sql.identifier(metadata.tableName)} () VALUES ()`;
 
+            session?.recordEntityStateForRetry(entity);
             if (metadata.primaryKey.autoIncrement && this.driver.dialect === 'postgres') {
                 const row = await this.rawFindOne<Record<string, unknown>>(
                     sql`${insertQuery} RETURNING ${sql.identifier(metadata.primaryKey.columnName)}`,
@@ -360,6 +386,7 @@ export class BaseDatabase {
                 column => !column.primaryKey && !column.generated && Object.hasOwn(dirtyDetails, column.propertyName)
             );
             if (dirty.length) {
+                session?.recordEntityStateForRetry(entity);
                 before = observed
                     ? await this.loadEntitySnapshotForUpdate(metadata, fields, session)
                     : (getEntityOriginal(entity) as Record<string, unknown>);

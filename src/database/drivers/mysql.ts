@@ -72,6 +72,7 @@ class MySQLConnection implements DriverConnection {
     // SQL. Once a statement succeeds, its state cannot safely be reconstructed.
     private statementSucceeded = false;
     private failure?: unknown;
+    private deadlockError?: unknown;
     private released = false;
     private pending: Promise<unknown> = Promise.resolve();
 
@@ -116,10 +117,17 @@ class MySQLConnection implements DriverConnection {
     }
 
     async rollback(): Promise<void> {
-        // Destroying a failed connection rolls its transaction back server-side.
-        if (this.failure) return;
-        await this.runStatement(connection => connection.query('ROLLBACK'));
-        this.transactional = false;
+        await this.enqueueCommand(async () => {
+            // Destroying a failed connection rolls its transaction back server-side.
+            if (this.failure) return;
+            await this.runStatementNow(connection => connection.query('ROLLBACK'));
+            this.deadlockError = undefined;
+            this.transactional = false;
+        });
+    }
+
+    getTransactionDeadlockError(): unknown {
+        return this.deadlockError;
     }
 
     async savepoint(name: string): Promise<void> {
@@ -149,9 +157,16 @@ class MySQLConnection implements DriverConnection {
         replayLostResponse = false,
         replayRejection = true
     ): Promise<T> {
+        return this.enqueueCommand(() => {
+            if (this.deadlockError) throw this.deadlockError;
+            return this.runStatementNow(operation, replayLostResponse, replayRejection);
+        });
+    }
+
+    private enqueueCommand<T>(command: () => Promise<T>): Promise<T> {
         // mysql2 serializes commands too. Keep replacement and state tracking in
         // the same order when a scoped connection is used with Promise.all().
-        const result = this.pending.then(() => this.runStatementNow(operation, replayLostResponse, replayRejection));
+        const result = this.pending.then(command);
         this.pending = result.then(
             () => undefined,
             () => undefined
@@ -189,6 +204,9 @@ class MySQLConnection implements DriverConnection {
                     this.statementSucceeded = true;
                     return result;
                 } catch (error) {
+                    // InnoDB rolled back the whole transaction. Later queued work
+                    // would run in autocommit if sent to this connection.
+                    if (this.transactional && isMySQLDeadlockError(error)) this.deadlockError = error;
                     const disconnected = isTransientMySQLConnectionError(error);
                     const rejected = isWsrepNotReady(error);
                     retryable = canReplace && ((rejected && replayRejection) || (disconnected && (replayLostResponse || !sent)));
@@ -209,6 +227,12 @@ class MySQLConnection implements DriverConnection {
 
 function isMySQLPoolLike(value: PoolOptions | MySQLPoolLike): value is MySQLPoolLike {
     return typeof (value as MySQLPoolLike).getConnection === 'function' && typeof (value as MySQLPoolLike).end === 'function';
+}
+
+function isMySQLDeadlockError(error: unknown): boolean {
+    if (typeof error !== 'object' || error === null) return false;
+    const { code, errno } = error as { code?: unknown; errno?: unknown };
+    return code === 'ER_LOCK_DEADLOCK' || errno === 1213;
 }
 
 function quoteSavepoint(name: string): string {
