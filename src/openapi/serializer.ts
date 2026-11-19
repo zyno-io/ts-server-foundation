@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { STATUS_CODES } from 'node:http';
 import { join } from 'node:path';
@@ -62,15 +63,34 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
 
     const operationIds = new Set<string>();
     const securitySchemes: Record<string, unknown> = {};
-    for (const route of app.router.listRoutes()) {
-        if (!options.includeInternal && isInternalRoute(route.path)) continue;
-        if (isOpenApiIgnored(route.controllerClass, route.propertyKey)) continue;
+    const routes = app.router
+        .listRoutes()
+        .filter(
+            route =>
+                (options.includeInternal || !isInternalRoute(route.path)) &&
+                !isOpenApiIgnored(route.controllerClass, route.propertyKey) &&
+                toOpenApiMethod(route.method)
+        );
+    const handlerRoutes = new Map<HttpRoutePlan['controllerClass'], Map<string | symbol, Map<string, number>>>();
+    for (const route of routes) {
+        const methods = handlerRoutes.get(route.controllerClass) ?? new Map();
+        handlerRoutes.set(route.controllerClass, methods);
+        const verbs = methods.get(route.propertyKey) ?? new Map();
+        methods.set(route.propertyKey, verbs);
+        verbs.set(route.method, (verbs.get(route.method) ?? 0) + 1);
+    }
+    for (const route of routes) {
         const method = toOpenApiMethod(route.method);
         if (!method) continue;
         const path = toOpenApiPath(route.path);
         document.paths[path] ??= {};
         if (document.paths[path][method]) throw new Error(`Duplicate OpenAPI route ${method} ${path}`);
         const operation = buildOperation(route, schemaContext);
+        if ((handlerRoutes.get(route.controllerClass)?.get(route.propertyKey)?.get(route.method) ?? 0) > 1) {
+            const suffix = createHash('sha256').update(path).digest('hex').slice(0, 12);
+            operation.operationId += '_' + suffix;
+        }
+
         if (operationIds.has(operation.operationId)) throw new Error(`Duplicate OpenAPI operationId ${operation.operationId}`);
         operationIds.add(operation.operationId);
         document.paths[path][method] = operation;

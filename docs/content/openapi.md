@@ -179,16 +179,16 @@ An operation with a required `ParsedJwt` parameter receives `security: [{ bearer
 
 `openapi.operation()` sets the details of an operation that TSF cannot work out from your code, or that you want to pin down yourself. Every option is optional:
 
-| Option            | What it does                                                                                                                                                         |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `operationId`     | A fixed name for the operation. Generated clients usually turn it into a function name. Methods only.                                                                |
-| `tags`            | Group names for the operation. Replaces the tag derived from the controller class name.                                                                              |
-| `summary`         | A short title. Replaces the first paragraph of the method's JSDoc.                                                                                                   |
-| `description`     | Longer explanatory text. It is never taken from JSDoc.                                                                                                               |
-| `deprecated`      | `true` marks the operation as deprecated.                                                                                                                            |
-| `security`        | The credentials a caller must send, as a list of security scheme names. `[]` means none are needed. It cannot drop the bearer requirement of a required `ParsedJwt`. |
-| `securitySchemes` | Definitions for the scheme names used in `security`. They are added to `components.securitySchemes`.                                                                 |
-| `extensions`      | Custom `x-` fields copied onto the operation, for example for a client generator.                                                                                    |
+| Option            | What it does                                                                                                                                                          |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `operationId`     | A fixed name for the operation. Generated clients usually turn it into a function name. Methods only. [Same-verb path aliases](#same-verb-path-aliases) add a suffix. |
+| `tags`            | Group names for the operation. Replaces the tag derived from the controller class name.                                                                               |
+| `summary`         | A short title. Replaces the first paragraph of the method's JSDoc.                                                                                                    |
+| `description`     | Longer explanatory text. It is never taken from JSDoc.                                                                                                                |
+| `deprecated`      | `true` marks the operation as deprecated.                                                                                                                             |
+| `security`        | The credentials a caller must send, as a list of security scheme names. `[]` means none are needed. It cannot drop the bearer requirement of a required `ParsedJwt`.  |
+| `securitySchemes` | Definitions for the scheme names used in `security`. They are added to `components.securitySchemes`.                                                                  |
+| `extensions`      | Custom `x-` fields copied onto the operation, for example for a client generator.                                                                                     |
 
 Anything you leave out keeps its usual value: the operation ID and tag are derived from the controller and method names, the summary comes from the first JSDoc paragraph, and a required `ParsedJwt` parameter adds the bearer requirement.
 
@@ -340,21 +340,60 @@ These fail as soon as the decorator runs, when the controller file is loaded:
 
 These fail when the document is generated, which includes `serializeOpenApiSchema()`, the `/openapi.*` routes, and `openapi:generate`:
 
-| Error                                                                       | Cause                                                                                                        |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `Duplicate OpenAPI operationId <id>`                                        | Two operations end up with the same ID, whether explicit or derived.                                         |
-| `Duplicate OpenAPI route <method> <path>`                                   | Two routes have the same HTTP method and path.                                                               |
-| `Conflicting OpenAPI security scheme <name>`                                | The same scheme name is defined twice with different definitions.                                            |
-| `Conflicting OpenAPI security scheme bearerAuth; this name is reserved…`    | An operation uses `bearerAuth` and a `bearerAuth` definition differs from the built-in JWT Bearer scheme.    |
-| `Undefined OpenAPI security scheme <name>`                                  | `security` uses a scheme name that has no definition.                                                        |
-| `OpenAPI security metadata cannot remove required ParsedJwt authentication` | A route with a required `ParsedJwt` has `security` that is empty or has an alternative without `bearerAuth`. |
-| `OpenAPI response mediaType/examples require a response body type`          | `openapi.response<T>()` sets `mediaType` or `examples` while `T` is `void` or `undefined`.                   |
+| Error                                                                       | Cause                                                                                                                                        |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Duplicate OpenAPI operationId <id>`                                        | Two operations end up with the same ID, whether explicit or derived. [Same-verb aliases](#same-verb-path-aliases) of one handler are exempt. |
+| `Duplicate OpenAPI route <method> <path>`                                   | Two routes have the same HTTP method and path.                                                                                               |
+| `Conflicting OpenAPI security scheme <name>`                                | The same scheme name is defined twice with different definitions.                                                                            |
+| `Conflicting OpenAPI security scheme bearerAuth; this name is reserved…`    | An operation uses `bearerAuth` and a `bearerAuth` definition differs from the built-in JWT Bearer scheme.                                    |
+| `Undefined OpenAPI security scheme <name>`                                  | `security` uses a scheme name that has no definition.                                                                                        |
+| `OpenAPI security metadata cannot remove required ParsedJwt authentication` | A route with a required `ParsedJwt` has `security` that is empty or has an alternative without `bearerAuth`.                                 |
+| `OpenAPI response mediaType/examples require a response body type`          | `openapi.response<T>()` sets `mediaType` or `examples` while `T` is `void` or `undefined`.                                                   |
 
 Defining the same scheme more than once with identical contents is fine.
 
 ## Operation IDs
 
-Without an explicit `operationId`, operation IDs are camel-cased from the lowercase HTTP method, the controller class name without its `Controller` suffix, and the handler method name. Keep all three stable when generated clients depend on operation IDs, or set `operationId` with [`openapi.operation()`](#operation-metadata) so that renaming a class or method does not change the ID. An explicit ID is used exactly as written.
+Without an explicit `operationId`, operation IDs are camel-cased from the lowercase HTTP method, the controller class name without its `Controller` suffix, and the handler method name. Keep all three stable when generated clients depend on operation IDs, or set `operationId` with [`openapi.operation()`](#operation-metadata) so that renaming a class or method does not change the ID. An explicit ID is used exactly as written, unless the handler has [same-verb path aliases](#same-verb-path-aliases).
+
+### Same-Verb Path Aliases
+
+One handler can be registered on several paths with the same HTTP method. Each path is a separate OpenAPI operation, and all of them would otherwise share one ID. TSF appends a suffix to every one of those operations:
+
+```text
+<operationId>_<first 12 hex characters of SHA-256(path)>
+```
+
+The hash input is the path as it appears in the document, with `{name}` parameters, for example `/contacts/{id}`.
+
+- The suffix is added to explicit and derived IDs alike. An explicit `operationId` on an aliased handler is a prefix, not the final ID.
+- Every alias gets a suffix, including the first one registered. No path keeps the bare ID.
+- A suffix depends only on its own path, so it does not change with registration order or with the other aliases.
+- A handler with one path per HTTP method keeps its ID unchanged. That includes a handler registered under different methods, such as `GET` and `POST`, with one path each.
+- Only routes that appear in the document are counted. A handler with one public path and one [internal](#internal-routes) path is not aliased unless `includeInternal` is set.
+
+```yaml
+paths:
+    /contacts:
+        get:
+            operationId: listContacts_<hash of /contacts>
+    /people:
+        get:
+            operationId: listContacts_<hash of /people>
+```
+
+Adding or removing an alias can change that handler's IDs:
+
+| Change                                   | Effect on the handler's operation IDs                 |
+| ---------------------------------------- | ----------------------------------------------------- |
+| Second same-verb path added              | The original path's ID gains a suffix.                |
+| Alias removed, one path left             | The remaining path's ID loses its suffix.             |
+| Alias added or removed, two or more left | The other aliases keep their IDs.                     |
+| Alias path changed                       | That alias gets a new suffix. The others keep theirs. |
+
+Treat the first two as breaking changes for generated clients. Other handlers are unaffected.
+
+Suffixes only separate the aliases of one handler. Two different handlers that end up with the same ID are still rejected with `Duplicate OpenAPI operationId <id>`; see [Checks](#checks).
 
 ## Internal Routes
 

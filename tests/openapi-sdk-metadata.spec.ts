@@ -114,3 +114,30 @@ test('undefined metadata retains reflected summaries and bodyless responses reje
     }
     assert.throws(() => serializeOpenApiSchema(createApp({ controllers: [EmptyController], enableHealthcheck: false })), /require a response body/);
 });
+
+test('same-verb aliases get stable distinct IDs without affecting ordinary operations', () => {
+    @http.controller('/aliases')
+    class AliasController {
+        @openapi.operation({ operationId: 'readAlias' })
+        @http.GET('/one')
+        @http.GET('/two')
+        read(): string {
+            return '';
+        }
+
+        @openapi.operation({ operationId: 'readSingle' })
+        @http.GET('/single')
+        single(): string {
+            return '';
+        }
+    }
+    const app = createApp({ controllers: [AliasController], enableHealthcheck: false });
+    const spec = serializeOpenApiSchema(app);
+    const one = spec.paths['/aliases/one']?.get?.operationId;
+    const two = spec.paths['/aliases/two']?.get?.operationId;
+    assert.match(one ?? '', /^readAlias_[a-f0-9]{12}$/);
+    assert.match(two ?? '', /^readAlias_[a-f0-9]{12}$/);
+    assert.notEqual(one, two);
+    assert.equal(spec.paths['/aliases/single']?.get?.operationId, 'readSingle');
+    assert.equal(serializeOpenApiSchema(app).paths['/aliases/one']?.get?.operationId, one);
+});
