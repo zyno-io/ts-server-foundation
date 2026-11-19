@@ -7,12 +7,14 @@ import type { EntityClass } from './metadata';
 import type { QueryBuilder } from './query';
 import type { SqlInput } from './sql';
 import type { MutexKey } from './database';
-import { getEntitySnapshot, hasEntitySnapshot, markEntityClean, markEntityNew } from './entity';
+import { getEntityOriginal, getEntitySnapshot, hasEntitySnapshot, markEntityClean, markEntityNew } from './entity';
 import type { EntityMetadata } from './metadata';
 import { DatabaseMutationAccumulator, type DatabaseEntitySnapshot, type DatabaseMutation, type DatabaseQueryMutation } from './mutation';
 
 export interface DatabaseSessionOptions {
     transactional?: boolean;
+    /** @internal */
+    restoreEntitiesOnRetry?: boolean;
 }
 
 interface TransactionStateEntry {
@@ -131,6 +133,7 @@ export class DatabaseSession {
     private flushing = false;
     private autoFlushSuppressionDepth = 0;
     private readonly mutationAccumulator = new DatabaseMutationAccumulator();
+    private readonly retryEntityStates = new Map<object, { fields: DatabaseEntitySnapshot; original?: DatabaseEntitySnapshot }>();
     private insertedEntities = new Map<object, InsertedEntityState>();
     private readonly touchedEntities = new Map<object, EntityMetadata>();
     private readonly transactionStates = new Map<object, TransactionStateEntry>();
@@ -307,8 +310,28 @@ export class DatabaseSession {
         try {
             return await worker();
         } catch (error) {
+            // InnoDB has already rolled back the transaction and discarded its savepoints.
+            if (this.connection?.getTransactionDeadlockError?.() !== undefined) throw error;
             await this.rollbackToSavepoint(name);
             throw error;
+        }
+    }
+
+    /** @internal */
+    recordEntityStateForRetry(entity: object): void {
+        if (!this.options.restoreEntitiesOnRetry || this.retryEntityStates.has(entity)) return;
+        this.retryEntityStates.set(entity, {
+            fields: getEntitySnapshot(entity),
+            original: hasEntitySnapshot(entity) ? (getEntityOriginal(entity) as DatabaseEntitySnapshot) : undefined
+        });
+    }
+
+    /** @internal */
+    restoreEntityStatesForRetry(): void {
+        for (const [entity, { fields, original }] of this.retryEntityStates) {
+            Object.assign(entity, fields);
+            if (original) markEntityClean(entity, original);
+            else markEntityNew(entity);
         }
     }
 
@@ -519,7 +542,8 @@ export class DatabaseSession {
         if (!this.isTransactional || !this.connection) throw new Error(`Database ${feature} require an active transaction`);
     }
 
-    private async settlePendingOperations(): Promise<void> {
+    /** @internal */
+    async settlePendingOperations(): Promise<void> {
         while (this.pendingOperations.size) await Promise.allSettled(this.pendingOperations);
     }
 }

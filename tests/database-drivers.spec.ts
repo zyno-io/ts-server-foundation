@@ -356,6 +356,101 @@ describe('MySQLDriver', () => {
         }
     });
 
+    it('keeps queued statements off the wire after a transaction deadlock', async () => {
+        const pool = new FakeMySQLPool();
+        const driver = new MySQLDriver(pool);
+        const connection = await driver.acquire();
+        const error = Object.assign(new Error('deadlock'), { code: 'ER_LOCK_DEADLOCK', errno: 1213, sqlState: '40001' });
+        const originalExecute = pool.connection.execute.bind(pool.connection);
+        pool.connection.execute = async <T>(sql: string, values?: unknown[]) => {
+            const result = await originalExecute<T>(sql, values);
+            if (sql === 'UPDATE deadlocked_row') throw error;
+            return result;
+        };
+
+        await connection.begin();
+        const failed = connection.execute({ sql: 'UPDATE deadlocked_row', bindings: [] });
+        const queued = connection.execute({ sql: 'UPDATE queued_row', bindings: [] });
+        await Promise.all([assert.rejects(failed, error), assert.rejects(queued, error)]);
+        await assert.rejects(connection.commit(), error);
+        await connection.rollback();
+        await connection.begin();
+        await connection.execute({ sql: 'UPDATE queued_row', bindings: [] });
+        await connection.commit();
+        await connection.release();
+        await driver.close();
+
+        assert.deepStrictEqual(
+            pool.connection.calls.map(call => call.sql),
+            ['START TRANSACTION', 'UPDATE deadlocked_row', 'ROLLBACK', 'START TRANSACTION', 'UPDATE queued_row', 'COMMIT']
+        );
+    });
+
+    it('replays the transaction after a deadlock reported by its MySQL connection', async () => {
+        const pool = new FakeMySQLPool();
+        const driver = new MySQLDriver(pool);
+        const db = new BaseDatabase(driver);
+        const error = Object.assign(new Error('deadlock'), { code: 'ER_LOCK_DEADLOCK', errno: 1213, sqlState: '40001' });
+        const originalExecute = pool.connection.execute.bind(pool.connection);
+        let writes = 0;
+        pool.connection.execute = async <T>(sql: string, values?: unknown[]) => {
+            const result = await originalExecute<T>(sql, values);
+            if (++writes === 1) throw error;
+            return result;
+        };
+
+        await db.transaction(
+            async session => {
+                await session.rawExecuteUnsafe('UPDATE users SET name = ? WHERE id = ?', ['A', 1]);
+            },
+            { retryDeadlocks: true }
+        );
+        await driver.close();
+
+        assert.deepStrictEqual(
+            pool.connection.calls.map(call => call.sql),
+            [
+                'START TRANSACTION',
+                'UPDATE users SET name = ? WHERE id = ?',
+                'ROLLBACK',
+                'START TRANSACTION',
+                'UPDATE users SET name = ? WHERE id = ?',
+                'COMMIT'
+            ]
+        );
+    });
+
+    it('propagates lock timeouts, other serialization errors, and deadlocks from another connection', async () => {
+        const cases = [
+            { inTransaction: true, code: 'ER_LOCK_WAIT_TIMEOUT', errno: 1205, sqlState: 'HY000' },
+            { inTransaction: true, code: 'ER_SIGNAL_EXCEPTION', errno: 1644, sqlState: '40001' },
+            { inTransaction: false, code: 'ER_LOCK_DEADLOCK', errno: 1213, sqlState: '40001' }
+        ];
+
+        for (const { inTransaction, ...details } of cases) {
+            const pool = new FakeMySQLPool();
+            const driver = new MySQLDriver(pool);
+            const db = new BaseDatabase(driver, [], { retryDeadlocks: true });
+            const error = Object.assign(new Error(details.code), details);
+            pool.connection.execute = async () => {
+                throw error;
+            };
+
+            await assert.rejects(
+                db.transaction(async session => {
+                    await db.rawExecuteUnsafe('UPDATE users SET name = ? WHERE id = ?', ['A', 1], inTransaction ? session : undefined);
+                }),
+                caught => caught === error
+            );
+            await driver.close();
+
+            assert.deepStrictEqual(
+                pool.connection.calls.map(call => call.sql),
+                ['START TRANSACTION', 'ROLLBACK']
+            );
+        }
+    });
+
     it('does not retry generic 1047 or statements in an active transaction', async () => {
         const pool = new FakeMySQLPool();
         const driver = new MySQLDriver(pool);

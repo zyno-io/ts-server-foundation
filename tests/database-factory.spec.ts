@@ -90,12 +90,13 @@ describe('database factories', () => {
         process.env.APP_ENV = 'test';
         process.env.DB_ADAPTER = 'mysql';
 
-        const DB = createDatabase({ enableLocksTable: true, lockTableName: '_custom_locks' }, [FactoryUser]);
+        const DB = createDatabase({ enableLocksTable: true, lockTableName: '_custom_locks', retryDeadlocks: true }, [FactoryUser]);
         const db = new DB();
 
         assert.equal(db.driver.dialect, 'mysql');
         assert.equal(db.options.enableLocksTable, true);
         assert.equal(db.options.lockTableName, '_custom_locks');
+        assert.equal(db.options.retryDeadlocks, true);
     });
 
     it('rejects shared factory calls without DB_ADAPTER', () => {

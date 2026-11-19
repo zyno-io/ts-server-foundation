@@ -18,6 +18,8 @@ export interface DriverConnection {
     begin(): Promise<void>;
     commit(): Promise<void>;
     rollback(): Promise<void>;
+    /** Returns the driver error that aborted the current transaction due to a deadlock, if any. */
+    getTransactionDeadlockError?(): unknown;
     savepoint(name: string): Promise<void>;
     rollbackToSavepoint(name: string): Promise<void>;
     release(): Promise<void>;

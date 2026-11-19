@@ -158,8 +158,8 @@ export async function createPersistedEntities<T extends object, D extends T = T>
     return entities;
 }
 
-export function markEntityClean(entity: object): void {
-    OriginalSnapshot.set(entity, cloneRecord(getEntityFields(entity)));
+export function markEntityClean(entity: object, snapshot = getEntityFields(entity)): void {
+    OriginalSnapshot.set(entity, cloneRecord(snapshot));
 }
 
 /** Restores an entity instance to an unpersisted state. */

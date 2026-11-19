@@ -96,7 +96,7 @@ function resolveMySQLInput(config: MySQLDatabaseConfig | MySQLPoolLike): {
 
     const appConfig = readAppConfig();
     const production = appConfig.APP_ENV === 'production';
-    const { enableLocksTable, lockTableName, ...poolConfig } = config;
+    const { enableLocksTable, lockTableName, retryDeadlocks, ...poolConfig } = config;
     const testDatabaseName = appConfig.APP_ENV === 'test' ? Env.TSF_TEST_DATABASE_NAME : undefined;
     const sharedSessionKey = appConfig.APP_ENV === 'test' ? Env.TSF_TEST_MYSQL_SESSION_KEY : undefined;
     const sharedSessionLeaseId = appConfig.APP_ENV === 'test' ? Env.TSF_TEST_MYSQL_SESSION_LEASE_ID : undefined;
@@ -104,7 +104,7 @@ function resolveMySQLInput(config: MySQLDatabaseConfig | MySQLPoolLike): {
     if (sharedSessionKey && getSharedMySQLSessionManagerConfig()) {
         return {
             driverInput: createSharedMySQLSessionPool(sharedSessionKey, undefined, sharedSessionLeaseId),
-            options: { enableLocksTable, lockTableName }
+            options: { enableLocksTable, lockTableName, retryDeadlocks }
         };
     }
 
@@ -121,7 +121,7 @@ function resolveMySQLInput(config: MySQLDatabaseConfig | MySQLPoolLike): {
             ...poolConfig,
             ...(testDatabaseName ? { database: testDatabaseName } : {})
         },
-        options: { enableLocksTable, lockTableName }
+        options: { enableLocksTable, lockTableName, retryDeadlocks }
     };
 }
 
@@ -133,7 +133,7 @@ function resolvePostgresInput(config: PostgresDatabaseConfig | PgPoolLike): {
 
     const appConfig = readAppConfig();
     const production = appConfig.APP_ENV === 'production';
-    const { enableLocksTable: _enableLocksTable, lockTableName, ...poolConfig } = config;
+    const { enableLocksTable: _enableLocksTable, lockTableName, retryDeadlocks: _retryDeadlocks, ...poolConfig } = config;
     const ssl = appConfig.PG_SSL ? { rejectUnauthorized: appConfig.PG_SSL_REJECT_UNAUTHORIZED ?? true } : undefined;
     const testDatabaseName = appConfig.APP_ENV === 'test' ? Env.TSF_TEST_DATABASE_NAME : undefined;
 
