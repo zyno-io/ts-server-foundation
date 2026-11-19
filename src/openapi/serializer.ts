@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { STATUS_CODES } from 'node:http';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import { isReflectedType, ReflectionKind, Type, typeAnnotation } from '../reflection';
 import { stringify } from 'yaml';
@@ -10,7 +12,7 @@ import type { BaseAppConfig } from '../app/config';
 import { Env } from '../env';
 import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult, WebResponseResult } from '../http';
 import type { HttpRouteParameterPlan, HttpRoutePlan } from '../http';
-import { getOpenApiResponses, isOpenApiIgnored } from './decorators';
+import { getOpenApiOperationOptions, getOpenApiResponses, isOpenApiIgnored } from './decorators';
 import {
     allowsUndefined,
     createOpenApiSchemaContext,
@@ -59,14 +61,46 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
         paths: {}
     };
 
-    for (const route of app.router.listRoutes()) {
-        if (!options.includeInternal && isInternalRoute(route.path)) continue;
-        if (isOpenApiIgnored(route.controllerClass, route.propertyKey)) continue;
+    const operationIds = new Set<string>();
+    const securitySchemes: Record<string, unknown> = {};
+    const routes = app.router
+        .listRoutes()
+        .filter(
+            route =>
+                (options.includeInternal || !isInternalRoute(route.path)) &&
+                !isOpenApiIgnored(route.controllerClass, route.propertyKey) &&
+                toOpenApiMethod(route.method)
+        );
+    const handlerRoutes = new Map<HttpRoutePlan['controllerClass'], Map<string | symbol, Map<string, number>>>();
+    for (const route of routes) {
+        const methods = handlerRoutes.get(route.controllerClass) ?? new Map();
+        handlerRoutes.set(route.controllerClass, methods);
+        const verbs = methods.get(route.propertyKey) ?? new Map();
+        methods.set(route.propertyKey, verbs);
+        verbs.set(route.method, (verbs.get(route.method) ?? 0) + 1);
+    }
+    for (const route of routes) {
         const method = toOpenApiMethod(route.method);
         if (!method) continue;
         const path = toOpenApiPath(route.path);
         document.paths[path] ??= {};
-        document.paths[path][method] = buildOperation(route, schemaContext);
+        if (document.paths[path][method]) throw new Error(`Duplicate OpenAPI route ${method} ${path}`);
+        const operation = buildOperation(route, schemaContext);
+        if ((handlerRoutes.get(route.controllerClass)?.get(route.propertyKey)?.get(route.method) ?? 0) > 1) {
+            const suffix = createHash('sha256').update(path).digest('hex').slice(0, 12);
+            operation.operationId += '_' + suffix;
+        }
+
+        if (operationIds.has(operation.operationId)) throw new Error(`Duplicate OpenAPI operationId ${operation.operationId}`);
+        operationIds.add(operation.operationId);
+        document.paths[path][method] = operation;
+        for (const metadata of getOpenApiOperationOptions(route.controllerClass, route.propertyKey)) {
+            for (const [name, scheme] of Object.entries(metadata.securitySchemes ?? {})) {
+                if (Object.hasOwn(securitySchemes, name) && !isDeepStrictEqual(securitySchemes[name], scheme))
+                    throw new Error(`Conflicting OpenAPI security scheme ${name}`);
+                securitySchemes[name] = scheme;
+            }
+        }
     }
 
     if (Object.keys(schemaContext.schemas).length) {
@@ -74,16 +108,27 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
         document.components.schemas = schemaContext.schemas;
     }
 
-    if (usesBearerAuth(document)) {
+    const bearer = {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT'
+    };
+    if (Object.hasOwn(securitySchemes, 'bearerAuth') && !isDeepStrictEqual(securitySchemes.bearerAuth, bearer)) {
+        throw new Error('Conflicting OpenAPI security scheme bearerAuth; this name is reserved for JWT bearer authentication');
+    }
+    if (usesBearerAuth(document)) securitySchemes.bearerAuth = bearer;
+    if (Object.keys(securitySchemes).length) {
         document.components ??= {};
-        document.components.securitySchemes = {
-            ...document.components.securitySchemes,
-            bearerAuth: {
-                type: 'http',
-                scheme: 'bearer',
-                bearerFormat: 'JWT'
+        document.components.securitySchemes = securitySchemes;
+    }
+    for (const path of Object.values(document.paths)) {
+        for (const operation of Object.values(path)) {
+            for (const requirement of operation?.security ?? []) {
+                for (const name of Object.keys(requirement)) {
+                    if (!Object.hasOwn(securitySchemes, name)) throw new Error(`Undefined OpenAPI security scheme ${name}`);
+                }
             }
-        };
+        }
     }
 
     return document;
@@ -142,6 +187,15 @@ function buildOperation(route: HttpRoutePlan, schemaContext: ReturnType<typeof c
     if (requestBody) operation.requestBody = requestBody;
     if (route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional)) {
         operation.security = [{ bearerAuth: [] }];
+    }
+    for (const metadata of getOpenApiOperationOptions(route.controllerClass, route.propertyKey)) {
+        const { securitySchemes: _schemes, extensions, ...fields } = metadata;
+        Object.assign(operation, fields, extensions);
+    }
+    if (route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional)) {
+        if (!operation.security?.length || operation.security.some(requirement => !Object.hasOwn(requirement, 'bearerAuth'))) {
+            throw new Error('OpenAPI security metadata cannot remove required ParsedJwt authentication');
+        }
     }
 
     return operation;
@@ -336,7 +390,16 @@ function buildResponses(route: HttpRoutePlan, schemaContext: ReturnType<typeof c
     const responses = buildInferredResponses(route, schemaContext);
     for (const response of getOpenApiResponses(route.controllerClass, route.propertyKey)) {
         const typedResponse = buildTypedResponse(response.status, response.type, schemaContext, response.description);
-        responses[String(response.status)] = typedResponse[String(response.status)]!;
+        const result = typedResponse[String(response.status)]!;
+        if ((response.mediaType || response.examples) && !result.content) {
+            throw new Error('OpenAPI response mediaType/examples require a response body type');
+        }
+        if (response.mediaType && result.content?.['application/json']) {
+            result.content = { [response.mediaType]: result.content['application/json'] };
+        }
+        if (response.examples) for (const media of Object.values(result.content ?? {})) media.examples = response.examples;
+        if (response.headers) result.headers = response.headers;
+        responses[String(response.status)] = result;
     }
     return responses;
 }
@@ -556,7 +619,7 @@ function isInternalRoute(path: string): boolean {
     );
 }
 
-function getControllerTagName(controllerClass: Function): string {
+function getControllerTagName(controllerClass: { name: string }): string {
     return camelCaseIdentifier(controllerClass.name.replace(/Controller$/, '') || controllerClass.name || 'controller');
 }
 
@@ -609,7 +672,7 @@ function isHttpResponseAliasName(typeName: string | undefined): boolean {
     return typeName === 'AnyResponse' || typeName === 'OkResponse' || typeName === 'RedirectResponse' || typeName === 'EmptyResponse';
 }
 
-function isClassType(type: Type, classType: Function): boolean {
+function isClassType(type: Type, classType: object): boolean {
     return type.kind === ReflectionKind.class && type.classType === classType;
 }
 
