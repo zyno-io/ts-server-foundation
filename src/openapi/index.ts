@@ -1,5 +1,5 @@
 export { OpenApiController } from './controller';
-export { openapi, type OpenApiResponseOptions } from './decorators';
+export { openapi, type OpenApiResponseOptions, type OpenApiOperationOptions } from './decorators';
 export { createOpenApiSchemaContext, listOpenApiTypeProperties, typeHasOpenApiFileUpload, typeToOpenApiSchema, unwrapOpenApiType } from './schema';
 export {
     dumpOpenApiSchema,

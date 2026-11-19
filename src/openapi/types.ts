@@ -32,10 +32,13 @@ export interface OpenApiOperation {
     operationId: string;
     tags?: string[];
     summary?: string;
+    description?: string;
+    deprecated?: boolean;
     parameters?: OpenApiParameter[];
     requestBody?: OpenApiRequestBody;
     responses: Record<string, OpenApiResponse>;
     security?: Array<Record<string, string[]>>;
+    [extension: `x-${string}`]: unknown;
 }
 
 export interface OpenApiParameter {
@@ -53,6 +56,7 @@ export interface OpenApiRequestBody {
 
 export interface OpenApiMediaType {
     schema: OpenApiSchemaObject | OpenApiReferenceObject;
+    examples?: Record<string, { summary?: string; value: unknown }>;
     encoding?: Record<string, { contentType?: string }>;
 }
 
