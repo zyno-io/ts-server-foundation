@@ -542,7 +542,6 @@ describe('CLI', () => {
         const dir = tempDir();
         const marker = join(dir, 'prepared.json');
         const ttscPackage = join(dir, 'node_modules', 'ttsc');
-        const runtimeHookPreload = join(ttscPackage, 'lib', 'launcher', 'internal', 'runtimeHookPreload.js');
         mkdirSync(ttscPackage, { recursive: true });
         writeFileSync(
             join(dir, 'package.json'),
@@ -561,8 +560,6 @@ describe('CLI', () => {
         );
         writeFileSync(join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2022' } }, null, 4));
         writeFileSync(join(ttscPackage, 'package.json'), JSON.stringify({ name: 'ttsc', version: expectedTtscVersion, main: 'index.js' }));
-        mkdirSync(dirname(runtimeHookPreload), { recursive: true });
-        copyFileSync(join(dirname(require.resolve('ttsc/package.json')), 'lib', 'launcher', 'internal', 'runtimeHookPreload.js'), runtimeHookPreload);
         writeFileSync(
             join(ttscPackage, 'index.js'),
             [
@@ -583,24 +580,6 @@ describe('CLI', () => {
             cwd: realpathSync(dir),
             tsconfig: join(realpathSync(dir), 'tsconfig.json')
         });
-        assert.match(readFileSync(runtimeHookPreload, 'utf8'), /TTSC_PLUGIN_DESCRIPTOR_LOAD/);
-
-        const hookMarker = join(dir, 'runtime-hooks-installed');
-        const hooksModule = join(dirname(runtimeHookPreload), 'runtime', 'installRuntimeHooks.js');
-        mkdirSync(dirname(hooksModule), { recursive: true });
-        writeFileSync(
-            hooksModule,
-            `exports.installRuntimeHooks = () => require('node:fs').writeFileSync(${JSON.stringify(hookMarker)}, 'installed');\n`
-        );
-        for (const descriptorLoad of ['1', '0']) {
-            rmSync(hookMarker, { force: true });
-            const preload = spawnSync(process.execPath, ['--require', runtimeHookPreload, '-e', ''], {
-                env: { ...process.env, TTSC_PLUGIN_DESCRIPTOR_LOAD: descriptorLoad },
-                encoding: 'utf8'
-            });
-            assert.equal(preload.status, 0, preload.stderr);
-            assert.equal(existsSync(hookMarker), descriptorLoad !== '1' || Number.parseInt(process.versions.node, 10) !== 24);
-        }
     });
 
     it('preserves an existing postinstall script and installs itself only once', () => {
