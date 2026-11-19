@@ -466,7 +466,9 @@ Examples:
         if (!instance || typeof (instance as { execute?: unknown }).execute !== 'function') {
             throw new Error(`Command ${instance?.constructor?.name ?? '<unknown>'} does not define execute()`);
         }
-        await (instance as { execute(args: string[]): unknown }).execute(args);
+        const result = await (instance as { execute(args: string[]): unknown }).execute(args);
+        // A command reports failure by returning a nonzero integer; it becomes the process exit code.
+        if (typeof result === 'number' && Number.isInteger(result) && result !== 0) process.exitCode = result;
     }
 
     private async runWorkerEntrypoint(): Promise<void> {

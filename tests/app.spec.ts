@@ -972,6 +972,44 @@ describe('app lifecycle', () => {
         assert.equal(process.exitCode, originalExitCode);
     });
 
+    it('uses a nonzero number returned by a command as the exit code', async () => {
+        process.env.APP_ENV = 'test';
+        process.exitCode = undefined;
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'jobs:usage');
+
+        @cli.command('jobs:usage')
+        class UsageErrorCommand {
+            async execute(): Promise<number> {
+                return 2;
+            }
+        }
+
+        const app = createApp({ commands: [UsageErrorCommand] });
+
+        await app.run(0, '127.0.0.1');
+
+        assert.equal(process.exitCode, 2);
+    });
+
+    it('leaves the exit code alone when a command returns zero or nothing', async () => {
+        process.env.APP_ENV = 'test';
+        process.exitCode = undefined;
+        process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'jobs:ok');
+
+        @cli.command('jobs:ok')
+        class OkCommand {
+            execute(): number {
+                return 0;
+            }
+        }
+
+        const app = createApp({ commands: [OkCommand] });
+
+        await app.run(0, '127.0.0.1');
+
+        assert.equal(process.exitCode, undefined);
+    });
+
     it('sets a failing exit code when an entrypoint command rejects', async () => {
         process.env.APP_ENV = 'test';
         process.exitCode = undefined;
