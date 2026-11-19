@@ -11,7 +11,7 @@ import {
     type TypeProperty,
     type TypePropertySignature
 } from '../reflection';
-import { getUtilityTypeName, isMarkerType, normalizeTypeMetadata, tryResolveClassType } from '../reflection/type-utils';
+import { isMarkerType, normalizeTypeMetadata, tryResolveClassType } from '../reflection/type-utils';
 
 import { FileUpload } from '../http';
 import { normalizeAllowedTypes, parseByteSize } from '../http/uploads';
@@ -52,8 +52,7 @@ export function typeToOpenApiSchema(
     context: OpenApiSchemaContext = createOpenApiSchemaContext()
 ): OpenApiSchemaObject | OpenApiReferenceObject {
     normalizeTypeMetadata(type);
-    const schemaType = instantiateOpenApiGenericType(type);
-    const schema = typeToOpenApiSchemaInternal(schemaType, context);
+    const schema = typeToOpenApiSchemaInternal(type, context);
     if (shouldApplyValidationAnnotations(type)) applyValidationAnnotations(type, schema);
     return schema;
 }
@@ -227,117 +226,6 @@ function resolveOpenApiClassType(type: TypeClass): TypeClass['classType'] | unde
 function isOpenApiClassType(type: TypeClass, classType: TypeClass['classType']): boolean {
     const resolved = resolveOpenApiClassType(type);
     return type.classType === classType || resolved === classType;
-}
-
-/**
- * Imported generic aliases carry their concrete `typeArguments` at the use
- * site, while their published metadata retains placeholders such as `T` or
- * `Code`. Instantiate those placeholders before OpenAPI reads object
- * properties so imported contracts remain as precise as local interfaces.
- */
-function instantiateOpenApiGenericType(type: Type): Type {
-    // Utility arguments describe their source shape; they are not concrete
-    // arguments for placeholders declared by an imported generic alias.
-    if (getUtilityTypeName(type as unknown as Record<string, unknown>)) return type;
-
-    const typeArguments = getTypeArguments(type);
-    if (!typeArguments.length) return type;
-
-    const parameterNames = collectGenericPlaceholderNames(type);
-    if (!parameterNames.length) return type;
-    const replacements = new Map(
-        parameterNames.map((name, index) => [name, typeArguments[index]]).filter((entry): entry is [string, Type] => !!entry[1])
-    );
-    if (!replacements.size) return type;
-    return substituteGenericPlaceholders(type, replacements);
-}
-
-function getTypeArguments(type: Type): Type[] {
-    const record = type as Type & { typeArguments?: Type[]; arguments?: Type[] };
-    return record.typeArguments ?? record.arguments ?? [];
-}
-
-function collectGenericPlaceholderNames(type: Type): string[] {
-    const declared = (type as Type & { typeParameters?: string[] }).typeParameters;
-    if (declared?.length) return declared;
-
-    // Metadata emitted before `typeParameters` was added still appears in
-    // deployed packages. Preserve compatibility by deriving placeholder order
-    // from the alias body when no declaration is available.
-    const names: string[] = [];
-    const maximumNames = getTypeArguments(type).length;
-    const seen = new Set<Type>();
-    const visit = (value: Type) => {
-        if (seen.has(value) || names.length >= maximumNames) return;
-        seen.add(value);
-        if (isMarkerType(value)) return;
-        if (isGenericPlaceholder(value) || isLegacyUnknownGenericPlaceholder(value)) {
-            const name = openApiTypeName(value)!;
-            if (!names.includes(name)) names.push(name);
-            return;
-        }
-        const useSiteArguments = value === type ? new Set(getTypeArguments(value)) : undefined;
-        for (const child of nestedTypes(value)) {
-            if (!useSiteArguments?.has(child)) visit(child);
-        }
-    };
-    visit(type);
-    return names;
-}
-
-function isLegacyUnknownGenericPlaceholder(type: Type): boolean {
-    const name = openApiTypeName(type);
-    return type.kind === ReflectionKind.unknown && !!name && /^[A-Z_$][A-Za-z0-9_$]*$/.test(name);
-}
-
-function isGenericPlaceholder(type: Type): boolean {
-    return type.kind === ReflectionKind.class && !!openApiTypeName(type) && !resolveOpenApiClassType(type);
-}
-
-function substituteGenericPlaceholders(type: Type, replacements: ReadonlyMap<string, Type>, seen = new Map<Type, Type>()): Type {
-    const typeName = openApiTypeName(type);
-    if (typeName && replacements.has(typeName) && (type.kind === ReflectionKind.unknown || isGenericPlaceholder(type))) {
-        return replacements.get(typeName)!;
-    }
-    const existing = seen.get(type);
-    if (existing) return existing;
-
-    const clone = { ...type } as Type & { typeArguments?: Type[]; arguments?: Type[]; index?: Type };
-    seen.set(type, clone);
-    if ('type' in clone && isReflectedType(clone.type)) clone.type = substituteGenericPlaceholders(clone.type, replacements, seen) as never;
-    if ('types' in clone && Array.isArray(clone.types)) {
-        clone.types = clone.types.map(item => {
-            if (isReflectedType(item)) return substituteGenericPlaceholders(item, replacements, seen);
-            if (item && typeof item === 'object' && isReflectedType((item as { type?: unknown }).type)) {
-                const property = item as Record<string, unknown> & { type: Type };
-                return { ...property, type: substituteGenericPlaceholders(property.type, replacements, seen) };
-            }
-            return item;
-        }) as never;
-    }
-    if ('implements' in clone && Array.isArray(clone.implements))
-        clone.implements = clone.implements.map(item => substituteGenericPlaceholders(item, replacements, seen));
-    if (clone.index) clone.index = substituteGenericPlaceholders(clone.index, replacements, seen);
-    if (clone.typeArguments) clone.typeArguments = clone.typeArguments.map(item => substituteGenericPlaceholders(item, replacements, seen));
-    if (clone.arguments) clone.arguments = clone.arguments.map(item => substituteGenericPlaceholders(item, replacements, seen));
-    return clone;
-}
-
-function openApiTypeName(type: Type): string | undefined {
-    return (type as Type & { typeName?: string }).typeName;
-}
-
-function nestedTypes(type: Type): Type[] {
-    const nested: Type[] = [];
-    const record = type as Type & { type?: Type; types?: unknown[]; implements?: Type[]; typeArguments?: Type[]; arguments?: Type[]; index?: Type };
-    if (record.type && isReflectedType(record.type)) nested.push(record.type);
-    for (const item of record.types ?? []) {
-        if (isReflectedType(item)) nested.push(item);
-        else if (item && typeof item === 'object' && isReflectedType((item as { type?: unknown }).type)) nested.push((item as { type: Type }).type);
-    }
-    nested.push(...(record.implements ?? []), ...(record.typeArguments ?? []), ...(record.arguments ?? []));
-    if (record.index) nested.push(record.index);
-    return nested;
 }
 
 function typeToOpenApiSchemaInternal(

@@ -181,10 +181,90 @@ export function tryResolveClassType(value: ClassType | (() => ClassType)): Class
     }
 }
 
+type GenericType = Type & { typeArguments?: Type[]; arguments?: Type[] };
+const instantiatedGenericTypes = new WeakSet<Type>();
+
+function instantiateGenericType(type: GenericType): void {
+    const args = type.typeArguments ?? type.arguments;
+    if (!args?.length || instantiatedGenericTypes.has(type) || getUtilityTypeName(type as unknown as Record<string, unknown>)) return;
+
+    // Older published aliases carry named placeholders but omit their declaration order.
+    const names = type.typeParameters?.length ? type.typeParameters : legacyGenericParameterNames(type, args.length);
+    const bindings = new Map(names.slice(0, args.length).map((name, index) => [name, args[index]]));
+    if (!bindings.size) return;
+
+    // Each alias use owns its root, but its children can be shared with the
+    // exported template and with other instantiations of that template.
+    const instance = substituteGenericParameters(type, type, bindings, new Map());
+    Object.assign(type, instance);
+    instantiatedGenericTypes.add(type);
+}
+
+function legacyGenericParameterNames(root: GenericType, count: number): string[] {
+    const names = new Set<string>();
+    const seen = new Set<Type>();
+    const visit = (type: GenericType) => {
+        if (seen.has(type) || names.size >= count || isMarkerType(type)) return;
+        seen.add(type);
+        const name = type === root ? undefined : genericParameterName(type);
+        if (name && (type.kind === ReflectionKind.class || /^[A-Z_$][A-Za-z0-9_$]*$/.test(name))) {
+            names.add(name);
+            return;
+        }
+        if (type === root || !type.typeParameters?.length) {
+            mapGenericShape(type, child => {
+                visit(child);
+                return child;
+            });
+        }
+        if (type !== root) (type.typeArguments ?? type.arguments)?.forEach(visit);
+    };
+    visit(root);
+    return [...names];
+}
+
+function genericParameterName(type: Type): string | undefined {
+    if (type.kind === ReflectionKind.unknown || (type.kind === ReflectionKind.class && !tryResolveClassType(type.classType))) {
+        return type.typeName;
+    }
+}
+
+function substituteGenericParameters(type: GenericType, root: Type, bindings: ReadonlyMap<string, Type>, seen: Map<Type, Type>): Type {
+    const name = genericParameterName(type);
+    const argument = name && bindings.get(name);
+    if (argument) return argument;
+    const existing = seen.get(type);
+    if (existing) return existing;
+
+    const clone = { ...type };
+    seen.set(type, type === root ? root : clone);
+    const substitute = (child: Type) => substituteGenericParameters(child, root, bindings, seen);
+    if (type !== root) {
+        if (type.typeArguments) clone.typeArguments = type.typeArguments.map(substitute);
+        if (type.arguments) clone.arguments = type.arguments.map(substitute);
+        // A nested generic binds its own body using the substituted arguments.
+        if (type.typeParameters?.length) return clone;
+    }
+    Object.assign(clone, mapGenericShape(type, substitute));
+    return clone;
+}
+
+function mapGenericShape(type: Type, map: (child: Type) => Type): Record<string, unknown> {
+    const children: Record<string, unknown> = {};
+    if ('type' in type) children.type = map(type.type);
+    if ('types' in type) children.types = type.types.map(map);
+    if (type.kind === ReflectionKind.objectLiteral) {
+        if (type.implements) children.implements = type.implements.map(map);
+        if (type.index) children.index = map(type.index);
+    }
+    return children;
+}
+
 export function normalizeTypeMetadata(value: unknown, seen = new Set<unknown>()): void {
     if (!value || typeof value !== 'object' || seen.has(value)) return;
     seen.add(value);
     const record = value as Record<string, unknown>;
+    if (isReflectedType(value)) instantiateGenericType(value);
     if (record.kind === ReflectionKind.class && typeof record.classType === 'function' && !isClass(record.classType)) {
         try {
             const resolved = (record.classType as () => unknown)();
