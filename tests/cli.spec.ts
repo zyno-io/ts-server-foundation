@@ -58,7 +58,10 @@ function tempDir(): string {
 }
 
 function repoTempDir(): string {
-    const dir = mkdtempSync(join(process.cwd(), '.tmp-tsf-cli-'));
+    // Keep the fixture inside the PnP project and outside Yarn pack's directory walk.
+    const parent = join(process.cwd(), '.yarn', 'unplugged', 'tsf-cli-tests');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'project-'));
     tempDirs.push(dir);
     return dir;
 }
