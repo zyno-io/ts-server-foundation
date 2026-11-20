@@ -1719,85 +1719,85 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/darwin-arm64@npm:0.34.2"
+"@ttsc/darwin-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/darwin-arm64@npm:0.37.2"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/darwin-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/darwin-x64@npm:0.34.2"
+"@ttsc/darwin-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/darwin-x64@npm:0.37.2"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-darwin-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-darwin-arm64@npm:0.34.2"
+"@ttsc/graph-darwin-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-darwin-arm64@npm:0.37.2"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-darwin-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-darwin-x64@npm:0.34.2"
+"@ttsc/graph-darwin-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-darwin-x64@npm:0.37.2"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-linux-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-arm64@npm:0.34.2"
+"@ttsc/graph-linux-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-linux-arm64@npm:0.37.2"
   conditions: os=linux & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-linux-arm@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-arm@npm:0.34.2"
+"@ttsc/graph-linux-arm@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-linux-arm@npm:0.37.2"
   conditions: os=linux & cpu=arm
   languageName: node
   linkType: hard
 
-"@ttsc/graph-linux-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-linux-x64@npm:0.34.2"
+"@ttsc/graph-linux-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-linux-x64@npm:0.37.2"
   conditions: os=linux & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-win32-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-win32-arm64@npm:0.34.2"
+"@ttsc/graph-win32-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-win32-arm64@npm:0.37.2"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/graph-win32-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph-win32-x64@npm:0.34.2"
+"@ttsc/graph-win32-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph-win32-x64@npm:0.37.2"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/graph@npm:^0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/graph@npm:0.34.2"
+"@ttsc/graph@npm:^0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/graph@npm:0.37.2"
   dependencies:
     "@modelcontextprotocol/sdk": "npm:^1.26.0"
-    "@ttsc/graph-darwin-arm64": "npm:0.34.2"
-    "@ttsc/graph-darwin-x64": "npm:0.34.2"
-    "@ttsc/graph-linux-arm": "npm:0.34.2"
-    "@ttsc/graph-linux-arm64": "npm:0.34.2"
-    "@ttsc/graph-linux-x64": "npm:0.34.2"
-    "@ttsc/graph-win32-arm64": "npm:0.34.2"
-    "@ttsc/graph-win32-x64": "npm:0.34.2"
+    "@ttsc/graph-darwin-arm64": "npm:0.37.2"
+    "@ttsc/graph-darwin-x64": "npm:0.37.2"
+    "@ttsc/graph-linux-arm": "npm:0.37.2"
+    "@ttsc/graph-linux-arm64": "npm:0.37.2"
+    "@ttsc/graph-linux-x64": "npm:0.37.2"
+    "@ttsc/graph-win32-arm64": "npm:0.37.2"
+    "@ttsc/graph-win32-x64": "npm:0.37.2"
     "@typia/mcp": "npm:^15.1.0"
     typia: "npm:^15.1.0"
   peerDependencies:
-    ttsc: ^0.34.2
+    ttsc: ^0.37.2
   dependenciesMeta:
     "@ttsc/graph-darwin-arm64":
       optional: true
@@ -1815,41 +1815,41 @@ __metadata:
       optional: true
   bin:
     ttsc-graph: lib/bin.js
-  checksum: 10c0/b0d7926971589481b79d27bf8dc5c4673f2087e24cb7bf87aa7c4d9ab60c1f3a2f8ffb178095c454327e2ea3e6cc90474a86c9d78a7fc73e8dc69f9ec781801c
+  checksum: 10c0/4d1f1dcfe9be530586f242f4367370ea07c7db96823f37074c932f81e36df2d8420a256183639f32663665c941a7051f78aa560ae6087a90c1cf7b9ffca4f197
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-arm64@npm:0.34.2"
+"@ttsc/linux-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/linux-arm64@npm:0.37.2"
   conditions: os=linux & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/linux-arm@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-arm@npm:0.34.2"
+"@ttsc/linux-arm@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/linux-arm@npm:0.37.2"
   conditions: os=linux & cpu=arm
   languageName: node
   linkType: hard
 
-"@ttsc/linux-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/linux-x64@npm:0.34.2"
+"@ttsc/linux-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/linux-x64@npm:0.37.2"
   conditions: os=linux & cpu=x64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-arm64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/win32-arm64@npm:0.34.2"
+"@ttsc/win32-arm64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/win32-arm64@npm:0.37.2"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@ttsc/win32-x64@npm:0.34.2":
-  version: 0.34.2
-  resolution: "@ttsc/win32-x64@npm:0.34.2"
+"@ttsc/win32-x64@npm:0.37.2":
+  version: 0.37.2
+  resolution: "@ttsc/win32-x64@npm:0.37.2"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
@@ -2524,7 +2524,7 @@ __metadata:
     "@opentelemetry/sdk-trace": "npm:^3.0.0"
     "@pyroscope/nodejs": "npm:^0.7.0"
     "@sentry/node": "npm:^11.10.0"
-    "@ttsc/graph": "npm:^0.34.2"
+    "@ttsc/graph": "npm:^0.37.2"
     "@types/bcrypt": "npm:^6.0.0"
     "@types/busboy": "npm:^1.5.5"
     "@types/debug": "npm:^4.1.13"
@@ -2558,7 +2558,7 @@ __metadata:
     protoc: "npm:^36.2.0"
     ts-proto: "npm:^2.18.3"
     tslib: "npm:^2.8.1"
-    ttsc: "npm:0.34.2"
+    ttsc: "npm:0.37.2"
     typescript: "npm:^7.0.2"
     uuidv7: "npm:^1.2.1"
     vite: "npm:^8.3.5"
@@ -6145,22 +6145,22 @@ __metadata:
   languageName: node
   linkType: hard
 
-"ttsc@npm:0.34.2":
-  version: 0.34.2
-  resolution: "ttsc@npm:0.34.2"
+"ttsc@npm:0.37.2":
+  version: 0.37.2
+  resolution: "ttsc@npm:0.37.2"
   dependencies:
-    "@ttsc/darwin-arm64": "npm:0.34.2"
-    "@ttsc/darwin-x64": "npm:0.34.2"
-    "@ttsc/linux-arm": "npm:0.34.2"
-    "@ttsc/linux-arm64": "npm:0.34.2"
-    "@ttsc/linux-x64": "npm:0.34.2"
-    "@ttsc/win32-arm64": "npm:0.34.2"
-    "@ttsc/win32-x64": "npm:0.34.2"
+    "@ttsc/darwin-arm64": "npm:0.37.2"
+    "@ttsc/darwin-x64": "npm:0.37.2"
+    "@ttsc/linux-arm": "npm:0.37.2"
+    "@ttsc/linux-arm64": "npm:0.37.2"
+    "@ttsc/linux-x64": "npm:0.37.2"
+    "@ttsc/win32-arm64": "npm:0.37.2"
+    "@ttsc/win32-x64": "npm:0.37.2"
     acorn: "npm:8.16.0"
     cjs-module-lexer: "npm:2.2.1"
     fsevents: "npm:^2.3.3"
   peerDependencies:
-    typescript: ">=7.0.0 || >=7.1.0-0"
+    typescript: ">=6.0.0 || >=7.1.0-0"
   dependenciesMeta:
     "@ttsc/darwin-arm64":
       optional: true
@@ -6182,7 +6182,7 @@ __metadata:
     ttsc: lib/launcher/ttsc.js
     ttscserver: lib/launcher/ttscserver.js
     ttsx: lib/launcher/ttsx.js
-  checksum: 10c0/431a4d3d03c686de13a422033fc9973ab5823419299d3ce57add9fbd8112ba6d8107aaa79b5d5cabb1ab6b8fbfb70240e11a01a938ca0f2b03a8adb8aa749356
+  checksum: 10c0/ce20711b6be6b2be23e180c5899ec161ec7fde950c0c60a51c50820adfc2ef991c7d41c2c47ca05b7f908504834c7824c2c421675063c3e8bfa2ca6b48497285
   languageName: node
   linkType: hard
 

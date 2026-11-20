@@ -1114,11 +1114,63 @@ describe('openapi', () => {
             }
         ];
 
+        assert.deepStrictEqual(
+            validate({ result: {} }, imported).map(error => error.path),
+            ['result.id']
+        );
         const context = createOpenApiSchemaContext();
         typeToOpenApiSchema(imported, context);
         const result = schemaObject(context.schemas.ExternalGenericEnvelope?.properties?.result);
         assert.deepStrictEqual(Object.keys(result.properties ?? {}), ['id']);
         assert.deepStrictEqual(result.required, ['id']);
+    });
+
+    it('uses the same concrete imported generic for optional request fields in validation and OpenAPI', () => {
+        const parameter: Type = { kind: ReflectionKind.unknown, typeName: 'T' };
+        const template: Type = {
+            kind: ReflectionKind.objectLiteral,
+            typeName: 'ImportedRules',
+            typeParameters: ['T'],
+            types: [{ kind: ReflectionKind.propertySignature, name: 'all', type: { kind: ReflectionKind.array, type: parameter } }]
+        };
+        const loadShared = () => ({ __tsfTypeAliases: { ImportedRules: template } });
+        const sharedRules = (argument: Type): Type =>
+            Object.assign(resolveCompactMetadataAliasV1(loadShared, 'ImportedRules', 'ImportedRules') as Type, { typeArguments: [argument] });
+        const createRequest = (): Type => ({
+            kind: ReflectionKind.objectLiteral,
+            types: [
+                {
+                    kind: ReflectionKind.propertySignature,
+                    name: 'activity',
+                    optional: true,
+                    type: {
+                        kind: ReflectionKind.union,
+                        types: [sharedRules({ kind: ReflectionKind.string }), { kind: ReflectionKind.undefined }]
+                    }
+                }
+            ]
+        });
+
+        const context = createOpenApiSchemaContext();
+        typeToOpenApiSchema(createRequest(), context);
+        assert.deepStrictEqual(context.schemas.ImportedRules.properties?.all, { type: 'array', items: { type: 'string' } });
+
+        const request = createRequest();
+        assert.deepStrictEqual(validate({}, request), []);
+        assert.deepStrictEqual(validate({ activity: { all: ['purchase'] } }, request), []);
+        assert.deepStrictEqual(
+            validate({ activity: { all: [42] } }, request).map(error => error.path),
+            ['activity.all.0']
+        );
+
+        const numericRules = sharedRules({ kind: ReflectionKind.number });
+        assert.deepStrictEqual(validate({ all: [42] }, numericRules), []);
+        assert.deepStrictEqual(
+            validate({ all: ['purchase'] }, numericRules).map(error => error.path),
+            ['all.0']
+        );
+        assert.equal(template.types[0].type.kind, ReflectionKind.array);
+        assert.strictEqual(template.types[0].type.type, parameter);
     });
 
     it('serializes reflected routes, parameters, bodies, responses, and security', () => {
