@@ -151,7 +151,6 @@ export class MeshSrpcServer<
     private pendingSyncs = new Set<string>();
 
     constructor(options: ISrpcServerOptions<TClientOutput, TServerOutput> & MeshSrpcServerOptions<TMeta, TRegistryMeta>) {
-        if (options.allowDuplicateTlsClientIds) throw new Error('allowDuplicateTlsClientIds is not supported by MeshSrpcServer');
         super(options);
 
         this.extractRegistryMetadataFn = options.extractRegistryMetadata;

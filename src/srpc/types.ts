@@ -251,8 +251,6 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
      * If a custom client authorizer is also set, it receives this ID as `cid`.
      */
     getTlsClientId?: (socket: import('node:tls').TLSSocket) => string | undefined;
-    /** Allow multiple concurrent streams with the same verified TLS client ID. Defaults to false. Standalone SrpcServer only. */
-    allowDuplicateTlsClientIds?: boolean;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
     /** Revoke an unacknowledged v4 stream at RPC expiry when its budget exceeds the 3s receipt window. Defaults to true. */

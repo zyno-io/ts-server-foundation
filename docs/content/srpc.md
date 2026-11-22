@@ -317,10 +317,6 @@ await client.connect();
 
 The client verifies the server certificate and requires a `wss:` URL. It sends the normal protocol fields and metadata without a shared secret or claimed `cid`. The server uses the ID returned by `getTlsClientId` as `stream.clientId` and rejects an unauthorized TLS peer or an absent ID. A custom `setClientAuthorizer` can add an authorization check and receives the verified ID in `query.cid`.
 
-A standalone `SrpcServer` can set `allowDuplicateTlsClientIds: true` to let workers sharing a certificate connect concurrently. The verified ID still controls authorization, and each connection gets its own server-assigned `stream.id`. A worker's `supersede` request has no effect in this mode.
-
-Use `getLocalStreams()` to enumerate active connections and pass the selected stream to `invoke`, `disconnectClient`, or `updateClientMetadata`. While several streams share an ID, `resolveClient(clientId)` returns `undefined` and passing that ID to `disconnectClient` or `updateClientMetadata` returns `false`. `MeshSrpcServer` supports one connection per client ID across the mesh.
-
 ## Streams
 
 Connected streams expose metadata:
@@ -338,7 +334,7 @@ Connected streams expose metadata:
 | `connectedAt`     | Connection timestamp.                                |
 | `lastPingAt`      | Last ping timestamp.                                 |
 
-`streamsById` contains authenticated pending and active streams. `streamsByClientId` contains IDs with exactly one active stream. Connection handlers run while the stream is still pending.
+`streamsById` contains authenticated pending and active streams, while `streamsByClientId` contains only the active stream for each client ID. Connection handlers run while the stream is still pending.
 
 The exported `SrpcStream<TMeta>` type describes these server-side streams. It also exposes the underlying WebSocket and request queue through `$ws` and `$queue`; treat those fields as low-level protocol surfaces and prefer `SrpcServer.invoke()`, handlers, and `SrpcByteStream` for application work.
 
