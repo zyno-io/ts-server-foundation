@@ -51,7 +51,7 @@ export default defineConfig({
                 text: 'Services',
                 items: [
                     { text: 'Workers', link: '/worker' },
-                    { text: 'SRPC', link: '/srpc' },
+                    { text: 'SRPC', link: '/srpc', items: [{ text: 'Legacy Protocol', link: '/srpc-legacy' }] },
                     { text: 'DevConsole', link: '/devconsole' },
                     { text: 'Redis', link: '/redis' },
                     { text: 'Leader Service', link: '/leader-service' },

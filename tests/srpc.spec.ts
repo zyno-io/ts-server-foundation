@@ -571,10 +571,14 @@ describe('srpc', () => {
         }
     });
 
-    it('connects and exchanges heartbeats when the server still uses an empty PingPong protobuf codec', async () => {
+    it('exchanges v5 heartbeats when the server codec omits PingPong.type', async () => {
+        const serverCodec = withEnvelopeDefaults(DevConsoleServerMessage);
         const harness = await createHarness({
-            clientMessage: withEnvelopeDefaults(LegacyEnvelope),
-            serverMessage: withEnvelopeDefaults(LegacyEnvelope)
+            clientMessage: withEnvelopeDefaults(DevConsoleClientMessage),
+            serverMessage: {
+                ...serverCodec,
+                encode: (message: DevConsoleServerMessage) => serverCodec.encode(message.pingPong ? { ...message, pingPong: {} } : message)
+            }
         });
         const entered = deferred<void>();
         const release = deferred<void>();
@@ -588,7 +592,7 @@ describe('srpc', () => {
         });
         try {
             const connecting = client.connect();
-            await entered.promise;
+            await Promise.race([entered.promise, connecting]);
             await waitForCondition(() => !!client.awaitingActivation, 1_000, 'Legacy HELLO was not answered');
             assert.equal(client.isConnected, false);
             release.resolve();
