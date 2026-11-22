@@ -113,46 +113,60 @@ afterEach(() => {
 
 describe('srpc', () => {
     describe('mutual TLS', () => {
-        it('authenticates without HMAC and uses the certificate ID for RPCs', async t => {
-            const { server, https, url, credentials } = await createMtlsHarness(t);
-            let handshake: URL | undefined;
-            https.prependListener('upgrade', request => {
-                handshake = new URL(request.url!, url);
+        for (const protocolVersion of [3, 5] as const)
+            it(`authenticates v${protocolVersion} with the certificate ID`, async t => {
+                const { server, https, url, credentials } = await createMtlsHarness(t);
+                let handshake: URL | undefined;
+                https.prependListener('upgrade', request => {
+                    handshake = new URL(request.url!, url);
+                });
+                server.registerMessageHandler('uEcho', (_stream, data) => Promise.resolve(data));
+                const options: ISrpcClientOptions<ClientMessage, ServerMessage> = {
+                    logger: createLogger('SrpcMtlsClient'),
+                    uri: url,
+                    clientMessage: JsonMessage,
+                    serverMessage: JsonMessage,
+                    clientId: 'label',
+                    enableReconnect: false,
+                    protocolVersion,
+                    tls: credentials
+                };
+                const client = new SrpcClient(options);
+                t.after(() => client.disconnect());
+
+                await client.connect();
+                assert.equal(handshake?.searchParams.get('cid'), null);
+                assert.equal(handshake?.searchParams.get('signature'), null);
+                assert.equal(handshake?.searchParams.get('~n'), null);
+                assert.equal(handshake?.searchParams.get('~s'), null);
+                assert.equal(handshake?.searchParams.get(protocolVersion === 5 ? '~p' : 'pv'), String(protocolVersion));
+                assert.ok(server.streamsByClientId.has('verified-edge'));
+                const response = await client.invoke('uEcho', { message: 'hello' });
+                assert.deepEqual(response, { message: 'hello' });
             });
-            server.registerMessageHandler('uEcho', (_stream, data) => Promise.resolve(data));
-            const options: ISrpcClientOptions<ClientMessage, ServerMessage> = {
-                logger: createLogger('SrpcMtlsClient'),
-                uri: url,
-                clientMessage: JsonMessage,
-                serverMessage: JsonMessage,
-                clientId: 'label',
-                enableReconnect: false,
-                tls: credentials
-            };
-            const client = new SrpcClient(options);
-            t.after(() => client.disconnect());
 
-            await client.connect();
-            assert.equal(handshake?.searchParams.get('cid'), null);
-            assert.equal(handshake?.searchParams.get('signature'), null);
-            assert.ok(server.streamsByClientId.has('verified-edge'));
-            assert.deepEqual(await client.invoke('uEcho', { message: 'hello' }), { message: 'hello' });
-        });
+        for (const protocolVersion of [3, 5] as const)
+            it(`gives the v${protocolVersion} authorizer the verified ID`, async t => {
+                const { server, url, credentials } = await createMtlsHarness(t);
+                let capturedId: string | undefined;
+                let compactId: string | undefined;
+                server.setClientAuthorizer(query => {
+                    capturedId = query.cid;
+                    compactId = query['~n'];
+                    return false;
+                });
+                const handshake = new URL(url);
+                handshake.search = new URLSearchParams(
+                    protocolVersion === 5
+                        ? { '~i': randomUUID(), '~v': 'test', '~p': '5', '~n': 'claimed-id' }
+                        : { id: randomUUID(), appv: 'test', pv: '3', cid: 'claimed-id' }
+                ).toString();
 
-        it('gives a custom authorizer the verified ID and respects its decision', async t => {
-            const { server, url, credentials } = await createMtlsHarness(t);
-            let capturedId: string | undefined;
-            server.setClientAuthorizer(query => {
-                capturedId = query.cid;
-                return false;
+                await assertWebSocketRejected(handshake.href, 403, credentials);
+                assert.equal(capturedId, 'verified-edge');
+                assert.equal(compactId, protocolVersion === 5 ? 'verified-edge' : undefined);
+                assert.equal(server.streamsById.size, 0);
             });
-            const handshake = new URL(url);
-            handshake.search = new URLSearchParams({ id: randomUUID(), appv: 'test', pv: '3', cid: 'claimed-id' }).toString();
-
-            await assertWebSocketRejected(handshake.href, 403, credentials);
-            assert.equal(capturedId, 'verified-edge');
-            assert.equal(server.streamsById.size, 0);
-        });
 
         it('rejects a plaintext client even when it has valid HMAC credentials', async () => {
             const harness = await createHarness({ getTlsClientId: () => 'must-not-be-used' });
@@ -193,6 +207,73 @@ describe('srpc', () => {
         });
     });
 
+    describe('v5 handshake', () => {
+        it('uses the connection ID as the nonce and signs URI-encoded application fields and metadata', async () => {
+            const audience = 'compute / alpha';
+            const harness = await createHarness({ authAudience: audience });
+            const appId = 'worker + compute';
+            const meta = { 'worker role': 'R&D + café' };
+            const client = harness.createClient('compact-client', meta, secret, { protocolVersion: 5, appId, authAudience: audience });
+            let requestedUrl: URL | undefined;
+            let replayToken: string | undefined;
+            harness.httpServer.prependListener('upgrade', request => {
+                requestedUrl = new URL(request.url!, 'http://localhost');
+            });
+            harness.server.setAuthNonceConsumer((_principal, token) => {
+                replayToken = token;
+                return true;
+            });
+            try {
+                await client.connect({ supersede: true });
+                const stream = harness.server.streamsByClientId.get('compact-client');
+                assert.ok(stream && requestedUrl);
+                assert.equal(stream.protocolVersion, 5);
+                assert.equal(stream.appId, appId);
+                assert.equal(stream.supersede, true);
+                assert.deepEqual(stream.meta, meta);
+                const { searchParams } = requestedUrl;
+                assert.equal(searchParams.get('~a'), appId);
+                assert.equal(searchParams.get('~d'), audience);
+                assert.equal(searchParams.get('~i'), replayToken);
+                assert.equal(searchParams.has('~o'), false);
+                assert.equal(searchParams.has('pv'), false);
+                assert.equal(searchParams.has('nonce'), false);
+            } finally {
+                await harness.close();
+            }
+        });
+
+        it('accepts a separate nonce and rejects its reuse with another connection ID', async () => {
+            const harness = await createHarness();
+            const nonce = randomUUID();
+            const first = new WebSocket(createSignedCompactWebSocketUrl(harness.port, nonce));
+            try {
+                await waitForWebSocketOpen(first);
+                await assertWebSocketRejected(createSignedCompactWebSocketUrl(harness.port, nonce), 403);
+            } finally {
+                first.close();
+                await harness.close();
+            }
+        });
+
+        it('rejects duplicate and mixed handshake parameters and verifies the signed application ID', async () => {
+            const harness = await createHarness();
+            try {
+                const url = new URL(createSignedCompactWebSocketUrl(harness.port, randomUUID()));
+                const duplicate = new URL(url);
+                duplicate.searchParams.append('~p', '5');
+                await assertWebSocketRejected(duplicate.href, 400);
+                const mixed = new URL(url);
+                mixed.searchParams.set('pv', '3');
+                await assertWebSocketRejected(mixed.href, 400);
+                url.searchParams.set('~a', 'another-app');
+                await assertWebSocketRejected(url.href, 403);
+            } finally {
+                await harness.close();
+            }
+        });
+    });
+
     for (const cause of ['disconnect', 'supersede', 'timeout', 'conflict', 'badArg'] as const) {
         it(`preserves the disconnect code and ${cause} cause through an existing protobuf envelope`, () => {
             const serialized = serializeSrpcError(new SrpcStreamDisconnectedError('endpoint', cause));
@@ -207,46 +288,48 @@ describe('srpc', () => {
         });
     }
 
-    for (const direction of ['server-to-client', 'client-to-server'] as const) {
-        it(`exchanges v4 receipts before a slow ${direction} handler completes`, async () => {
-            const harness = await createHarness();
-            const client = harness.createClient(`v4-${direction}`, {}, secret, { protocolVersion: 4 });
-            const entered = deferred<void>();
-            const release = deferred<void>();
-            client.registerMessageHandler('dCompute', async () => {
-                entered.resolve();
-                await release.promise;
-                return { result: 1 };
+    for (const protocolVersion of [4, 5] as const)
+        for (const direction of ['server-to-client', 'client-to-server'] as const) {
+            it(`exchanges v${protocolVersion} receipts before a slow ${direction} handler completes`, async () => {
+                const harness = await createHarness();
+                const clientId = `v${protocolVersion}-${direction}`;
+                const client = harness.createClient(clientId, {}, secret, { protocolVersion });
+                const entered = deferred<void>();
+                const release = deferred<void>();
+                client.registerMessageHandler('dCompute', async () => {
+                    entered.resolve();
+                    await release.promise;
+                    return { result: 1 };
+                });
+                harness.server.registerMessageHandler('uSlow', async () => {
+                    entered.resolve();
+                    await release.promise;
+                    return { ok: true };
+                });
+                try {
+                    await client.connect();
+                    const stream = await harness.server.resolveClient(clientId);
+                    assert.ok(stream);
+                    assert.equal((stream as SrpcStream).protocolVersion, protocolVersion);
+                    const request =
+                        direction === 'server-to-client'
+                            ? harness.server.invoke(stream as SrpcStream, 'dCompute', { number: 2, operation: 'square' }, 4_000)
+                            : client.invoke('uSlow', { delayMs: 1_000 }, 500);
+                    const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
+                    await entered.promise;
+                    await rejection;
+                    assert.equal(client.isConnected, true);
+                    assert.equal(stream.connected, true);
+                    release.resolve();
+                    await delay(20);
+                    assert.equal(client.isConnected, true, 'the late result must be ignored');
+                    assert.equal(stream.connected, true);
+                } finally {
+                    release.resolve();
+                    await harness.close();
+                }
             });
-            harness.server.registerMessageHandler('uSlow', async () => {
-                entered.resolve();
-                await release.promise;
-                return { ok: true };
-            });
-            try {
-                await client.connect();
-                const stream = await harness.server.resolveClient(`v4-${direction}`);
-                assert.ok(stream);
-                assert.equal((stream as SrpcStream).protocolVersion, 4);
-                const request =
-                    direction === 'server-to-client'
-                        ? harness.server.invoke(stream as SrpcStream, 'dCompute', { number: 2, operation: 'square' }, 4_000)
-                        : client.invoke('uSlow', { delayMs: 1_000 }, 500);
-                const rejection = assert.rejects(request, SrpcIndeterminateDeliveryError);
-                await entered.promise;
-                await rejection;
-                assert.equal(client.isConnected, true);
-                assert.equal(stream.connected, true);
-                release.resolve();
-                await delay(20);
-                assert.equal(client.isConnected, true, 'the late result must be ignored');
-                assert.equal(stream.connected, true);
-            } finally {
-                release.resolve();
-                await harness.close();
-            }
-        });
-    }
+        }
 
     it('requires acknowledgment codecs before negotiating v4, without consuming handshake capacity', async () => {
         assert.equal(supportsSrpcRequestAcknowledgments(DevConsoleClientMessage), true);
@@ -4253,6 +4336,43 @@ function createLegacyV2WebSocketUrl(port: number, clientId: string, timestamp = 
     const signature = createHmac('sha256', secret).update(`1\n${appv}\n${ts}\n${id}\n${clientId}\n`).digest('hex');
     const params = new URLSearchParams({ appv, ts, id, cid: clientId, signature, _v: '2' });
     return `ws://127.0.0.1:${port}/srpc-test?${params.toString()}`;
+}
+
+function createSignedCompactWebSocketUrl(port: number, nonce: string): string {
+    const path = '/srpc-test';
+    const appv = '0.0.0';
+    const ts = String(Date.now());
+    const id = randomUUID();
+    const cid = 'raw-compact-client';
+    const appId = 'raw-compact-app';
+    const signed = JSON.stringify({
+        version: 5,
+        path,
+        audience: path,
+        appv,
+        ts,
+        nonce,
+        id,
+        cid,
+        protocol: '5',
+        supersede: '0',
+        capabilities: '',
+        metadata: {},
+        appId
+    });
+    const signature = createHmac('sha256', secret).update(signed).digest('hex');
+    const query = new URLSearchParams({
+        '~p': '5',
+        '~a': appId,
+        '~v': appv,
+        '~t': ts,
+        '~i': id,
+        '~o': nonce,
+        '~n': cid,
+        '~d': path,
+        '~s': signature
+    });
+    return `ws://127.0.0.1:${port}${path}?${query}`;
 }
 
 function waitForWebSocketOpen(ws: WebSocket): Promise<void> {

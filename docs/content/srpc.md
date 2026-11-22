@@ -241,7 +241,7 @@ The constructor takes an `ISrpcClientOptions` object. The positional overload is
 
 `connect({ supersede?: boolean })` applies to that connection attempt.
 
-Protocol-v2, protocol-v3, and protocol-v4 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
+Protocol v2 and later reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections replace the existing stream when a client connects with the same ID.
 
 The optional `PingPong.type` enum distinguishes handshake messages from client pings and server pongs. Generated TypeScript codecs represent it as a numeric `PingPongType` enum with the prefixed names shown above and an optional `type` property (`undefined` when absent). The library exports matching numeric values as `SrpcPingPongType`.
 
@@ -287,6 +287,34 @@ server.setClientAuthorizer(async (query, request) => {
 The callback receives the raw query map as `Record<string, string>`, including signed fields and custom metadata. Once configured, it is responsible for all authentication; the default HMAC validation and `setClientKeyFetcher()` path are not also run. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata.
 
 Clock drift is controlled by `SRPC_AUTH_CLOCK_DRIFT_MS`, defaulting to 30 seconds.
+
+### Protocol v5
+
+Set `protocolVersion: 5` on the client to use compact handshake keys with the v4 request acknowledgment behavior. Both peers need acknowledgment-capable codecs. The server continues to accept v1–v4 inputs and verifies each version's original signature and replay token.
+
+```text
+/srpc?~p=5&~a=worker&~v=0.0.0&~t=<timestamp>&~i=<connection-id>&~n=worker-1&~d=%2Fsrpc&~s=<signature>
+```
+
+Keys and values use standard URL query encoding. The server reserves the `~` namespace and rejects duplicate keys or a mix of compact and legacy handshake keys. Application metadata stays in ordinary query parameters.
+
+| Key  | Meaning                                                                                          |
+| ---- | ------------------------------------------------------------------------------------------------ |
+| `~p` | Protocol version. Use `5`.                                                                       |
+| `~a` | Optional application ID. Set `appId` on the client.                                              |
+| `~v` | Application version.                                                                             |
+| `~t` | Unix timestamp in milliseconds.                                                                  |
+| `~i` | Fresh connection ID.                                                                             |
+| `~o` | Optional replay nonce. Defaults to `~i`.                                                         |
+| `~n` | Client name. mTLS clients can omit it because the server resolves identity from the certificate. |
+| `~d` | HMAC audience. Set `authAudience` on both peers to override the WebSocket path.                  |
+| `~s` | HMAC signature.                                                                                  |
+| `~c` | Optional comma-separated capabilities.                                                           |
+| `~x` | Optional supersede flag. Send `1` to replace an existing connection.                             |
+
+The v5 HMAC payload is the UTF-8 JSON serialization of a fixed-order object with keys `version`, `path`, `audience`, `appv`, `ts`, `nonce`, `id`, `cid`, `protocol`, `supersede`, `capabilities`, `metadata`, and `appId`. Set `version` to the number `5` and `protocol` to the string `"5"`. Use decoded query values, the effective nonce, the pathname, `"1"` or `"0"` for supersede, and sorted unique capabilities. Sort metadata keys by code unit before forming the object. Use an empty string for an absent app ID. Send the HMAC-SHA256 as lowercase hex.
+
+Custom authorizers receive compact fields for v5. With mTLS the server supplies the verified client ID as both `~n` and `cid`. The claimed application ID is available as `stream.appId`.
 
 ### Mutual TLS
 
@@ -338,6 +366,7 @@ Connected streams expose metadata:
 | `id`              | Server-side stream ID.                               |
 | `clientStreamId`  | Client-generated stream ID.                          |
 | `clientId`        | Client identity.                                     |
+| `appId`           | Optional claimed application ID from a v5 handshake. |
 | `appVersion`      | Client app version query value.                      |
 | `protocolVersion` | Handshake protocol version.                          |
 | `capabilities`    | Client capabilities negotiated during the handshake. |

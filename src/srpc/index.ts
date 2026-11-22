@@ -18,6 +18,7 @@ export type {
     SrpcConnection,
     SrpcMessageFns,
     SrpcMeta,
+    SrpcProtocolVersion,
     SrpcMessageHandlerFn,
     SrpcStream,
     TSrpcMessageHandlerClass,
