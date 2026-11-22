@@ -130,11 +130,17 @@ export class SrpcServer<
     private clientKeyFetcher?: (clientId: string) => Promise<false | string> | false | string;
 
     readonly streamsById = new Map<string, SrpcStream<TMeta>>();
+    /** Active streams addressable unambiguously by client ID. */
     readonly streamsByClientId = new Map<string, SrpcStream<TMeta>>();
     protected readonly pendingStreamsByClientId = new Map<string, SrpcStream<TMeta>>();
+    private readonly activeTlsStreamsByClientId?: Map<string, Set<SrpcStream<TMeta>>>;
 
     constructor(protected readonly options: ISrpcServerOptions<TClientOutput, TServerOutput>) {
         validateServerResourceOptions(options);
+        if (options.allowDuplicateTlsClientIds) {
+            if (!options.getTlsClientId) throw new Error('allowDuplicateTlsClientIds requires getTlsClientId');
+            this.activeTlsStreamsByClientId = new Map();
+        }
         this.logger = options.logger;
         this.wsServer = new WebSocket.Server({ noServer: true, maxPayload: this.maxMessageBytes });
         this.wsServer.on('connection', (ws, request) => this.attachConnection(ws, request));
@@ -384,7 +390,7 @@ export class SrpcServer<
     }
 
     private handleStreamEstablished(stream: SrpcStream<TMeta>): void {
-        const conflictingStream = this.getCurrentStreamByClientId(stream.clientId);
+        const conflictingStream = this.activeTlsStreamsByClientId ? undefined : this.getCurrentStreamByClientId(stream.clientId);
         if (conflictingStream) {
             if (stream.protocolVersion >= 2 && !stream.supersede) {
                 this.logger.warn('SRPC client connection rejected because its client ID is already active', {
@@ -404,7 +410,7 @@ export class SrpcServer<
         }
 
         this.streamsById.set(stream.id, stream);
-        this.pendingStreamsByClientId.set(stream.clientId, stream);
+        if (!this.activeTlsStreamsByClientId) this.pendingStreamsByClientId.set(stream.clientId, stream);
         this.blockedClientRequests.add(stream);
         this.postEstablishCheck(stream)
             .then(async rejected => {
@@ -471,6 +477,7 @@ export class SrpcServer<
     }
 
     protected isCurrentStream(stream: SrpcStream<TMeta>): boolean {
+        if (this.activeTlsStreamsByClientId) return this.streamsById.get(stream.id) === stream;
         // Lightweight embedders and focused unit tests may invoke the protocol
         // methods without the registry layer; normal servers always have both.
         if (!this.pendingStreamsByClientId || !this.streamsByClientId) return true;
@@ -479,11 +486,24 @@ export class SrpcServer<
 
     private activateStream(stream: SrpcStream<TMeta>): void {
         if (stream.lastPingAt < 0 || !this.isCurrentStream(stream)) return;
-        this.pendingStreamsByClientId.delete(stream.clientId);
         stream.isActivated = true;
-        this.streamsByClientId.set(stream.clientId, stream);
+        if (this.activeTlsStreamsByClientId) {
+            const streams = this.activeTlsStreamsByClientId.get(stream.clientId) ?? new Set<SrpcStream<TMeta>>();
+            streams.add(stream);
+            this.activeTlsStreamsByClientId.set(stream.clientId, streams);
+            this.updateUniqueClientStream(stream.clientId, streams);
+        } else {
+            this.pendingStreamsByClientId.delete(stream.clientId);
+            this.streamsByClientId.set(stream.clientId, stream);
+        }
         this.publishedStreams.add(stream);
         notifySrpcObservers({ type: 'connection', stream, at: Date.now() });
+    }
+
+    private updateUniqueClientStream(clientId: string, streams: Set<SrpcStream<TMeta>>): void {
+        const uniqueStream = streams.size === 1 ? streams.values().next().value : undefined;
+        if (uniqueStream) this.streamsByClientId.set(clientId, uniqueStream);
+        else this.streamsByClientId.delete(clientId);
     }
 
     private handleWsMessage(stream: SrpcStream<TMeta>, data: WebSocket.RawData): void {
@@ -825,8 +845,16 @@ export class SrpcServer<
         this.backpressuredByteStreams?.delete(stream);
         this.backpressuredByteStreamBytes?.delete(stream);
         this.streamsById?.delete(stream.id);
-        if (this.pendingStreamsByClientId?.get(stream.clientId) === stream) this.pendingStreamsByClientId.delete(stream.clientId);
-        if (this.streamsByClientId?.get(stream.clientId) === stream) this.streamsByClientId.delete(stream.clientId);
+        if (this.activeTlsStreamsByClientId) {
+            const streams = this.activeTlsStreamsByClientId.get(stream.clientId);
+            if (streams?.delete(stream)) {
+                if (!streams.size) this.activeTlsStreamsByClientId.delete(stream.clientId);
+                this.updateUniqueClientStream(stream.clientId, streams);
+            }
+        } else {
+            if (this.pendingStreamsByClientId?.get(stream.clientId) === stream) this.pendingStreamsByClientId.delete(stream.clientId);
+            if (this.streamsByClientId?.get(stream.clientId) === stream) this.streamsByClientId.delete(stream.clientId);
+        }
         const wasPublished = this.publishedStreams?.has(stream) ?? false;
         const disconnectLogData = { ...streamLogData(stream), cause, ...remoteClose };
         this.logger?.info('SRPC stream disconnected', { srpc: disconnectLogData });
@@ -1163,6 +1191,7 @@ export class SrpcServer<
 
     /** List streams physically connected to this server process. */
     async getLocalStreams(): Promise<SrpcStream<TMeta>[]> {
+        if (this.activeTlsStreamsByClientId) return [...this.activeTlsStreamsByClientId.values()].flatMap(streams => [...streams]);
         return [...this.streamsByClientId.values()];
     }
 

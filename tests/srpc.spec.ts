@@ -106,29 +106,76 @@ afterEach(() => {
 describe('srpc', () => {
     describe('mutual TLS', () => {
         it('authenticates without HMAC and uses the certificate ID for RPCs', async t => {
-            const { server, https, url, credentials } = await createMtlsHarness(t);
+            const { server, https, url, createClient } = await createMtlsHarness(t);
             let handshake: URL | undefined;
             https.prependListener('upgrade', request => {
                 handshake = new URL(request.url!, url);
             });
             server.registerMessageHandler('uEcho', (_stream, data) => Promise.resolve(data));
-            const client = new SrpcClient<ClientMessage, ServerMessage>(
-                createLogger('SrpcMtlsClient'),
-                url,
-                JsonMessage,
-                JsonMessage,
-                'label',
-                undefined,
-                undefined,
-                { enableReconnect: false, tls: credentials }
-            );
-            t.after(() => client.disconnect());
+            const client = createClient('label');
 
             await client.connect();
             assert.equal(handshake?.searchParams.get('cid'), null);
             assert.equal(handshake?.searchParams.get('signature'), null);
             assert.ok(server.streamsByClientId.has('verified-edge'));
             assert.deepEqual(await client.invoke('uEcho', { message: 'hello' }), { message: 'hello' });
+        });
+
+        it('rejects duplicate certificate IDs by default', async t => {
+            const { server, createClient } = await createMtlsHarness(t);
+            const first = createClient('first-worker');
+            const second = createClient('second-worker');
+            await first.connect();
+            await assert.rejects(second.connect(), SrpcConflictError);
+            assert.ok(first.isConnected);
+            assert.equal(server.streamsByClientId.size, 1);
+        });
+
+        it('routes concurrent RPCs to workers sharing a verified TLS identity', async t => {
+            const { server, createClient } = await createMtlsHarness(t, { allowDuplicateTlsClientIds: true });
+            const first = createClient('first-worker');
+            const second = createClient('second-worker');
+            first.registerMessageHandler('dCompute', () => ({ result: 1 }));
+            second.registerMessageHandler('dCompute', () => ({ result: 2 }));
+            server.registerMessageHandler('uEcho', (stream, data) => {
+                assert.equal(stream.clientId, 'verified-edge');
+                return data;
+            });
+
+            await Promise.all([first.connect(), second.connect({ supersede: true })]);
+            const streams = await server.getLocalStreams();
+            assert.equal(streams.length, 2);
+            const [firstStream, secondStream] = streams;
+            assert.notEqual(firstStream.id, secondStream.id);
+            assert.deepEqual(
+                streams.map(stream => stream.clientId),
+                ['verified-edge', 'verified-edge']
+            );
+            const clients = await server.listClients();
+            assert.equal(clients.length, 2);
+            const ambiguousClient = await server.resolveClient('verified-edge');
+            assert.equal(ambiguousClient, undefined);
+            const ambiguousDisconnect = await server.disconnectClient('verified-edge');
+            assert.equal(ambiguousDisconnect, false);
+            const ambiguousUpdate = await server.updateClientMetadata('verified-edge', {});
+            assert.equal(ambiguousUpdate, false);
+
+            const compute = { number: 2, operation: 'square' } as const;
+            const results = await Promise.all(streams.map(stream => server.invoke(stream, 'dCompute', compute)));
+            assert.deepEqual(new Set(results.map(response => response.result)), new Set([1, 2]));
+            const echoes = await Promise.all([first.invoke('uEcho', { message: 'first' }), second.invoke('uEcho', { message: 'second' })]);
+            assert.deepEqual(echoes, [{ message: 'first' }, { message: 'second' }]);
+
+            const disconnectedFirst = await server.disconnectClient(firstStream);
+            assert.equal(disconnectedFirst, true);
+            const remainingClient = await server.resolveClient('verified-edge');
+            assert.equal(remainingClient, secondStream);
+            const remainingResult = await server.invoke(secondStream, 'dCompute', compute);
+            assert.deepEqual(remainingResult, results[1]);
+            const disconnectedSecond = await server.disconnectClient('verified-edge');
+            assert.equal(disconnectedSecond, true);
+            const remainingStreams = await server.getLocalStreams();
+            assert.deepEqual(remainingStreams, []);
         });
 
         it('gives a custom authorizer the verified ID and respects its decision', async t => {
@@ -157,7 +204,7 @@ describe('srpc', () => {
         });
 
         it('rejects HTTPS clients without an authorized client certificate', async t => {
-            const { url, credentials } = await createMtlsHarness(t, false);
+            const { url, credentials } = await createMtlsHarness(t, { rejectUnauthorized: false });
             const handshake = new URL(url);
             handshake.search = new URLSearchParams({ id: randomUUID(), appv: 'test', pv: '3', cid: 'verified-edge' }).toString();
 
@@ -3978,7 +4025,7 @@ function createTrafficLoggingFixture(peer: 'server' | 'client', logTraffic: Srpc
     };
 }
 
-async function createMtlsHarness(t: TestContext, rejectUnauthorized = true) {
+async function createMtlsHarness(t: TestContext, { rejectUnauthorized = true, allowDuplicateTlsClientIds = false } = {}) {
     const fixtures = join(process.cwd(), 'tests', 'fixtures');
     const cert = readFileSync(join(fixtures, 'srpc-mtls.crt'));
     const credentials = { cert, key: readFileSync(join(fixtures, 'http-tls.key')), ca: cert };
@@ -3989,6 +4036,7 @@ async function createMtlsHarness(t: TestContext, rejectUnauthorized = true) {
         serverMessage: JsonMessage,
         wsPath: '/srpc-test',
         httpServer: https,
+        allowDuplicateTlsClientIds,
         getTlsClientId: socket => {
             const cn = socket.getPeerCertificate()?.subject?.CN;
             if (typeof cn === 'string') return cn;
@@ -4003,7 +4051,22 @@ async function createMtlsHarness(t: TestContext, rejectUnauthorized = true) {
     https.listen(0, '127.0.0.1');
     await listening;
     const { port } = https.address() as AddressInfo;
-    return { server, https, url: `wss://localhost:${port}/srpc-test`, credentials };
+    const url = `wss://localhost:${port}/srpc-test`;
+    const createClient = (label: string) => {
+        const client = new SrpcClient<ClientMessage, ServerMessage>(
+            createLogger('SrpcMtlsClient'),
+            url,
+            JsonMessage,
+            JsonMessage,
+            label,
+            undefined,
+            undefined,
+            { enableReconnect: false, tls: credentials }
+        );
+        t.after(() => client.disconnect());
+        return client;
+    };
+    return { server, https, url, credentials, createClient };
 }
 
 async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMessage, ServerMessage>> = {}) {
