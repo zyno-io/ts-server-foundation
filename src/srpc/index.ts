@@ -1,6 +1,6 @@
 export { SrpcByteStream } from './SrpcByteStream';
 export type { IByteStream, IByteStreamable } from './SrpcByteStream';
-export type { SrpcClientOptions } from './SrpcClient';
+export type { ISrpcClientOptions, SrpcClientOptions } from './SrpcClient';
 export { SrpcClient, SrpcConflictError } from './SrpcClient';
 export { notifySrpcObservers, registerSrpcObserver, type SrpcObservation, type SrpcObserver } from './observer';
 export { SrpcServer } from './SrpcServer';

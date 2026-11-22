@@ -33,7 +33,15 @@ import {
     deferred,
     registerSrpcObserver
 } from '../src';
-import type { BaseMessage, IByteStreamable, ISrpcServerOptions, SrpcClientOptions, SrpcDisconnectCause, SrpcObservation } from '../src';
+import type {
+    BaseMessage,
+    IByteStreamable,
+    ISrpcClientOptions,
+    ISrpcServerOptions,
+    SrpcClientOptions,
+    SrpcDisconnectCause,
+    SrpcObservation
+} from '../src';
 import { init as initTelemetry, resetTelemetryForTests } from '../src/telemetry/otel';
 import {
     serializeSrpcError,
@@ -112,16 +120,16 @@ describe('srpc', () => {
                 handshake = new URL(request.url!, url);
             });
             server.registerMessageHandler('uEcho', (_stream, data) => Promise.resolve(data));
-            const client = new SrpcClient<ClientMessage, ServerMessage>(
-                createLogger('SrpcMtlsClient'),
-                url,
-                JsonMessage,
-                JsonMessage,
-                'label',
-                undefined,
-                undefined,
-                { enableReconnect: false, tls: credentials }
-            );
+            const options: ISrpcClientOptions<ClientMessage, ServerMessage> = {
+                logger: createLogger('SrpcMtlsClient'),
+                uri: url,
+                clientMessage: JsonMessage,
+                serverMessage: JsonMessage,
+                clientId: 'label',
+                enableReconnect: false,
+                tls: credentials
+            };
+            const client = new SrpcClient(options);
             t.after(() => client.disconnect());
 
             await client.connect();
@@ -167,7 +175,12 @@ describe('srpc', () => {
         it('requires wss and verifies the server certificate hostname', async t => {
             const { url, credentials } = await createMtlsHarness(t);
             const createClient = (uri: string) =>
-                new SrpcClient<ClientMessage, ServerMessage>(createLogger('SrpcMtlsClient'), uri, JsonMessage, JsonMessage, 'edge', {}, undefined, {
+                new SrpcClient<ClientMessage, ServerMessage>({
+                    logger: createLogger('SrpcMtlsClient'),
+                    uri,
+                    clientMessage: JsonMessage,
+                    serverMessage: JsonMessage,
+                    clientId: 'edge',
                     enableReconnect: false,
                     tls: credentials
                 });
@@ -589,16 +602,14 @@ describe('srpc', () => {
         assert.throws(() => new SrpcServer({ ...serverOptions, defaultUnspecifiedProtocolVersion: 4 as never }), /defaultUnspecifiedProtocolVersion/);
 
         const createClient = (clientOptions: SrpcClientOptions) =>
-            new SrpcClient<ClientMessage, ServerMessage>(
-                createLogger('SrpcClientResourceOptionsTest'),
-                'ws://127.0.0.1:1/srpc-resource-options',
-                JsonMessage,
-                JsonMessage,
-                'resource-options-client',
-                undefined,
-                undefined,
-                clientOptions
-            );
+            new SrpcClient<ClientMessage, ServerMessage>({
+                logger: createLogger('SrpcClientResourceOptionsTest'),
+                uri: 'ws://127.0.0.1:1/srpc-resource-options',
+                clientMessage: JsonMessage,
+                serverMessage: JsonMessage,
+                clientId: 'resource-options-client',
+                ...clientOptions
+            });
         for (const name of [
             'maxPendingRequests',
             'maxPendingRequestBytes',
@@ -4038,16 +4049,16 @@ async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMes
             clientOptions?: SrpcClientOptions,
             codecs = { clientMessage: JsonMessage, serverMessage: JsonMessage }
         ) {
-            const client = new SrpcClient<ClientMessage, ServerMessage>(
-                createLogger(`SrpcClient:${clientId}`),
-                `ws://127.0.0.1:${port}/srpc-test`,
-                codecs.clientMessage,
-                codecs.serverMessage,
+            const client = new SrpcClient<ClientMessage, ServerMessage>({
+                logger: createLogger(`SrpcClient:${clientId}`),
+                uri: `ws://127.0.0.1:${port}/srpc-test`,
+                ...codecs,
                 clientId,
-                meta,
+                clientMeta: meta,
                 clientSecret,
-                { enableReconnect: false, ...clientOptions }
-            );
+                enableReconnect: false,
+                ...clientOptions
+            });
             clients.push(client);
             return client;
         },

@@ -73,6 +73,32 @@ export interface SrpcClientOptions {
     lateReplyTombstoneTtlMs?: number;
 }
 
+export interface ISrpcClientOptions<
+    TClientInput extends BaseMessage = BaseMessage,
+    TServerOutput extends BaseMessage = BaseMessage
+> extends SrpcClientOptions {
+    logger: ISrpcLogger;
+    uri: string;
+    clientMessage: SrpcMessageFns<TClientInput>;
+    serverMessage: SrpcMessageFns<TServerOutput>;
+    /** HMAC client identity or a local label for certificate-authenticated connections. */
+    clientId: string;
+    clientMeta?: SrpcMeta;
+    /** Defaults to the application's SRPC_AUTH_SECRET for HMAC authentication. */
+    clientSecret?: string;
+}
+
+type SrpcClientPositionalArgs<TClientInput extends BaseMessage, TServerOutput extends BaseMessage> = [
+    logger: ISrpcLogger,
+    uri: string,
+    clientMessage: SrpcMessageFns<TClientInput>,
+    serverMessage: SrpcMessageFns<TServerOutput>,
+    clientId: string,
+    clientMeta?: SrpcMeta,
+    clientSecret?: string,
+    clientOptions?: SrpcClientOptions
+];
+
 const DefaultMaxRequests = 128;
 const DefaultMaxBytes = 8 * 1024 * 1024;
 const DefaultMaxMessageBytes = 8 * 1024 * 1024;
@@ -124,19 +150,38 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     private readonly byteStreamDisconnectHandlersByGeneration = new Map<number, Set<() => void>>();
     private awaitingActivation?: { ws: WebSocket; generation: number; clearConnectTimeout: () => void; helloReceived: boolean };
     private clearConnectTimeout?: () => void;
+    private readonly logger: ISrpcLogger;
+    private readonly uri: string;
+    private readonly clientMessage: SrpcMessageFns<TClientInput>;
+    private readonly serverMessage: SrpcMessageFns<TServerOutput>;
+    private readonly clientId: string;
+    private readonly clientMeta?: SrpcMeta;
+    private readonly clientSecret?: string;
+    private readonly clientOptions?: SrpcClientOptions;
 
     isConnected = false;
 
-    constructor(
-        private readonly logger: ISrpcLogger,
-        private readonly uri: string,
-        private readonly clientMessage: SrpcMessageFns<TClientInput>,
-        private readonly serverMessage: SrpcMessageFns<TServerOutput>,
-        private readonly clientId: string,
-        private readonly clientMeta?: SrpcMeta,
-        private readonly clientSecret?: string,
-        private readonly clientOptions?: SrpcClientOptions
-    ) {
+    constructor(options: ISrpcClientOptions<TClientInput, TServerOutput>);
+    /** @deprecated Pass a single options object instead. */
+    constructor(...args: SrpcClientPositionalArgs<TClientInput, TServerOutput>);
+    constructor(...args: [options: ISrpcClientOptions<TClientInput, TServerOutput>] | SrpcClientPositionalArgs<TClientInput, TServerOutput>) {
+        if (args.length === 1) {
+            const [options] = args;
+            this.clientOptions = options;
+            ({
+                logger: this.logger,
+                uri: this.uri,
+                clientMessage: this.clientMessage,
+                serverMessage: this.serverMessage,
+                clientId: this.clientId,
+                clientMeta: this.clientMeta,
+                clientSecret: this.clientSecret
+            } = options);
+        } else {
+            [this.logger, this.uri, this.clientMessage, this.serverMessage, this.clientId, this.clientMeta, this.clientSecret, this.clientOptions] =
+                args;
+        }
+        const { clientOptions, clientMessage, serverMessage } = this;
         validateClientResourceOptions(clientOptions);
         if (
             clientOptions?.protocolVersion === 4 &&

@@ -197,7 +197,14 @@ if (stream) {
 import { SrpcClient, SrpcConflictError } from '@zyno-io/ts-server-foundation';
 import { ClientMessage, ServerMessage } from './generated/proto/service';
 
-const client = new SrpcClient(logger, 'wss://api.example.com/srpc', ClientMessage, ServerMessage, 'worker-1', { role: 'worker' }, 'shared-secret', {
+const client = new SrpcClient({
+    logger,
+    uri: 'wss://api.example.com/srpc',
+    clientMessage: ClientMessage,
+    serverMessage: ServerMessage,
+    clientId: 'worker-1',
+    clientMeta: { role: 'worker' },
+    clientSecret: 'shared-secret',
     enableReconnect: true
 });
 
@@ -225,14 +232,14 @@ const echo = await client.invoke('uEcho', { message: 'hello' });
 client.disconnect();
 ```
 
-Client options:
+The constructor takes an `ISrpcClientOptions` object. The positional overload is deprecated and continues to accept `SrpcClientOptions` as its final argument.
 
 | Option            | Default | Description                                                                             |
 | ----------------- | ------- | --------------------------------------------------------------------------------------- |
 | `enableReconnect` | `true`  | Reconnects after unexpected disconnects.                                                |
 | `logTraffic`      | `false` | [Traffic logging](#traffic-logging); heartbeats are excluded unless explicitly enabled. |
 
-The exported `SrpcClientOptions` type describes this object. `connect({ supersede?: boolean })` controls only that connection attempt and is separate from the constructor options.
+`connect({ supersede?: boolean })` applies to that connection attempt.
 
 Protocol-v2, protocol-v3, and protocol-v4 connections reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections retain replacement behavior: a later connection with the same `clientId` silently supersedes the existing stream.
 
@@ -309,7 +316,12 @@ const server = new SrpcServer({
 });
 httpsServer.listen(443);
 
-const client = new SrpcClient(logger, 'wss://rpc.example.net/srpc', clientMessage, serverMessage, 'worker', undefined, undefined, {
+const client = new SrpcClient({
+    logger,
+    uri: 'wss://rpc.example.net/srpc',
+    clientMessage,
+    serverMessage,
+    clientId: 'worker',
     tls: { ca: serverCaBundle, cert: clientCertificate, key: clientKey }
 });
 await client.connect();
