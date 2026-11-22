@@ -232,16 +232,15 @@ async function runExistingRepl(target: ReplTarget, options: ReplCliOptions, io: 
 }
 
 function createReplClient(url: string, enableReconnect: boolean): SrpcClient<DCClientMsg, DCServerMsg> {
-    const client = new SrpcClient<DCClientMsg, DCServerMsg>(
-        { info() {}, warn() {}, error() {}, debug() {} },
-        url,
-        DevConsoleClientMessage,
-        DevConsoleServerMessage,
-        `tsf-repl-${process.pid}-${randomUUID()}`,
-        undefined,
-        REPL_CLIENT_SECRET,
-        { enableReconnect }
-    );
+    const client = new SrpcClient<DCClientMsg, DCServerMsg>({
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        uri: url,
+        clientMessage: DevConsoleClientMessage,
+        serverMessage: DevConsoleServerMessage,
+        clientId: `tsf-repl-${process.pid}-${randomUUID()}`,
+        clientSecret: REPL_CLIENT_SECRET,
+        enableReconnect
+    });
     client.registerMessageHandler('dEvent', () => ({}));
     return client;
 }

@@ -180,7 +180,7 @@ export function isSrpcRequestAcknowledgment(message: BaseMessage): boolean {
     );
 }
 
-/** Refuse v4 negotiation when a consumer's codec silently drops the receipt field. */
+/** Check whether the codec preserves receipts for acknowledgment-capable protocols. */
 export function supportsSrpcRequestAcknowledgments<T extends BaseMessage>(codec: SrpcMessageFns<T>): boolean {
     try {
         const encoded = encodeSrpcMessage(codec, { requestId: 'srpc-ack-probe', requestAck: true } as T);
@@ -245,6 +245,12 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     defaultUnspecifiedProtocolVersion?: 1 | 2 | 3;
     logTraffic?: SrpcTrafficLogging;
     httpServer?: import('node:http').Server;
+    /**
+     * Authenticate with the client certificate on an HTTPS listener configured for mTLS.
+     * Receives only an authorized TLS socket. Return the peer's verified ID or undefined to deny the connection.
+     * If a custom client authorizer is also set, it receives this ID as `cid`.
+     */
+    getTlsClientId?: (socket: import('node:tls').TLSSocket) => string | undefined;
     /** How long replies for locally abandoned requests are ignored. Defaults to 60 seconds. */
     lateReplyTombstoneTtlMs?: number;
     /** Revoke an unacknowledged v4 stream at RPC expiry when its budget exceeds the 3s receipt window. Defaults to true. */
@@ -279,6 +285,8 @@ export interface ISrpcServerOptions<TClientOutput extends BaseMessage, TServerOu
     authAudience?: string;
 }
 
+export type SrpcProtocolVersion = 1 | 2 | 3 | 4 | 5;
+
 export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     $ws: WebSocket;
     $queue: Map<string, IQueuedRequest>;
@@ -286,9 +294,10 @@ export interface SrpcStream<T = SrpcMeta> extends IByteStreamable {
     readonly clientStreamId: string;
     readonly address: string;
     readonly clientId: string;
+    readonly appId?: string;
     readonly appVersion: string;
     readonly configureTs: number;
-    readonly protocolVersion: 1 | 2 | 3 | 4;
+    readonly protocolVersion: SrpcProtocolVersion;
     /** Optional client capabilities negotiated during the WebSocket upgrade. */
     readonly capabilities?: ReadonlySet<string>;
     readonly supersede: boolean;
