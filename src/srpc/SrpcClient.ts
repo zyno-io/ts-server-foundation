@@ -49,9 +49,7 @@ export class SrpcConflictError extends Error {
 }
 
 export interface SrpcClientOptions {
-    /** Defaults to v3. Protocol 4 and later require requestAck in both codecs. */
-    protocolVersion?: 3 | 4 | 5;
-    /** Application ID sent as part of a v5 handshake. */
+    /** Application ID sent as part of the handshake. */
     appId?: string;
     enableReconnect?: boolean;
     logTraffic?: SrpcTrafficLogging;
@@ -198,11 +196,8 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
         const { clientOptions } = this;
         validateClientResourceOptions(clientOptions);
-        if (
-            this.protocolVersion >= 4 &&
-            (!supportsSrpcRequestAcknowledgments(this.clientMessage) || !supportsSrpcRequestAcknowledgments(this.serverMessage))
-        ) {
-            throw new Error(`Protocol v${this.protocolVersion} requires request acknowledgment codecs`);
+        if (!supportsSrpcRequestAcknowledgments(this.clientMessage) || !supportsSrpcRequestAcknowledgments(this.serverMessage)) {
+            throw new Error('SrpcClient requires v5 request acknowledgment codecs');
         }
         this.enableReconnect = clientOptions?.enableReconnect !== false;
         this.senderAnnouncements = clientOptions?.senderAnnouncements !== false;
@@ -465,7 +460,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
         this.logTraffic('inbound', message);
         if (message.requestAck) {
-            if (this.protocolVersion < 4 || !isSrpcRequestAcknowledgment(message)) {
+            if (!isSrpcRequestAcknowledgment(message)) {
                 this.closeGenerationWithError(ws, generation, 'badArg', 'Invalid request acknowledgment');
                 return;
             }
@@ -533,8 +528,7 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
             this.closeGenerationWithError(ws, generation, 'badArg', 'Too many in-flight server requests');
             return;
         }
-        const cancelAcknowledgment =
-            !notification && this.protocolVersion >= 4 ? this.scheduleRequestAcknowledgment(generation, message.requestId!) : undefined;
+        const cancelAcknowledgment = notification ? undefined : this.scheduleRequestAcknowledgment(generation, message.requestId!);
         pressure.requests++;
         pressure.bytes += bytes;
         this.handlerPressureByGeneration.set(generation, pressure);
@@ -695,10 +689,6 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         }
     }
 
-    private get protocolVersion(): 3 | 4 | 5 {
-        return this.clientOptions?.protocolVersion ?? 3;
-    }
-
     private generateWsUrl(): string {
         const appVersion = '0.0.0';
         const timestamp = String(Date.now());
@@ -706,65 +696,43 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
         const baseUri = tls || this.uri.startsWith('ws://') || this.uri.startsWith('wss://') ? this.uri : `ws://${this.uri}`;
         const url = new URL(baseUri);
         if (tls && url.protocol !== 'wss:') throw new Error('SRPC client certificates require a wss: URL');
-        const protocolVersion = this.protocolVersion;
-        const compact = protocolVersion === 5;
-        const appId = compact ? this.clientOptions?.appId : undefined;
+        const appId = this.clientOptions?.appId;
         const capabilities = this.senderAnnouncements ? 'sender-announcements' : '';
         const metadata = srpcQueryMetadata(
             Object.fromEntries(Object.entries(this.clientMeta ?? {}).map(([key, value]) => [key, String(value)])),
-            compact
+            true
         );
-        const params = new URLSearchParams(
-            compact
-                ? {
-                      '~p': '5',
-                      '~v': appVersion,
-                      '~t': timestamp,
-                      '~i': this.streamId,
-                      ...(appId ? { '~a': appId } : {}),
-                      ...(capabilities ? { '~c': capabilities } : {}),
-                      ...(this.supersede ? { '~x': '1' } : {}),
-                      ...metadata
-                  }
-                : {
-                      pv: String(protocolVersion),
-                      appv: appVersion,
-                      ts: timestamp,
-                      id: this.streamId,
-                      ...(capabilities ? { cap: capabilities } : {}),
-                      ...(this.supersede ? { supersede: '1' } : {}),
-                      ...metadata
-                  }
-        );
+        const params = new URLSearchParams({
+            '~p': '5',
+            '~v': appVersion,
+            '~t': timestamp,
+            '~i': this.streamId,
+            ...(appId ? { '~a': appId } : {}),
+            ...(capabilities ? { '~c': capabilities } : {}),
+            ...(this.supersede ? { '~x': '1' } : {}),
+            ...metadata
+        });
 
         if (!tls) {
             const secret = this.clientSecret ?? getCurrentApp().config.SRPC_AUTH_SECRET;
             if (!secret) throw new Error('SRPC_AUTH_SECRET is not configured.');
-            const nonce = compact ? this.streamId : uuid7();
             const audience = this.clientOptions?.authAudience ?? url.pathname;
-            const signable = canonicalSrpcAuth(url.pathname, protocolVersion, {
+            const signable = canonicalSrpcAuth(url.pathname, 5, {
                 appId,
                 appVersion,
                 timestamp,
                 connectionId: this.streamId,
                 clientId: this.clientId,
-                nonce,
+                nonce: this.streamId,
                 audience,
                 supersede: this.supersede,
                 capabilities,
                 metadata
             });
             const signature = createHmac('sha256', secret).update(signable).digest('hex');
-            if (compact) {
-                params.set('~n', this.clientId);
-                params.set('~d', audience);
-                params.set('~s', signature);
-            } else {
-                params.set('cid', this.clientId);
-                params.set('signature', signature);
-                params.set('nonce', nonce);
-                params.set('aud', audience);
-            }
+            params.set('~n', this.clientId);
+            params.set('~d', audience);
+            params.set('~s', signature);
         }
 
         this.supersede = false;
@@ -1226,9 +1194,6 @@ function configuredPositiveInteger(value: number | undefined, fallback: number):
 
 function validateClientResourceOptions(options: SrpcClientOptions | undefined): void {
     if (!options) return;
-    if (options.protocolVersion !== undefined && options.protocolVersion !== 3 && options.protocolVersion !== 4 && options.protocolVersion !== 5) {
-        throw new Error('sRPC client protocolVersion must be 3, 4, or 5');
-    }
     for (const [name, value] of [
         ['maxPendingRequests', options.maxPendingRequests],
         ['maxPendingRequestBytes', options.maxPendingRequestBytes],

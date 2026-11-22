@@ -899,7 +899,25 @@ export class SrpcServer<
         authenticatedByTls: boolean
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
-            const result = await this.clientAuthorizer(handshake.query, request);
+            const { query } = handshake;
+            if (handshake.protocolVersion === 5) {
+                const aliases = {
+                    pv: '5',
+                    appv: query['~v'],
+                    ts: query['~t'],
+                    id: query['~i'],
+                    cid: query['~n'],
+                    nonce: handshake.nonce,
+                    aud: query['~d'],
+                    signature: query['~s'],
+                    cap: query['~c'],
+                    supersede: query['~x']
+                };
+                for (const [key, value] of Object.entries(aliases)) {
+                    if (value !== undefined) query[key] = value;
+                }
+            }
+            const result = await this.clientAuthorizer(query, request);
             if (result === false) return new AuthenticationFailure('custom authorizer rejected');
             await this.beforeClientAdmission();
             return result;

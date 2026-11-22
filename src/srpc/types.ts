@@ -180,7 +180,7 @@ export function isSrpcRequestAcknowledgment(message: BaseMessage): boolean {
     );
 }
 
-/** Refuse v4 negotiation when a consumer's codec silently drops the receipt field. */
+/** Check whether the codec preserves receipts for acknowledgment-capable protocols. */
 export function supportsSrpcRequestAcknowledgments<T extends BaseMessage>(codec: SrpcMessageFns<T>): boolean {
     try {
         const encoded = encodeSrpcMessage(codec, { requestId: 'srpc-ack-probe', requestAck: true } as T);
