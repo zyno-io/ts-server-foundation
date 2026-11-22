@@ -88,17 +88,6 @@ export interface ISrpcClientOptions<
     clientSecret?: string;
 }
 
-type SrpcClientPositionalArgs<TClientInput extends BaseMessage, TServerOutput extends BaseMessage> = [
-    logger: ISrpcLogger,
-    uri: string,
-    clientMessage: SrpcMessageFns<TClientInput>,
-    serverMessage: SrpcMessageFns<TServerOutput>,
-    clientId: string,
-    clientMeta?: SrpcMeta,
-    clientSecret?: string,
-    clientOptions?: SrpcClientOptions
-];
-
 const DefaultMaxRequests = 128;
 const DefaultMaxBytes = 8 * 1024 * 1024;
 const DefaultMaxMessageBytes = 8 * 1024 * 1024;
@@ -163,10 +152,28 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
 
     constructor(options: ISrpcClientOptions<TClientInput, TServerOutput>);
     /** @deprecated Pass a single options object instead. */
-    constructor(...args: SrpcClientPositionalArgs<TClientInput, TServerOutput>);
-    constructor(...args: [options: ISrpcClientOptions<TClientInput, TServerOutput>] | SrpcClientPositionalArgs<TClientInput, TServerOutput>) {
-        if (args.length === 1) {
-            const [options] = args;
+    constructor(
+        logger: ISrpcLogger,
+        uri: string,
+        clientMessage: SrpcMessageFns<TClientInput>,
+        serverMessage: SrpcMessageFns<TServerOutput>,
+        clientId: string,
+        clientMeta?: SrpcMeta,
+        clientSecret?: string,
+        clientOptions?: SrpcClientOptions
+    );
+    constructor(
+        optionsOrLogger: ISrpcClientOptions<TClientInput, TServerOutput> | ISrpcLogger,
+        uri?: string,
+        clientMessage?: SrpcMessageFns<TClientInput>,
+        serverMessage?: SrpcMessageFns<TServerOutput>,
+        clientId?: string,
+        clientMeta?: SrpcMeta,
+        clientSecret?: string,
+        legacyOptions?: SrpcClientOptions
+    ) {
+        if (uri === undefined) {
+            const options = optionsOrLogger as ISrpcClientOptions<TClientInput, TServerOutput>;
             this.clientOptions = options;
             ({
                 logger: this.logger,
@@ -178,14 +185,20 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
                 clientSecret: this.clientSecret
             } = options);
         } else {
-            [this.logger, this.uri, this.clientMessage, this.serverMessage, this.clientId, this.clientMeta, this.clientSecret, this.clientOptions] =
-                args;
+            this.logger = optionsOrLogger as ISrpcLogger;
+            this.uri = uri;
+            this.clientMessage = clientMessage!;
+            this.serverMessage = serverMessage!;
+            this.clientId = clientId!;
+            this.clientMeta = clientMeta;
+            this.clientSecret = clientSecret;
+            this.clientOptions = legacyOptions;
         }
-        const { clientOptions, clientMessage, serverMessage } = this;
+        const { clientOptions } = this;
         validateClientResourceOptions(clientOptions);
         if (
             clientOptions?.protocolVersion === 4 &&
-            (!supportsSrpcRequestAcknowledgments(clientMessage) || !supportsSrpcRequestAcknowledgments(serverMessage))
+            (!supportsSrpcRequestAcknowledgments(this.clientMessage) || !supportsSrpcRequestAcknowledgments(this.serverMessage))
         ) {
             throw new Error('Protocol v4 requires request acknowledgment codecs');
         }
