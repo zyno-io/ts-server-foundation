@@ -255,7 +255,7 @@ This is wire-compatible with empty legacy `PingPong` messages. Old protobuf deco
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256. New clients send `pv=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `cap` capabilities and `supersede`, and custom metadata as ordinary WebSocket query parameters. Every query parameter other than those transport fields becomes `stream.meta`. The canonical signature covers the request path, audience, protocol version, capabilities, and normalized metadata.
+Clients sign connection metadata with HMAC-SHA256 by default. New clients send `pv=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `cap` capabilities and `supersede`, and custom metadata as ordinary WebSocket query parameters. Every query parameter other than those transport fields becomes `stream.meta`. The canonical signature covers the request path, audience, protocol version, capabilities, and normalized metadata.
 
 Servers require an explicit `pv` by default, but accept `_v` when `pv` is absent for compatibility. The protocol version selects the authentication format: v1/v2 use the legacy HMAC format and v3/v4 use the canonical HMAC format. Legacy `_supersede` and `m--<key>` metadata are accepted; `_supersede` is used only when `supersede` is absent, and `m--<key>` is normalized to `<key>` in `stream.meta` with unprefixed metadata taking precedence. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to use its original signature (`1`, `appv`, `ts`, `id`, `cid`), whose stream ID is consumed once for replay protection and whose capability field is ignored. Clients use v3 by default. Set `SrpcClientOptions.protocolVersion: 4` after both envelope codecs and the server support receipts. The canonical signature binds the advertised version. Deploy servers before clients: v4 requires a server that recognizes v4. An explicit `pv=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
 
@@ -280,6 +280,42 @@ server.setClientAuthorizer(async (query, request) => {
 The callback receives the raw query map as `Record<string, string>`, including signed fields and custom metadata. Once configured, it is responsible for all authentication; the default HMAC validation and `setClientKeyFetcher()` path are not also run. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata.
 
 Clock drift is controlled by `SRPC_AUTH_CLOCK_DRIFT_MS`, defaulting to 30 seconds.
+
+### Mutual TLS
+
+Use an HTTPS listener that requests and verifies client certificates, and set `getTlsClientId` to derive the sRPC identity from the authorized TLS peer.
+
+```ts
+import { createServer } from 'node:https';
+import { SrpcClient, SrpcServer } from '@zyno-io/ts-server-foundation';
+
+const httpsServer = createServer({
+    cert: serverCertificate,
+    key: serverKey,
+    ca: clientCaBundle,
+    requestCert: true,
+    rejectUnauthorized: true
+});
+const server = new SrpcServer({
+    logger,
+    clientMessage,
+    serverMessage,
+    wsPath: '/srpc',
+    httpServer: httpsServer,
+    getTlsClientId: socket => {
+        const cn = socket.getPeerCertificate()?.subject?.CN;
+        if (typeof cn === 'string' && allowedClientIds.has(cn)) return cn;
+    }
+});
+httpsServer.listen(443);
+
+const client = new SrpcClient(logger, 'wss://rpc.example.net/srpc', clientMessage, serverMessage, 'worker', undefined, undefined, {
+    tls: { ca: serverCaBundle, cert: clientCertificate, key: clientKey }
+});
+await client.connect();
+```
+
+The client verifies the server certificate and requires a `wss:` URL. It sends the normal protocol fields and metadata without a shared secret or claimed `cid`. The server uses the ID returned by `getTlsClientId` as `stream.clientId` and rejects an unauthorized TLS peer or an absent ID. A custom `setClientAuthorizer` can add an authorization check and receives the verified ID in `query.cid`.
 
 ## Streams
 

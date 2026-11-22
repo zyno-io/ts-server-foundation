@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { TLSSocket } from 'node:tls';
 import WebSocket from 'ws';
 
 import { getCurrentApp } from '../app';
@@ -167,7 +168,19 @@ export class SrpcServer<
     ) => {
         const url = new URL(info.req.url ?? '', 'http://localhost');
         const query = Object.fromEntries(url.searchParams.entries());
-        const { id: clientStreamId, cid: clientId, appv: appVersion } = query;
+        const { id: clientStreamId, appv: appVersion } = query;
+        const getTlsClientId = this.options.getTlsClientId;
+        const socket = info.req.socket;
+        let clientId = query.cid;
+        if (getTlsClientId) {
+            try {
+                clientId = socket instanceof TLSSocket && socket.authorized ? (getTlsClientId(socket) ?? '') : '';
+            } catch (error) {
+                this.logger.error('Error resolving SRPC TLS client identity', error);
+                cb(false, 500, 'Error during authentication');
+                return;
+            }
+        }
         const address = this.getRemoteAddress(info.req);
 
         const protocolVersionParameter = query.pv ?? query._v;
@@ -183,6 +196,10 @@ export class SrpcServer<
             this.logger.warn(event, { srpc: { ...handshakeLogData, ...extra } });
             cb(false, code, safeHandshakeMessage(message));
         };
+        if (getTlsClientId && !clientId) {
+            rejectHandshake('SRPC TLS peer has no authorized client identity', 403, 'Failed authentication');
+            return;
+        }
         if (
             !clientStreamId ||
             !clientId ||
@@ -215,8 +232,9 @@ export class SrpcServer<
             return;
         }
 
+        if (getTlsClientId) query.cid = clientId;
         this.pendingHandshakeCount++;
-        this.validateClientAuth(query, info.req, protocolVersion)
+        this.validateClientAuth(query, info.req, protocolVersion, Boolean(getTlsClientId))
             .then(
                 result => {
                     if (!result || result instanceof AuthenticationFailure) {
@@ -874,13 +892,18 @@ export class SrpcServer<
     private async validateClientAuth(
         meta: Record<string, string>,
         request: IncomingMessage,
-        protocolVersion: 1 | 2 | 3 | 4
+        protocolVersion: 1 | 2 | 3 | 4,
+        authenticatedByTls: boolean
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
             const result = await this.clientAuthorizer(meta, request);
             if (result === false) return new AuthenticationFailure('custom authorizer rejected');
             await this.beforeClientAdmission();
             return result;
+        }
+        if (authenticatedByTls) {
+            await this.beforeClientAdmission();
+            return true;
         }
 
         const appv = String(meta.appv ?? '');

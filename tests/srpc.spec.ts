@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { Socket } from 'node:net';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
-import { afterEach, describe, it } from 'node:test';
+import { afterEach, describe, it, type TestContext } from 'node:test';
 import WebSocket from 'ws';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace';
 
@@ -100,6 +104,82 @@ afterEach(() => {
 });
 
 describe('srpc', () => {
+    describe('mutual TLS', () => {
+        it('authenticates without HMAC and uses the certificate ID for RPCs', async t => {
+            const { server, https, url, credentials } = await createMtlsHarness(t);
+            let handshake: URL | undefined;
+            https.prependListener('upgrade', request => {
+                handshake = new URL(request.url!, url);
+            });
+            server.registerMessageHandler('uEcho', (_stream, data) => Promise.resolve(data));
+            const client = new SrpcClient<ClientMessage, ServerMessage>(
+                createLogger('SrpcMtlsClient'),
+                url,
+                JsonMessage,
+                JsonMessage,
+                'label',
+                undefined,
+                undefined,
+                { enableReconnect: false, tls: credentials }
+            );
+            t.after(() => client.disconnect());
+
+            await client.connect();
+            assert.equal(handshake?.searchParams.get('cid'), null);
+            assert.equal(handshake?.searchParams.get('signature'), null);
+            assert.ok(server.streamsByClientId.has('verified-edge'));
+            assert.deepEqual(await client.invoke('uEcho', { message: 'hello' }), { message: 'hello' });
+        });
+
+        it('gives a custom authorizer the verified ID and respects its decision', async t => {
+            const { server, url, credentials } = await createMtlsHarness(t);
+            let capturedId: string | undefined;
+            server.setClientAuthorizer(query => {
+                capturedId = query.cid;
+                return false;
+            });
+            const handshake = new URL(url);
+            handshake.search = new URLSearchParams({ id: randomUUID(), appv: 'test', pv: '3', cid: 'claimed-id' }).toString();
+
+            await assertWebSocketRejected(handshake.href, 403, credentials);
+            assert.equal(capturedId, 'verified-edge');
+            assert.equal(server.streamsById.size, 0);
+        });
+
+        it('rejects a plaintext client even when it has valid HMAC credentials', async () => {
+            const harness = await createHarness({ getTlsClientId: () => 'must-not-be-used' });
+            try {
+                await assertWebSocketRejected(createSignedRawWebSocketUrl(harness.port, 'signed-client'), 403);
+                assert.equal(harness.server.streamsById.size, 0);
+            } finally {
+                await harness.close();
+            }
+        });
+
+        it('rejects HTTPS clients without an authorized client certificate', async t => {
+            const { url, credentials } = await createMtlsHarness(t, false);
+            const handshake = new URL(url);
+            handshake.search = new URLSearchParams({ id: randomUUID(), appv: 'test', pv: '3', cid: 'verified-edge' }).toString();
+
+            await assertWebSocketRejected(handshake.href, 403, { ca: credentials.ca });
+        });
+
+        it('requires wss and verifies the server certificate hostname', async t => {
+            const { url, credentials } = await createMtlsHarness(t);
+            const createClient = (uri: string) =>
+                new SrpcClient<ClientMessage, ServerMessage>(createLogger('SrpcMtlsClient'), uri, JsonMessage, JsonMessage, 'edge', {}, undefined, {
+                    enableReconnect: false,
+                    tls: credentials
+                });
+            const wrongHost = createClient(url.replace('localhost', '127.0.0.1'));
+            t.after(() => wrongHost.disconnect());
+
+            assert.throws(() => createClient(url.replace('wss:', 'ws:')).connect(), /require a wss:/);
+            await assert.rejects(wrongHost.connect(), /altname|does not match certificate|Connection failed/i);
+            assert.equal(wrongHost.isConnected, false);
+        });
+    });
+
     for (const cause of ['disconnect', 'supersede', 'timeout', 'conflict', 'badArg'] as const) {
         it(`preserves the disconnect code and ${cause} cause through an existing protobuf envelope`, () => {
             const serialized = serializeSrpcError(new SrpcStreamDisconnectedError('endpoint', cause));
@@ -3898,6 +3978,34 @@ function createTrafficLoggingFixture(peer: 'server' | 'client', logTraffic: Srpc
     };
 }
 
+async function createMtlsHarness(t: TestContext, rejectUnauthorized = true) {
+    const fixtures = join(process.cwd(), 'tests', 'fixtures');
+    const cert = readFileSync(join(fixtures, 'srpc-mtls.crt'));
+    const credentials = { cert, key: readFileSync(join(fixtures, 'http-tls.key')), ca: cert };
+    const https = createHttpsServer({ ...credentials, requestCert: true, rejectUnauthorized });
+    const server = new SrpcServer<SrpcMeta, ClientMessage, ServerMessage>({
+        logger: createLogger('SrpcMtlsTest'),
+        clientMessage: JsonMessage,
+        serverMessage: JsonMessage,
+        wsPath: '/srpc-test',
+        httpServer: https,
+        getTlsClientId: socket => {
+            const cn = socket.getPeerCertificate()?.subject?.CN;
+            if (typeof cn === 'string') return cn;
+        }
+    });
+    t.after(async () => {
+        server.close();
+        await new Promise<void>((resolve, reject) => https.close(error => (error ? reject(error) : resolve())));
+    });
+
+    const listening = once(https, 'listening');
+    https.listen(0, '127.0.0.1');
+    await listening;
+    const { port } = https.address() as AddressInfo;
+    return { server, https, url: `wss://localhost:${port}/srpc-test`, credentials };
+}
+
 async function createHarness(serverOptions: Partial<ISrpcServerOptions<ClientMessage, ServerMessage>> = {}) {
     process.env.APP_ENV = 'test';
     const app = createApp({
@@ -4143,9 +4251,9 @@ function waitForWebSocketOpen(ws: WebSocket): Promise<void> {
     });
 }
 
-function assertWebSocketRejected(url: string, expectedStatus: number): Promise<void> {
+function assertWebSocketRejected(url: string, expectedStatus: number, options?: WebSocket.ClientOptions): Promise<void> {
     return new Promise((resolve, reject) => {
-        const ws = new WebSocket(url);
+        const ws = new WebSocket(url, options);
         const timeout = setTimeout(() => {
             ws.terminate();
             reject(new Error('WebSocket rejection timed out'));

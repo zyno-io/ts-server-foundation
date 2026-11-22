@@ -57,6 +57,8 @@ export interface SrpcClientOptions {
     authAudience?: string;
     /** TLS server identity used for SNI and certificate verification when the URI host is only a transport address. */
     tlsServerName?: string;
+    /** Authenticate with the client certificate over wss, with normal server certificate verification. */
+    tls?: Required<Pick<import('node:tls').ConnectionOptions, 'ca' | 'cert' | 'key'>>;
     /** Advertise support for associating byte-stream senders with a handler request. */
     senderAnnouncements?: boolean;
     maxPendingRequests?: number;
@@ -638,49 +640,51 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     private generateWsUrl(): string {
         const appv = '0.0.0';
         const ts = Date.now();
-        const cid = this.clientId;
-        const secret = this.clientSecret ?? getCurrentApp().config.SRPC_AUTH_SECRET;
-        if (!secret) throw new Error('SRPC_AUTH_SECRET is not configured.');
-        const baseUri = this.uri.startsWith('ws://') || this.uri.startsWith('wss://') ? this.uri : `ws://${this.uri}`;
+        const tls = this.clientOptions?.tls;
+        const baseUri = tls || this.uri.startsWith('ws://') || this.uri.startsWith('wss://') ? this.uri : `ws://${this.uri}`;
         const url = new URL(baseUri);
-        const nonce = uuid7();
+        if (tls && url.protocol !== 'wss:') throw new Error('SRPC client certificates require a wss: URL');
         const capabilities = normalizeCapabilities(this.senderAnnouncements ? ['sender-announcements'] : []);
         const metadata = srpcQueryMetadata(normalizeMetadata(this.clientMeta));
         const supersede = this.supersede ? '1' : '0';
-        const audience = this.clientOptions?.authAudience ?? url.pathname;
         const protocol = String(this.clientOptions?.protocolVersion ?? 3);
-        const signable = canonicalAuthV2({
-            path: url.pathname,
-            audience,
-            appv,
-            ts: String(ts),
-            nonce,
-            id: this.streamId,
-            cid,
-            protocol,
-            supersede,
-            capabilities,
-            metadata
-        });
-        const signature = createHmac('sha256', secret).update(signable).digest('hex');
         const params = new URLSearchParams({
             appv,
             ts: String(ts),
             id: this.streamId,
-            cid,
-            signature,
             pv: protocol,
-            nonce,
-            aud: audience,
             ...(capabilities ? { cap: capabilities } : {}),
             ...(this.supersede ? { supersede: '1' } : {}),
             ...metadata
         });
 
-        if (this.supersede) {
-            this.supersede = false;
+        if (!tls) {
+            const cid = this.clientId;
+            const secret = this.clientSecret ?? getCurrentApp().config.SRPC_AUTH_SECRET;
+            if (!secret) throw new Error('SRPC_AUTH_SECRET is not configured.');
+            const nonce = uuid7();
+            const audience = this.clientOptions?.authAudience ?? url.pathname;
+            const signable = canonicalAuthV2({
+                path: url.pathname,
+                audience,
+                appv,
+                ts: String(ts),
+                nonce,
+                id: this.streamId,
+                cid,
+                protocol,
+                supersede,
+                capabilities,
+                metadata
+            });
+            const signature = createHmac('sha256', secret).update(signable).digest('hex');
+            params.set('cid', cid);
+            params.set('signature', signature);
+            params.set('nonce', nonce);
+            params.set('aud', audience);
         }
 
+        this.supersede = false;
         url.search = params.toString();
         return url.toString();
     }
@@ -1082,9 +1086,11 @@ export class SrpcClient<TClientInput extends BaseMessage = BaseMessage, TServerO
     }
     private get webSocketOptions(): WebSocket.ClientOptions {
         const tlsServerName = this.clientOptions?.tlsServerName?.trim();
+        const tls = this.clientOptions?.tls;
         return {
             maxPayload: this.maxMessageBytes,
-            ...(tlsServerName ? { servername: tlsServerName } : {})
+            ...(tlsServerName ? { servername: tlsServerName } : {}),
+            ...(tls ? { ca: tls.ca, cert: tls.cert, key: tls.key, rejectUnauthorized: true } : {})
         };
     }
     private get connectTimeoutMs(): number {
