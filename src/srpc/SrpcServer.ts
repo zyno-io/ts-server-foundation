@@ -9,7 +9,7 @@ import { HttpError } from '../http';
 import { withLoggerContext } from '../services';
 import { getTraceContext, withRemoteSpan, withSpan } from '../telemetry';
 import { byteStreamDestroyReason, SrpcByteStream } from './SrpcByteStream';
-import { srpcQueryMetadata } from './handshake';
+import { canonicalSrpcAuth, parseSrpcHandshake, type SrpcHandshake } from './handshake';
 import { notifySrpcObservers } from './observer';
 import {
     BaseMessage,
@@ -73,9 +73,10 @@ const MaxAuthReplayNoncesPerPrincipal = 256;
 interface StreamInfo {
     clientStreamId: string;
     clientId: string;
+    appId?: string;
     appVersion: string;
     configureTs: number;
-    protocolVersion: 1 | 2 | 3 | 4;
+    protocolVersion: SrpcHandshake['protocolVersion'];
     capabilities: ReadonlySet<string>;
     supersede: boolean;
     address: string;
@@ -167,11 +168,15 @@ export class SrpcServer<
         cb: (res: boolean, code?: number, message?: string) => void
     ) => {
         const url = new URL(info.req.url ?? '', 'http://localhost');
-        const query = Object.fromEntries(url.searchParams.entries());
-        const { id: clientStreamId, appv: appVersion } = query;
+        const handshake = parseSrpcHandshake(url.searchParams, this.options.defaultUnspecifiedProtocolVersion);
+        if (!handshake) {
+            cb(false, 400, 'Invalid sRPC handshake parameters');
+            return;
+        }
+        const { query, connectionId: clientStreamId, appId, appVersion, protocolVersion } = handshake;
         const getTlsClientId = this.options.getTlsClientId;
         const socket = info.req.socket;
-        let clientId = query.cid;
+        let clientId = handshake.clientId;
         if (getTlsClientId) {
             try {
                 clientId = socket instanceof TLSSocket && socket.authorized ? (getTlsClientId(socket) ?? '') : '';
@@ -183,14 +188,11 @@ export class SrpcServer<
         }
         const address = this.getRemoteAddress(info.req);
 
-        const protocolVersionParameter = query.pv ?? query._v;
-        const protocolVersion =
-            protocolVersionParameter === undefined ? this.options.defaultUnspecifiedProtocolVersion : Number(protocolVersionParameter);
         const handshakeLogData = {
             address: logSafeText(address),
             clientId: logSafeText(clientId),
             clientStreamId: logSafeText(clientStreamId),
-            protocolVersion: Number.isSafeInteger(protocolVersion) ? protocolVersion : undefined
+            protocolVersion
         };
         const rejectHandshake = (event: string, code: number, message: string, extra?: Record<string, unknown>) => {
             this.logger.warn(event, { srpc: { ...handshakeLogData, ...extra } });
@@ -200,12 +202,7 @@ export class SrpcServer<
             rejectHandshake('SRPC TLS peer has no authorized client identity', 403, 'Failed authentication');
             return;
         }
-        if (
-            !clientStreamId ||
-            !clientId ||
-            !appVersion ||
-            (protocolVersion !== 1 && protocolVersion !== 2 && protocolVersion !== 3 && protocolVersion !== 4)
-        ) {
+        if (!clientStreamId || !clientId || !appVersion) {
             rejectHandshake('SRPC client missing required handshake parameters', 400, 'Missing required query parameters');
             return;
         }
@@ -228,13 +225,20 @@ export class SrpcServer<
             protocolVersion >= 4 &&
             (!supportsSrpcRequestAcknowledgments(this.options.clientMessage) || !supportsSrpcRequestAcknowledgments(this.options.serverMessage))
         ) {
-            rejectHandshake('SRPC v4 codec is missing request acknowledgments', 400, 'Protocol v4 requires request acknowledgment codecs');
+            rejectHandshake(
+                'SRPC codec is missing request acknowledgments',
+                400,
+                `Protocol v${protocolVersion} requires request acknowledgment codecs`
+            );
             return;
         }
 
-        if (getTlsClientId) query.cid = clientId;
+        if (getTlsClientId) {
+            query.cid = clientId;
+            if (protocolVersion === 5) query['~n'] = clientId;
+        }
         this.pendingHandshakeCount++;
-        this.validateClientAuth(query, info.req, protocolVersion, Boolean(getTlsClientId))
+        this.validateClientAuth(handshake, info.req, url.pathname, Boolean(getTlsClientId))
             .then(
                 result => {
                     if (!result || result instanceof AuthenticationFailure) {
@@ -244,9 +248,8 @@ export class SrpcServer<
                         return;
                     }
 
-                    const queryMeta = srpcQueryMetadata(query);
                     const authMeta = result === true ? {} : result;
-                    const mergedMeta = { ...queryMeta, ...authMeta };
+                    const mergedMeta = { ...handshake.metadata, ...authMeta };
                     let metadataBytes: number;
                     try {
                         metadataBytes = encodedJsonBytes(mergedMeta);
@@ -263,13 +266,12 @@ export class SrpcServer<
                     (info.req as IncomingMessage & { [StreamInfoSymbol]?: StreamInfo })[StreamInfoSymbol] = {
                         clientStreamId,
                         clientId,
+                        appId,
                         appVersion,
-                        configureTs: Number(query.ts ?? 0),
+                        configureTs: Number(handshake.timestamp ?? 0),
                         protocolVersion,
-                        // Legacy protocol versions do not sign capabilities, so they cannot
-                        // safely negotiate capabilities added after that format.
-                        capabilities: new Set(protocolVersion < 3 ? [] : handshakeCapabilities(query).split(',').filter(Boolean)),
-                        supersede: isSupersedeRequested(query),
+                        capabilities: new Set(handshake.capabilities.split(',').filter(Boolean)),
+                        supersede: handshake.supersede,
                         address,
                         meta: mergedMeta
                     };
@@ -332,6 +334,7 @@ export class SrpcServer<
             clientStreamId: info.clientStreamId,
             address: info.address,
             clientId: info.clientId,
+            appId: info.appId,
             appVersion: info.appVersion,
             configureTs: info.configureTs,
             protocolVersion: info.protocolVersion,
@@ -890,13 +893,31 @@ export class SrpcServer<
     }
 
     private async validateClientAuth(
-        meta: Record<string, string>,
+        handshake: SrpcHandshake,
         request: IncomingMessage,
-        protocolVersion: 1 | 2 | 3 | 4,
+        path: string,
         authenticatedByTls: boolean
     ): Promise<true | Partial<TMeta> | AuthenticationFailure> {
         if (this.clientAuthorizer) {
-            const result = await this.clientAuthorizer(meta, request);
+            const { query } = handshake;
+            if (handshake.protocolVersion === 5) {
+                const aliases = {
+                    pv: '5',
+                    appv: query['~v'],
+                    ts: query['~t'],
+                    id: query['~i'],
+                    cid: query['~n'],
+                    nonce: handshake.nonce,
+                    aud: query['~d'],
+                    signature: query['~s'],
+                    cap: query['~c'],
+                    supersede: query['~x']
+                };
+                for (const [key, value] of Object.entries(aliases)) {
+                    if (value !== undefined) query[key] = value;
+                }
+            }
+            const result = await this.clientAuthorizer(query, request);
             if (result === false) return new AuthenticationFailure('custom authorizer rejected');
             await this.beforeClientAdmission();
             return result;
@@ -906,14 +927,23 @@ export class SrpcServer<
             return true;
         }
 
-        const appv = String(meta.appv ?? '');
-        const ts = String(meta.ts ?? '');
-        const id = String(meta.id ?? '');
-        const cid = String(meta.cid ?? '');
-        const signature = String(meta.signature ?? '');
-        if (!appv || !ts || !id || !cid || !signature) return new AuthenticationFailure('missing required credentials');
+        const {
+            appId,
+            appVersion,
+            timestamp,
+            connectionId,
+            clientId,
+            signature,
+            protocolVersion,
+            nonce,
+            audience,
+            capabilities,
+            supersede,
+            metadata
+        } = handshake;
+        if (!appVersion || !timestamp || !connectionId || !clientId || !signature) return new AuthenticationFailure('missing required credentials');
 
-        const tsInt = Number(ts);
+        const tsInt = Number(timestamp);
         if (!Number.isFinite(tsInt)) return new AuthenticationFailure('invalid timestamp');
 
         const config = getOptionalAppConfig();
@@ -922,52 +952,31 @@ export class SrpcServer<
             return new AuthenticationFailure('invalid server clock-drift configuration');
         if (Math.abs(Date.now() - tsInt) > driftMs) return new AuthenticationFailure('expired timestamp');
 
-        if (protocolVersion < 3) {
-            const clientKey = await this.fetchClientKey(cid);
-            if (clientKey === false) return new AuthenticationFailure('unknown client key');
-            const computedSignature = createHmac('sha256', clientKey).update(`1\n${appv}\n${ts}\n${id}\n${cid}\n`).digest('hex');
-            const signatureBuffer = Buffer.from(signature);
-            const computedBuffer = Buffer.from(computedSignature);
-            if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
-                return new AuthenticationFailure('invalid signature');
-            if (!(await this.consumeAuthReplayToken(cid, id, tsInt + driftMs))) return new AuthenticationFailure('replayed stream ID');
-            await this.beforeClientAdmission();
-            return true;
-        }
-
-        if (!isAuthToken(meta.nonce) || !meta.aud) return new AuthenticationFailure('invalid protocol credentials');
-
-        const clientKey = await this.fetchClientKey(cid);
+        if (!nonce || (protocolVersion >= 3 && (!isAuthToken(nonce) || !audience))) return new AuthenticationFailure('invalid protocol credentials');
+        const clientKey = await this.fetchClientKey(clientId);
         if (clientKey === false) return new AuthenticationFailure('unknown client key');
 
-        const url = new URL(request.url ?? '', 'http://localhost');
-        const metadata = normalizeMetadata(srpcQueryMetadata(meta));
-        const capabilities = handshakeCapabilities(meta);
-        const supersede = isSupersedeRequested(meta) ? '1' : '0';
-        const computedSignature = createHmac('sha256', clientKey)
-            .update(
-                canonicalAuthV2({
-                    path: url.pathname,
-                    audience: String(meta.aud),
-                    appv,
-                    ts,
-                    nonce: String(meta.nonce),
-                    id,
-                    cid,
-                    protocol: String(protocolVersion),
-                    supersede,
-                    capabilities,
-                    metadata
-                })
-            )
-            .digest('hex');
+        const signed = canonicalSrpcAuth(path, protocolVersion, {
+            appId,
+            appVersion,
+            timestamp,
+            connectionId,
+            clientId,
+            nonce,
+            audience,
+            capabilities,
+            supersede,
+            metadata
+        });
+        const computedSignature = createHmac('sha256', clientKey).update(signed).digest('hex');
         const signatureBuffer = Buffer.from(signature);
         const computedBuffer = Buffer.from(computedSignature);
         if (signatureBuffer.length !== computedBuffer.length || !timingSafeEqual(signatureBuffer, computedBuffer))
             return new AuthenticationFailure('invalid signature');
-        if (String(meta.aud) !== (this.options.authAudience ?? url.pathname)) return new AuthenticationFailure('invalid audience');
+        if (protocolVersion >= 3 && audience !== (this.options.authAudience ?? path)) return new AuthenticationFailure('invalid audience');
         const expiresAt = tsInt + driftMs;
-        if (!(await this.consumeAuthReplayToken(cid, String(meta.nonce), expiresAt))) return new AuthenticationFailure('replayed nonce');
+        if (!(await this.consumeAuthReplayToken(clientId, nonce, expiresAt)))
+            return new AuthenticationFailure(protocolVersion < 3 ? 'replayed stream ID' : 'replayed nonce');
         await this.beforeClientAdmission();
         return true;
     }
@@ -1603,44 +1612,8 @@ function validateTimerOption(name: string, value: number | undefined): void {
     }
 }
 
-function normalizeCapabilities(capabilities: string[]): string {
-    return [...new Set(capabilities)].sort().join(',');
-}
-
-function handshakeCapabilities(meta: Record<string, string>): string {
-    return normalizeCapabilities((meta.cap ?? '').split(',').filter(Boolean));
-}
-
-function normalizeMetadata(meta: Record<string, string>): Record<string, string> {
-    return Object.fromEntries(Object.entries(meta).sort(([a], [b]) => compareCodeUnits(a, b)));
-}
-
-function isSupersedeRequested(meta: Record<string, string>): boolean {
-    return meta.supersede === '1' || (meta.supersede === undefined && meta._supersede === '1');
-}
-
-function canonicalAuthV2(fields: {
-    path: string;
-    audience: string;
-    appv: string;
-    ts: string;
-    nonce: string;
-    id: string;
-    cid: string;
-    protocol: string;
-    supersede: string;
-    capabilities: string;
-    metadata: Record<string, string>;
-}): string {
-    return JSON.stringify({ version: 2, ...fields });
-}
-
 function isAuthToken(value: unknown): value is string {
     return typeof value === 'string' && value.length >= 16 && value.length <= 256 && /^[A-Za-z0-9._-]+$/.test(value);
-}
-
-function compareCodeUnits(a: string, b: string): number {
-    return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
