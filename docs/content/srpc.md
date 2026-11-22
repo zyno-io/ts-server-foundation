@@ -1,6 +1,6 @@
 # SRPC
 
-SRPC is a typed bidirectional RPC layer over WebSocket. It uses generated protobuf message codecs, request/response calls, one-way notifications, optional metadata, HMAC client authentication, reconnect handling, and multiplexed byte streams.
+SRPC is a typed bidirectional RPC layer over WebSocket. It uses generated protobuf message codecs, request/response calls, one-way notifications, optional metadata, HMAC or mutual TLS client authentication, reconnect handling, and multiplexed byte streams.
 
 ## Message Shape
 
@@ -15,6 +15,7 @@ message ClientMessage {
     optional string error = 3;
     optional bool userError = 4;
     optional TraceContext trace = 5;
+    bool requestAck = 9;
 
     oneof request {
         PingPong pingPong = 50;
@@ -31,6 +32,7 @@ message ServerMessage {
     optional string error = 3;
     optional bool userError = 4;
     optional TraceContext trace = 5;
+    bool requestAck = 9;
 
     oneof response {
         PingPong pingPong = 50;
@@ -239,39 +241,28 @@ The constructor takes an `ISrpcClientOptions` object. The positional overload is
 | `enableReconnect` | `true`  | Reconnects after unexpected disconnects.                                                |
 | `logTraffic`      | `false` | [Traffic logging](#traffic-logging); heartbeats are excluded unless explicitly enabled. |
 
-`connect({ supersede?: boolean })` applies to that connection attempt.
-
-Protocol v2 and later reject a duplicate `clientId` unless `connect({ supersede: true })` is used. Legacy protocol-v1 connections replace the existing stream when a client connects with the same ID.
+`connect({ supersede?: boolean })` applies to that connection attempt. Use `connect({ supersede: true })` to replace an existing connection with the same `clientId`.
 
 The optional `PingPong.type` enum distinguishes handshake messages from client pings and server pongs. Generated TypeScript codecs represent it as a numeric `PingPongType` enum with the prefixed names shown above and an optional `type` property (`undefined` when absent). The library exports matching numeric values as `SrpcPingPongType`.
 
-| Type                    | Value | `SrpcClient` behavior                                                                    |
-| ----------------------- | ----- | ---------------------------------------------------------------------------------------- |
-| `UNSPECIFIED` or absent | `0`   | Legacy sequence: answer the first ping, connect on the next, then only refresh liveness. |
-| `HELLO`                 | `1`   | Answer with `HELLO_ACK`; wait for activation.                                            |
-| `HELLO_ACK`             | `2`   | Sent by the client to acknowledge `HELLO`.                                               |
-| `ACTIVATED`             | `3`   | Complete activation without answering.                                                   |
-| `PING`                  | `4`   | Sent by the client to check liveness.                                                    |
-| `PONG`                  | `5`   | Refresh liveness without answering or completing activation.                             |
+| Type        | Value | `SrpcClient` behavior                                        |
+| ----------- | ----- | ------------------------------------------------------------ |
+| `HELLO`     | `1`   | Answer with `HELLO_ACK`; wait for activation.                |
+| `HELLO_ACK` | `2`   | Sent by the client to acknowledge `HELLO`.                   |
+| `ACTIVATED` | `3`   | Complete activation without answering.                       |
+| `PING`      | `4`   | Sent by the client to check liveness.                        |
+| `PONG`      | `5`   | Refresh liveness without answering or completing activation. |
 
-An explicit `ACTIVATED` completes activation even without a prior `HELLO`. Duplicate `HELLO` messages receive `HELLO_ACK` responses and do not complete activation or repeat connection callbacks. All pingPongs refresh liveness; inbound `HELLO_ACK`, `PING`, and unknown future nonzero types do nothing else on the client. If liveness messages precede the handshake, the client still answers the first untyped ping and waits for the next untyped ping or `ACTIVATED`. The DevConsole browser client also waits for typed `ACTIVATED`, while preserving its existing first-ping connection behavior with untyped servers.
+An explicit `ACTIVATED` completes activation even without a prior `HELLO`. Duplicate `HELLO` messages receive `HELLO_ACK` responses and do not complete activation or repeat connection callbacks. All pingPongs refresh liveness. Inbound `HELLO_ACK`, `PING`, and unknown future nonzero types only refresh liveness on the client.
 
-After activation, the client sends `PING` every 55 seconds. The server updates inbound liveness for every pingPong and answers typed `PING` and legacy untyped or `UNSPECIFIED` messages with `PONG` only after activation, regardless of the `reply` flag. It does not answer other nonzero types. Server pingPongs and client pings carry no `requestId` or `reply: true` flag. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true; `disconnect()`, conflicts, and an explicit `enableReconnect: false` suppress reconnection. `triggerConnectionCheck()` forces an immediate `PING`-based liveness check.
-
-This is wire-compatible with empty legacy `PingPong` messages. Old protobuf decoders ignore the new field, and new decoders accept empty messages. Applications own their envelope schemas and pass their generated codecs to sRPC: add the enum and optional field to each application's proto and regenerate with `tsf-gen-proto` to send or read the type. An old server-side codec ignores the in-memory `type` during encoding, so even an upgraded library sends empty pingPongs until that codec is regenerated. Existing peers can continue using the legacy handshake without regeneration. Custom codecs must likewise accept the optional field or ignore it.
+After activation, the client sends `PING` every 55 seconds. Every pingPong refreshes liveness on the server. The server answers typed `PING` with `PONG` after activation, regardless of the `reply` flag. Other typed messages only refresh liveness. Server pingPongs and client pings carry no `requestId` or `reply: true` flag. A connection with no pong for 75 seconds closes with the `timeout` cause. The server checks the same 75-second inactivity window every 15 seconds. Unexpected client disconnects reconnect after one second when `enableReconnect` is true. Calling `disconnect()`, a connection conflict, or setting `enableReconnect: false` suppresses reconnection. `triggerConnectionCheck()` forces an immediate `PING`-based liveness check.
 
 ## Authentication
 
-Clients sign connection metadata with HMAC-SHA256 by default. New clients send `pv=3`, `appv`, `ts`, `nonce`, `aud`, `id`, `cid`, `signature`, optional `cap` capabilities and `supersede`, and custom metadata as ordinary WebSocket query parameters. Every query parameter other than those transport fields becomes `stream.meta`. The canonical signature covers the request path, audience, protocol version, capabilities, and normalized metadata.
-
-Servers require an explicit `pv` by default, but accept `_v` when `pv` is absent for compatibility. The protocol version selects the authentication format: v1/v2 use the legacy HMAC format and v3/v4 use the canonical HMAC format. Legacy `_supersede` and `m--<key>` metadata are accepted; `_supersede` is used only when `supersede` is absent, and `m--<key>` is normalized to `<key>` in `stream.meta` with unprefixed metadata taking precedence. Set `defaultUnspecifiedProtocolVersion` to `1`, `2`, or `3` only while migrating an unmarked client. Protocol v2 continues to use its original signature (`1`, `appv`, `ts`, `id`, `cid`), whose stream ID is consumed once for replay protection and whose capability field is ignored. Clients use v3 by default. Set `SrpcClientOptions.protocolVersion: 4` after both envelope codecs and the server support receipts. The canonical signature binds the advertised version. Deploy servers before clients: v4 requires a server that recognizes v4. An explicit `pv=1` always selects v1 behavior; use it only while supporting a legacy client that intentionally relies on same-`clientId` replacement.
-
-By default the server verifies signatures with `SRPC_AUTH_SECRET`. Provide per-client secrets with:
+Clients sign connection metadata with HMAC-SHA256 by default. The server verifies signatures with `SRPC_AUTH_SECRET` or a per-client secret from `setClientKeyFetcher()`.
 
 ```ts
-server.setClientKeyFetcher(async clientId => {
-    return await lookupSecret(clientId);
-});
+server.setClientKeyFetcher(clientId => lookupSecret(clientId));
 ```
 
 Replace the built-in HMAC/key-fetcher authentication with a custom authorizer using:
@@ -284,13 +275,13 @@ server.setClientAuthorizer(async (query, request) => {
 });
 ```
 
-The callback receives the raw query map as `Record<string, string>`, including signed fields and custom metadata. Once configured, it is responsible for all authentication; the default HMAC validation and `setClientKeyFetcher()` path are not also run. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata.
+The callback receives a query map as `Record<string, string>`, including signed fields and custom metadata. Once configured, it is responsible for authentication. Returning `false` rejects the connection, `true` accepts it, and an object accepts the connection and merges that object into normalized `stream.meta` alongside custom metadata.
 
 Clock drift is controlled by `SRPC_AUTH_CLOCK_DRIFT_MS`, defaulting to 30 seconds.
 
 ### Protocol v5
 
-Set `protocolVersion: 5` on the client to use compact handshake keys with the v4 request acknowledgment behavior. Both peers need acknowledgment-capable codecs. The server continues to accept v1–v4 inputs and verifies each version's original signature and replay token.
+`SrpcClient` always sends v5 with compact handshake keys and [request acknowledgments](#errors-and-timeouts). Upgrade the server and regenerate both envelope codecs before upgrading clients. The server also accepts older peers. [Legacy SRPC protocol](./srpc-legacy.md)
 
 ```text
 /srpc?~p=5&~a=worker&~v=0.0.0&~t=<timestamp>&~i=<connection-id>&~n=worker-1&~d=%2Fsrpc&~s=<signature>
@@ -314,7 +305,7 @@ Keys and values use standard URL query encoding. The server reserves the `~` nam
 
 The v5 HMAC payload is the UTF-8 JSON serialization of a fixed-order object with keys `version`, `path`, `audience`, `appv`, `ts`, `nonce`, `id`, `cid`, `protocol`, `supersede`, `capabilities`, `metadata`, and `appId`. Set `version` to the number `5` and `protocol` to the string `"5"`. Use decoded query values, the effective nonce, the pathname, `"1"` or `"0"` for supersede, and sorted unique capabilities. Sort metadata keys by code unit before forming the object. Use an empty string for an absent app ID. Send the HMAC-SHA256 as lowercase hex.
 
-Custom authorizers receive compact fields for v5. With mTLS the server supplies the verified client ID as both `~n` and `cid`. The claimed application ID is available as `stream.appId`.
+Custom authorizers receive the compact fields and their long-form aliases, including `cid` for client ID and `nonce` for the effective nonce. Authorizers that verify signatures themselves need to use the signing format for the advertised protocol. With mTLS the server supplies the verified client ID as both `~n` and `cid`. The claimed application ID is available as `stream.appId`.
 
 ### Mutual TLS
 
@@ -355,7 +346,7 @@ const client = new SrpcClient({
 await client.connect();
 ```
 
-The client verifies the server certificate and requires a `wss:` URL. It sends the normal protocol fields and metadata without a shared secret or claimed `cid`. The server uses the ID returned by `getTlsClientId` as `stream.clientId` and rejects an unauthorized TLS peer or an absent ID. A custom `setClientAuthorizer` can add an authorization check and receives the verified ID in `query.cid`.
+The client verifies the server certificate and requires a `wss:` URL. The server uses the ID returned by `getTlsClientId` as `stream.clientId` and rejects an unauthorized TLS peer or an absent ID. A custom `setClientAuthorizer` can add an authorization check and receives the verified ID.
 
 ## Streams
 
@@ -379,7 +370,7 @@ Connected streams expose metadata:
 
 The exported `SrpcStream<TMeta>` type describes these server-side streams. It also exposes the underlying WebSocket and request queue through `$ws` and `$queue`; treat those fields as low-level protocol surfaces and prefer `SrpcServer.invoke()`, handlers, and `SrpcByteStream` for application work.
 
-Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected protocol-v2, protocol-v3, or protocol-v4 duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity or an unacknowledged v4 request deadline, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
+Established-stream disconnect callbacks receive `disconnect`, `supersede`, `timeout`, or `badArg`. A rejected duplicate closes with the `conflict` wire cause and rejects the connecting client with `SrpcConflictError` before activation, so connection and disconnect callbacks do not run for that rejected stream. `supersede` identifies a replaced connection, `timeout` identifies ping inactivity or an unacknowledged request deadline, and `badArg` identifies malformed or out-of-sequence messages. Outstanding invocations reject when their stream disconnects.
 
 ## Byte Streams
 
@@ -477,7 +468,7 @@ throw or callback error also revokes before closing. Normal graceful
 disconnects retain their ordinary close-event semantics and carry the supplied
 bounded close reason.
 
-Protocol v4 adds receipt acknowledgments: `{ requestId, requestAck: true }`
+The receipt acknowledgment envelope `{ requestId, requestAck: true }`
 contains no reply, error, or application payload. Servers acknowledge admitted
 requests before dispatch. Clients race their final response against a three-second
 receipt delay: a result or error within that window suppresses the receipt;
@@ -486,8 +477,8 @@ receipts are canceled when the connection ends. A receipt confirms transport
 admission, not authorization, success, or completion. Replies and errors continue
 to use `reply: true`. Notifications receive no acknowledgment.
 
-For server-to-client calls, `disconnectOnRequestTimeout` defaults to `true`,
-but applies only to explicitly negotiated v4 calls whose timeout budget exceeds
+For server-to-client calls, `disconnectOnRequestTimeout` defaults to `true`
+and applies to calls with negotiated request acknowledgments whose timeout budget exceeds
 the three-second receipt window. Shorter calls still time out normally, but cannot
 establish that a client has missed its receipt deadline. For eligible calls, if the
 RPC deadline expires without either a receipt or a final response, the existing timer
@@ -495,7 +486,7 @@ synchronously revokes the exact stream with cause `timeout` and close code
 `4003`, before the close handshake or inactivity timer completes. Normal
 cleanup rejects other pending calls and runs disconnect callbacks once. A
 replacement generation is preserved. Setting the option to `false` disables
-this policy; v1–v3 retain their prior timeout behavior even when it is enabled.
+this policy.
 
 A receipt does not resolve a call, extend its deadline, release its queue
 accounting, or request a retry. If an acknowledged handler takes too long,
@@ -504,14 +495,11 @@ usable. Late receipts and results for expired calls are ignored for the normal
 bounded tombstone period. A final response before receipt also completes the
 call normally.
 
-Both envelope codecs must preserve `requestAck` before a client advertises
-v4. For protobuf, add `bool requestAck` (or `optional bool requestAck`) using an
-unused field number in each message container and regenerate bindings. TSF's
-DevConsole schema and the RMM bridge schema reserve field 9 for this purpose.
-A v4 client or server refuses negotiation when its codecs drop the field.
-`SrpcClient` stays on v3 by default so upgrading TSF alone does not advertise a
-wire version unsupported by an existing server or codec. Versionless clients
-cannot acquire v4 through `defaultUnspecifiedProtocolVersion`.
+Both envelope codecs must preserve `requestAck`. For protobuf, add
+`bool requestAck` (or `optional bool requestAck`) using an unused field number
+in each message container and regenerate bindings. TSF's DevConsole schema and
+the RMM bridge schema reserve field 9 for this purpose. A peer whose codecs drop
+the field rejects negotiation.
 
 The policy also applies to `MeshSrpcServer`: the physical connection owner
 tracks receipts and enforces its existing local RPC deadline. Local, forwarded
