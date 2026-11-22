@@ -29,10 +29,9 @@ class TestSocket {
     }
 }
 
-function createHarness(context: TestContext, protocolVersion: 3 | 4 = 4) {
+function createHarness(context: TestContext) {
     context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000 });
     const client = new SrpcClient<Message, Message>(logger, 'ws://localhost/test', JsonMessage, JsonMessage, 'client', {}, 'secret', {
-        protocolVersion,
         enableReconnect: false
     });
     const runtime = client as any;
@@ -109,18 +108,16 @@ describe('sRPC client receipt race', () => {
         assert.equal(client.isConnected, true);
     });
 
-    for (const protocolVersion of [3, 4] as const) {
-        it(`does not schedule receipts for notifications or fast v${protocolVersion} responses`, async context => {
-            const { client, socket, receive } = createHarness(context, protocolVersion);
-            client.registerMessageHandler('dEcho', () => ({ value: 'legacy' }));
-            client.registerNotificationHandler('dChanged', () => {});
-            await receive({ requestId: 'legacy', dEchoRequest: { value: 'legacy' } });
-            await receive({ dChangedNotification: { value: 'notification' } });
-            context.mock.timers.tick(3_000);
-            assert.equal(socket.sent.length, 1);
-            assert.equal(socket.sent[0].requestAck, undefined);
-        });
-    }
+    it('does not schedule receipts for notifications or fast responses', async context => {
+        const { client, socket, receive } = createHarness(context);
+        client.registerMessageHandler('dEcho', () => ({ value: 'fast' }));
+        client.registerNotificationHandler('dChanged', () => {});
+        await receive({ requestId: 'fast', dEchoRequest: { value: 'fast' } });
+        await receive({ dChangedNotification: { value: 'notification' } });
+        context.mock.timers.tick(3_000);
+        assert.equal(socket.sent.length, 1);
+        assert.equal(socket.sent[0].requestAck, undefined);
+    });
 
     it('cancels only the completed request while another handler remains pending', async context => {
         const { client, runtime, socket, receive } = createHarness(context);

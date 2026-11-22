@@ -218,9 +218,9 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
                 child = await startMeshNode(meshKey, true);
                 const owner = child;
                 const clientId = `timeout-${scenario}`;
-                client = createClient(`ws://127.0.0.1:${owner.port}${clientPath}`, clientId, 'owner', 4);
+                client = createClient(`ws://127.0.0.1:${owner.port}${clientPath}`, clientId, 'owner');
                 if (scenario === 'rpc-timeout' || scenario === 'requester-stops') {
-                    // Simulate a v4 runtime whose transport fails to acknowledge
+                    // Simulate a v5 runtime whose transport fails to acknowledge
                     // receipt; keep the socket and handler dispatch alive.
                     const runtime = client as any;
                     const writeMessage = runtime.writeMessage.bind(runtime);
@@ -315,7 +315,7 @@ describe('multi-process MeshSrpcServer integration', { skip: redisSkip }, () => 
     }
 });
 
-function createClient(url: string, clientId: string, node: string, protocolVersion: 3 | 4 = 3): SrpcClient<MeshClientMessage, MeshServerMessage> {
+function createClient(url: string, clientId: string, node: string): SrpcClient<MeshClientMessage, MeshServerMessage> {
     const client = new SrpcClient<MeshClientMessage, MeshServerMessage>(
         createLogger(`MeshSrpcProcessClient-${clientId}`),
         url,
@@ -324,7 +324,7 @@ function createClient(url: string, clientId: string, node: string, protocolVersi
         clientId,
         { role: node, secret: `${node}-only` },
         'unused',
-        { enableReconnect: false, connectTimeoutMs: 5_000, protocolVersion }
+        { enableReconnect: false, connectTimeoutMs: 5_000 }
     );
     client.registerMessageHandler('dEcho', data => ({ value: data.value, node }));
     return client;
