@@ -350,7 +350,10 @@ function schemaForClass(type: TypeClass, context: OpenApiSchemaContext): OpenApi
     if (isOpenApiClassType(type, FileUpload)) return schemaForFileUpload(type);
 
     const name = getClassComponentName(type, context);
-    return schemaForComponent(name, listOpenApiTypeProperties(type), context, type.description);
+    // The class reference in a type position does not carry the class's JSDoc; read it from the class.
+    const classType = resolveOpenApiClassType(type);
+    const description = type.description || (classType ? readOpenApiReflectionClass(classType)?.getDescription() : undefined) || undefined;
+    return schemaForComponent(name, listOpenApiTypeProperties(type), context, description);
 }
 
 function schemaForFileUpload(type: Type): OpenApiSchemaObject {
@@ -630,7 +633,9 @@ function schemaForNamedAliasComponent(baseName: string, type: Type, context: Ope
 
     context.generating.add(name);
     const schema = schemaForNonNullableType(type, context, false);
-    context.schemas[name] = '$ref' in schema ? { allOf: [schema] } : schema;
+    const component: OpenApiSchemaObject = '$ref' in schema ? { allOf: [schema] } : schema;
+    if (type.description && !component.description) component.description = type.description;
+    context.schemas[name] = component;
     context.generating.delete(name);
 
     return { $ref: `#/components/schemas/${name}` };

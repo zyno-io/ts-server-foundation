@@ -14,6 +14,7 @@ import {
     type OpenApiOperation,
     type OpenApiReferenceObject,
     type OpenApiSchemaObject,
+    ParsedJwt,
     ReflectionClass
 } from '../src';
 
@@ -440,5 +441,188 @@ describe('openapi contributors', () => {
                 }),
             /document rejected/
         );
+    });
+});
+
+/** A documented class DTO. */
+class DocumentedDto {
+    /** Identifier. */
+    id!: string;
+}
+
+/**
+ * Lifecycle state.
+ *
+ * Moves forward only.
+ */
+type DocumentedState = 'draft' | 'live';
+
+class DeprecatedAggregate {
+    /** Free text. */
+    text?: string;
+    other?: number;
+}
+
+@http.controller('/extra')
+class ExtraDocsController {
+    /** Summary only. */
+    @http.GET('/summary-only')
+    summaryOnly(): string {
+        return '';
+    }
+
+    @http.GET('/plain-twin')
+    plainTwin(): string {
+        return '';
+    }
+
+    @http.GET('/dto')
+    dto(): { dto: DocumentedDto; state: DocumentedState } {
+        return { dto: { id: '' }, state: 'draft' };
+    }
+
+    /**
+     * Wire names.
+     * @param id The TypeScript name wins.
+     * @param other Belongs to the parameter named other in TypeScript.
+     */
+    @http.GET('/wire/:id')
+    wire(id: HttpPath<string>, other?: HttpQuery<string, { name: 'renamed' }>, third?: HttpQuery<string, { name: 'other' }>): string {
+        void id;
+        void other;
+        void third;
+        return '';
+    }
+
+    /**
+     * Fallback.
+     * @param q Matches the wire name because no parameter is called q.
+     */
+    @http.GET('/fallback')
+    fallback(search?: HttpQuery<string, { name: 'q' }>): string {
+        void search;
+        return '';
+    }
+
+    @http.GET('/aggregate')
+    aggregate(
+        /**
+         * @deprecated Use search.
+         * @sunset 2027-05-05
+         */
+        query: HttpQueries<DeprecatedAggregate>
+    ): string {
+        void query;
+        return '';
+    }
+}
+
+@openapi.operation({ securitySchemes: { shared: { type: 'http', scheme: 'basic' } }, security: [{ shared: [] }] })
+@http.controller('/schemes')
+class SchemesController {
+    @http.GET()
+    list(): string {
+        return '';
+    }
+}
+
+@http.controller('/jwt')
+class JwtController {
+    @http.GET()
+    read(_jwt: ParsedJwt): string {
+        return '';
+    }
+}
+
+describe('openapi docs review fixes', () => {
+    it('describes class DTO and non-object alias components from their JSDoc', () => {
+        const doc = documentFor(ExtraDocsController);
+        assert.equal(doc.components!.schemas!.DocumentedDto.description, 'A documented class DTO.');
+        const state = doc.components!.schemas!.DocumentedState;
+        assert.equal(state.description, 'Lifecycle state.\n\nMoves forward only.');
+        assert.ok(state.enum || state.anyOf || state.oneOf || state.allOf || state.type);
+    });
+
+    it('a summary-only JSDoc adds no description', () => {
+        const paths = documentFor(ExtraDocsController).paths;
+        const documented = paths['/extra/summary-only'].get!;
+        const twin = paths['/extra/plain-twin'].get!;
+        assert.equal(documented.description, undefined);
+        assert.equal(documented.deprecated, undefined);
+        const strip = ({ operationId: _id, summary: _summary, ...rest }: OpenApiOperation) => rest;
+        assert.deepStrictEqual(strip(documented), strip(twin));
+    });
+
+    it('matches @param by TypeScript name before the wire name', () => {
+        const params = documentFor(ExtraDocsController).paths['/extra/wire/{id}'].get!.parameters!;
+        const byName = (name: string) => params.find(parameter => parameter.name === name)!;
+        assert.equal(byName('id').description, 'The TypeScript name wins.');
+        assert.equal(byName('renamed').description, 'Belongs to the parameter named other in TypeScript.');
+        assert.equal(byName('other').description, undefined);
+        const fallback = documentFor(ExtraDocsController).paths['/extra/fallback'].get!.parameters!;
+        assert.equal(fallback[0].description, 'Matches the wire name because no parameter is called q.');
+    });
+
+    it('propagates @deprecated and @sunset of an HttpQueries aggregate to each expanded parameter', () => {
+        const op = documentFor(ExtraDocsController).paths['/extra/aggregate'].get!;
+        assert.equal(op.deprecated, undefined);
+        for (const parameter of op.parameters!) {
+            assert.equal(parameter.deprecated, true);
+            assert.equal(parameter['x-sunset'], '2027-05-05');
+        }
+        assert.equal(op.parameters!.find(parameter => parameter.name === 'text')!.description, 'Free text.\n\n**Deprecated:** Use search.');
+        assert.equal(op.parameters!.find(parameter => parameter.name === 'other')!.description, '**Deprecated:** Use search.');
+    });
+
+    it('gives each contributor its own copy of the inferred operation', () => {
+        const seen: Array<string | undefined> = [];
+        const mutator: OpenApiContributor = {
+            name: 'mutator',
+            operation: ({ inferred }) => {
+                (inferred as OpenApiOperation).summary = 'tampered';
+                (inferred.tags as string[]).push('tampered');
+                return undefined;
+            }
+        };
+        const observer: OpenApiContributor = {
+            name: 'observer',
+            operation: ({ route, inferred }) => {
+                if (route.path === '/extra/summary-only') seen.push(inferred.summary, inferred.tags?.join(','));
+                return undefined;
+            }
+        };
+        documentFor(ExtraDocsController, [mutator, observer]);
+        assert.deepEqual(seen, ['Summary only.', 'extraDocs']);
+    });
+
+    it('rejects contributors that set operationId or non-x- extensions', () => {
+        const withOperationId = { name: 'ids', operation: () => ({ operationId: 'nope' }) } as unknown as OpenApiContributor;
+        assert.throws(() => documentFor(ExtraDocsController, [withOperationId]), /cannot set operationId/);
+        const badExtension = { name: 'ext', operation: () => ({ extensions: { owner: 'x' } }) } as unknown as OpenApiContributor;
+        assert.throws(() => documentFor(ExtraDocsController, [badExtension]), /extensions must start with x-/);
+    });
+
+    it('keeps the required ParsedJwt bearerAuth rule for contributor security', () => {
+        const removes: OpenApiContributor = { name: 'removes', operation: () => ({ security: [] }) };
+        assert.throws(() => documentFor(JwtController, [removes]), /cannot remove required ParsedJwt authentication/);
+        const adds: OpenApiContributor = {
+            name: 'adds',
+            operation: () => ({
+                security: [{ bearerAuth: [], extra: [] }],
+                securitySchemes: { extra: { type: 'apiKey', in: 'header', name: 'x-extra' } }
+            })
+        };
+        const doc = documentFor(JwtController, [adds]);
+        assert.deepEqual(doc.paths['/jwt'].get!.security, [{ bearerAuth: [], extra: [] }]);
+    });
+
+    it('fails when a contributor scheme conflicts with a decorator scheme', () => {
+        const conflicting: OpenApiContributor = {
+            name: 'conflicting',
+            operation: () => ({ securitySchemes: { shared: { type: 'http', scheme: 'digest' } } })
+        };
+        assert.throws(() => documentFor(SchemesController, [conflicting]), /Conflicting OpenAPI security scheme shared/);
+        const same: OpenApiContributor = { name: 'same', operation: () => ({ securitySchemes: { shared: { type: 'http', scheme: 'basic' } } }) };
+        assert.doesNotThrow(() => documentFor(SchemesController, [same]));
     });
 });

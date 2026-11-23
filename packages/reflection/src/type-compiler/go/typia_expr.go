@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1569,7 +1570,11 @@ func isResolvedInternalNamedObjectExpr(expr string, name string) bool {
 		!isUnresolvedInternalTypeExpr(expr, name)
 }
 
+var quotedStringPattern = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
 func internalObjectExprCarriesSourceMetadata(expr string) bool {
+	// Documentation strings may mention these keys; only look outside quoted strings.
+	expr = quotedStringPattern.ReplaceAllString(expr, `""`)
 	return strings.Contains(expr, "literal:") ||
 		strings.Contains(expr, "classType: () => Date") ||
 		strings.Contains(expr, "annotations:")

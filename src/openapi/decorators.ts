@@ -8,7 +8,7 @@ import type { OpenApiOperation, OpenApiResponse } from './types';
  * - `operationId`: stable operation name. Allowed on methods only, and must be unique in the document.
  * - `tags`: replaces the tag derived from the controller class name.
  * - `summary`: short title. Replaces the first paragraph of the method's JSDoc.
- * - `description`: longer text. Never derived from JSDoc.
+ * - `description`: longer text. Replaces the description derived from the rest of the method's JSDoc.
  * - `deprecated`: marks the operation as deprecated.
  * - `security`: security requirements; each array entry is one accepted alternative. Replaces
  *   the default `[{ bearerAuth: [] }]` that a route with a required `ParsedJwt` parameter gets.

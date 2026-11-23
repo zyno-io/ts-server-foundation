@@ -229,3 +229,99 @@ func TestTypiaJsDocMatchesAstParser(t *testing.T) {
 		t.Fatalf("empty typia docs emitted %v", items)
 	}
 }
+
+func TestParseJsDocCrlfAndTypeBraces(t *testing.T) {
+	doc := parseJsDoc("/**\r\n * Summary line\r\n * continues.\r\n *\r\n * Body.\r\n * @param {{a: string}} opts The options.\r\n * @param {Promise<User>} user - The user.\r\n * @returns {Promise<User>} the user\r\n */")
+	if doc.summary != "Summary line continues." || doc.body != "Body." {
+		t.Fatalf("summary/body = %q / %q", doc.summary, doc.body)
+	}
+	if doc.params["opts"] != "The options." || doc.params["user"] != "The user." || len(doc.params) != 2 {
+		t.Fatalf("params = %v", doc.params)
+	}
+	if doc.returns != "the user" {
+		t.Fatalf("returns = %q", doc.returns)
+	}
+	if strings.Contains(doc.summary+doc.body, "\r") {
+		t.Fatal("carriage return leaked")
+	}
+}
+
+func TestParseJsDocFences(t *testing.T) {
+	fence := "```"
+	doc := parseJsDoc("/**\n * Summary.\n *\n * ~~~\n * " + fence + "\n * @param fake nope\n * ~~~\n * @deprecated real\n */")
+	if len(doc.params) != 0 {
+		t.Fatalf("fenced @param parsed as a tag: %v", doc.params)
+	}
+	if doc.deprecated != "real" {
+		t.Fatalf("deprecated = %q", doc.deprecated)
+	}
+	if doc.body != "~~~\n"+fence+"\n@param fake nope\n~~~" {
+		t.Fatalf("body = %q", doc.body)
+	}
+
+	doc = parseJsDoc("/**\n * Summary.\n *\n * " + fence + "ts\n * @deprecated in code\n * " + fence + "\n * @param a - A.\n */")
+	if doc.hasDeprecated {
+		t.Fatal("@deprecated inside a fence was parsed")
+	}
+	if doc.params["a"] != "A." {
+		t.Fatalf("params = %v", doc.params)
+	}
+	// Fence state carries through tag text.
+	doc = parseJsDoc("/**\n * @param a - Example:\n * " + fence + "\n * @deprecated inside\n * " + fence + "\n */")
+	if doc.hasDeprecated {
+		t.Fatal("@deprecated inside a fence in tag text was parsed")
+	}
+}
+
+func TestParseJsDocSummaryStopsAtFence(t *testing.T) {
+	fence := "```"
+	doc := parseJsDoc("/**\n * Summary text\n * " + fence + "ts\n * code();\n * " + fence + "\n */")
+	if doc.summary != "Summary text" || doc.body != fence+"ts\ncode();\n"+fence {
+		t.Fatalf("summary/body = %q / %q", doc.summary, doc.body)
+	}
+}
+
+func TestJsDocEmissionEscapesStrings(t *testing.T) {
+	doc := parseJsDoc("/**\n * Say \"hi\" \\ there.\n *\n * Line two.\n * @deprecated use \"y\"\n */")
+	items := strings.Join(doc.fieldItems(), "|")
+	for _, want := range []string{`\"hi\"`, `\\ there`, `\n\n`, `deprecated: "use \"y\""`} {
+		if !strings.Contains(items, want) {
+			t.Fatalf("emission %s missing %s", items, want)
+		}
+	}
+	if strings.ContainsAny(items, "\n\r") {
+		t.Fatalf("emission contains a raw newline: %q", items)
+	}
+}
+
+func TestInternalObjectMetadataCheckIgnoresDocumentationStrings(t *testing.T) {
+	if internalObjectExprCarriesSourceMetadata(`{kind: 18, description: "uses literal: and annotations: words", types: []}`) {
+		t.Fatal("documentation text counted as source metadata")
+	}
+	if !internalObjectExprCarriesSourceMetadata(`{kind: 18, types: [{kind: 10, literal: "a"}]}`) {
+		t.Fatal("real literal metadata missed")
+	}
+}
+
+func TestLastOfMultipleJsDocBlocksWins(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tsconfig.json"), []byte(`{"compilerOptions": {"strict": true, "target": "ESNext"}, "include": ["*.ts"], "reflection": true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "multi.ts"), []byte("export class Multi {\n\t/** First block. */\n\t/** Second block. */\n\tvalue!: string;\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program, diagnostics, err := driver.LoadProgram(root, "tsconfig.json", driver.LoadProgramOptions{SingleThreaded: true})
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("load: %v %v", err, diagnostics)
+	}
+	defer func() { _ = program.Close() }()
+	reg := collectRegistry(program, root, true, true)
+	class := reg.classes["Multi"]
+	if class == nil || len(class.properties) != 1 {
+		t.Fatal("Multi was not collected")
+	}
+	if got := class.properties[0].doc.summary; got != "Second block." {
+		t.Fatalf("summary = %q", got)
+	}
+}

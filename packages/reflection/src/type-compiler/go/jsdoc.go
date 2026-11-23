@@ -47,13 +47,13 @@ func parseJsDoc(raw string) jsDocInfo {
 		lines []string
 	}
 	var tags []tagState
-	inFence := false
+	fence := ""
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		inFence := fence != ""
+		fence = updateJsDocFence(fence, trimmed)
 		if len(tags) == 0 {
-			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-				inFence = !inFence
-			} else if !inFence && strings.HasPrefix(trimmed, "@") {
+			if !inFence && fence == "" && strings.HasPrefix(trimmed, "@") {
 				name, rest := splitJsDocTag(trimmed)
 				tags = append(tags, tagState{name: name, lines: []string{rest}})
 				continue
@@ -61,7 +61,7 @@ func parseJsDoc(raw string) jsDocInfo {
 			descriptionLines = append(descriptionLines, strings.TrimRight(line, " \t"))
 			continue
 		}
-		if strings.HasPrefix(trimmed, "@") {
+		if !inFence && fence == "" && strings.HasPrefix(trimmed, "@") {
 			name, rest := splitJsDocTag(trimmed)
 			tags = append(tags, tagState{name: name, lines: []string{rest}})
 			continue
@@ -84,7 +84,7 @@ func parseJsDoc(raw string) jsDocInfo {
 			}
 			doc.params[name] = description
 		case "returns", "return":
-			doc.returns = text
+			doc.returns = stripJsDocType(text)
 			doc.hasReturns = true
 		case "deprecated":
 			doc.deprecated = text
@@ -145,10 +145,60 @@ func joinJsDocTagLines(lines []string) string {
 	return out.String()
 }
 
-var jsDocParamPattern = regexp.MustCompile(`^(?:\{[^}]*\}\s*)?(\[[^\]\s]+\]|\S+)\s*(?:-\s*)?(.*)$`)
+var jsDocParamPattern = regexp.MustCompile(`^(\[[^\]\s]+\]|\S+)\s*(?:-\s*)?(?s:(.*))$`)
+
+// stripJsDocType removes one leading balanced `{...}` type expression.
+func stripJsDocType(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "{") {
+		return text
+	}
+	depth := 0
+	for index, char := range text {
+		switch char {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(text[index+1:])
+			}
+		}
+	}
+	return text
+}
+
+// jsDocFenceOpener returns the fence marker (a run of three or more backticks or tildes) that
+// starts the line, or "".
+func jsDocFenceOpener(trimmed string) string {
+	if trimmed == "" || (trimmed[0] != '`' && trimmed[0] != '~') {
+		return ""
+	}
+	run := 0
+	for run < len(trimmed) && trimmed[run] == trimmed[0] {
+		run++
+	}
+	if run < 3 {
+		return ""
+	}
+	return trimmed[:run]
+}
+
+// updateJsDocFence tracks fenced code blocks. A fence closes only on a bare line of the same
+// character that opened it, at least as long as the opener.
+func updateJsDocFence(fence string, trimmed string) string {
+	if fence == "" {
+		return jsDocFenceOpener(trimmed)
+	}
+	closer := jsDocFenceOpener(trimmed)
+	if closer != "" && closer[0] == fence[0] && len(closer) >= len(fence) && strings.TrimSpace(trimmed[len(closer):]) == "" {
+		return ""
+	}
+	return fence
+}
 
 func parseJsDocParam(text string) (string, string) {
-	match := jsDocParamPattern.FindStringSubmatch(strings.TrimSpace(text))
+	match := jsDocParamPattern.FindStringSubmatch(stripJsDocType(text))
 	if match == nil {
 		return "", ""
 	}
@@ -168,7 +218,7 @@ func parseJsDocParam(text string) (string, string) {
 func splitJsDocDescription(lines []string) (string, string) {
 	paragraphs := [][]string{}
 	current := []string{}
-	inFence := false
+	fence := ""
 	flush := func() {
 		if len(current) > 0 {
 			paragraphs = append(paragraphs, current)
@@ -177,10 +227,13 @@ func splitJsDocDescription(lines []string) (string, string) {
 	}
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			inFence = !inFence
+		wasInFence := fence != ""
+		fence = updateJsDocFence(fence, trimmed)
+		if !wasInFence && fence != "" && len(paragraphs) == 0 {
+			// The summary stops where a fenced block begins.
+			flush()
 		}
-		if trimmed == "" && !inFence {
+		if trimmed == "" && fence == "" {
 			flush()
 			continue
 		}

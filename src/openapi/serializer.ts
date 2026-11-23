@@ -257,8 +257,10 @@ function buildOperation(
 
     const appended: string[] = [];
     if (contributors.length) {
-        const inferred = structuredClone({ ...operation, operationId: defaultOperationId });
+        const inferredSnapshot = { ...operation, operationId: defaultOperationId };
         for (const contributor of contributors) {
+            // Each contributor gets its own copy, so one cannot affect what the next sees.
+            const inferred = structuredClone(inferredSnapshot);
             const result = contributor.operation?.({ route, inferred, defaultOperationId });
             if (!result) continue;
             if ('operationId' in result && (result as { operationId?: unknown }).operationId !== undefined) {
@@ -305,7 +307,7 @@ function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof 
 
     for (const name of route.paramNames) {
         if (documentedPathParams.has(name)) continue;
-        const description = route.docs?.params?.[name];
+        const description = taggedParameterDoc(route, undefined, name);
         parameters.push({
             name,
             in: 'path',
@@ -336,9 +338,21 @@ function buildOpenApiParameter(
 
 /** Description, deprecation and sunset for a parameter: `@param` text wins over inline JSDoc. */
 function parameterDocFields(route: HttpRoutePlan, parameter: HttpRouteParameterPlan): OpenApiDocFields {
-    const names = [(parameter as { sourceName?: string }).sourceName, (parameter as { name?: string }).name];
-    const tagged = names.map(name => (name === undefined ? undefined : route.docs?.params?.[name])).find(text => text !== undefined);
+    const tagged = taggedParameterDoc(route, (parameter as { sourceName?: string }).sourceName, (parameter as { name?: string }).name);
     return { description: tagged || parameter.docs?.description, deprecated: parameter.docs?.deprecated, sunset: parameter.docs?.sunset };
+}
+
+/**
+ * Finds the `@param` text for a parameter. The TypeScript parameter name wins; the wire name is
+ * only used when no parameter of the handler has that TypeScript name.
+ */
+function taggedParameterDoc(route: HttpRoutePlan, sourceName: string | undefined, wireName: string | undefined): string | undefined {
+    const params = route.docs?.params;
+    if (!params) return undefined;
+    if (sourceName !== undefined && Object.hasOwn(params, sourceName)) return params[sourceName];
+    if (wireName === undefined || !Object.hasOwn(params, wireName)) return undefined;
+    const claimedByAnotherParameter = route.parameters.some(item => item.sourceName === wireName);
+    return claimedByAnotherParameter ? undefined : params[wireName];
 }
 
 function applyParameterDocs(parameter: OpenApiParameter, docs: OpenApiDocFields): OpenApiParameter {
@@ -366,7 +380,12 @@ function expandObjectParameters(
                 required: !parameter.optional && property.required,
                 schema: typeToOpenApiSchema(property.type, schemaContext)
             },
-            property
+            {
+                description: property.description,
+                // A deprecated aggregate deprecates every expanded parameter.
+                deprecated: property.deprecated ?? docs.deprecated,
+                sunset: property.sunset ?? docs.sunset
+            }
         )
     );
 }
