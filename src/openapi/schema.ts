@@ -30,11 +30,41 @@ export interface OpenApiTypeProperty {
     type: Type;
     required: boolean;
     description?: string;
+    deprecated?: string;
+    sunset?: string;
 }
 
 interface TaggedObjectUnion {
     propertyName: string;
     valuesByBranch: string[][];
+}
+
+/** JSDoc-derived documentation for a property or parameter. */
+export interface OpenApiDocFields {
+    description?: string;
+    /** `@deprecated` text. An empty string marks the item deprecated without a message. */
+    deprecated?: string;
+    /** `@sunset` date (YYYY-MM-DD). */
+    sunset?: string;
+}
+
+/** Combines a description with the `**Deprecated:** <text>` paragraph used for deprecated items. */
+export function describeOpenApiDeprecation(description: string | undefined, deprecated: string | undefined): string | undefined {
+    if (deprecated === undefined || !deprecated.trim()) return description || undefined;
+    const note = `**Deprecated:** ${deprecated.trim()}`;
+    return description ? `${description}\n\n${note}` : note;
+}
+
+/**
+ * Applies description, deprecation and sunset to a schema. A `$ref` schema keeps them as siblings
+ * of `$ref` (allowed by OpenAPI 3.1) rather than being wrapped in `allOf`.
+ */
+export function applyOpenApiDocFields<T extends OpenApiSchemaObject | OpenApiReferenceObject>(schema: T, fields: OpenApiDocFields): T {
+    const description = describeOpenApiDeprecation(fields.description, fields.deprecated);
+    if (description) schema.description = description;
+    if (fields.deprecated !== undefined) (schema as OpenApiSchemaObject).deprecated = true;
+    if (fields.sunset) (schema as OpenApiSchemaObject)['x-sunset'] = fields.sunset;
+    return schema;
 }
 
 export function createOpenApiSchemaContext(): OpenApiSchemaContext {
@@ -80,7 +110,9 @@ export function listOpenApiTypeProperties(type: Type): OpenApiTypeProperty[] {
                 name: property.getNameAsString(),
                 type: property.getType(),
                 required: !property.isOptional(),
-                description: property.getDescription() || undefined
+                description: property.getDescription() || undefined,
+                deprecated: property.getDeprecated(),
+                sunset: property.getSunset()
             }));
     }
 
@@ -91,7 +123,9 @@ export function listOpenApiTypeProperties(type: Type): OpenApiTypeProperty[] {
                 name: String(property.name),
                 type: property.type,
                 required: property.optional !== true && !allowsUndefined(property.type),
-                description: property.description
+                description: property.description,
+                deprecated: property.deprecated,
+                sunset: property.sunset
             }));
     }
 
@@ -425,8 +459,7 @@ function schemaForProperties(
 
     const required: string[] = [];
     for (const property of properties) {
-        const propertySchema = typeToOpenApiSchema(property.type, context);
-        if (property.description && !('$ref' in propertySchema)) propertySchema.description = property.description;
+        const propertySchema = applyOpenApiDocFields(typeToOpenApiSchema(property.type, context), property);
         schema.properties![property.name] = propertySchema;
         if (property.required) required.push(property.name);
     }
@@ -669,7 +702,9 @@ function collectObjectLiteralProperties(type: TypeObjectLiteral, seen = new Set<
                 name: property.name,
                 type: property.type,
                 optional: property.required ? undefined : true,
-                description: property.description
+                description: property.description,
+                deprecated: property.deprecated,
+                sunset: property.sunset
             }))
         );
     }

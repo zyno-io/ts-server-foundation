@@ -35,7 +35,7 @@ import {
 import { MailService } from '../services/mail';
 import { TemporaryFileCleanupService } from '../services/temporary-files';
 import { sql } from '../database/sql';
-import { OpenApiController, dumpOpenApiSchema, shouldDumpOpenApiSchema, shouldExposeOpenApi } from '../openapi';
+import { OpenApiController, dumpOpenApiSchema, shouldDumpOpenApiSchema, shouldExposeOpenApi, type OpenApiContributor } from '../openapi';
 import { MetricsController } from '../telemetry/otel/metrics.controller';
 import { OtelState } from '../telemetry/otel/helpers';
 import { isOtelMetricsEndpointEnabled } from '../telemetry/otel/metrics';
@@ -72,6 +72,8 @@ export interface CreateAppOptions<C extends BaseAppConfig = BaseAppConfig> exten
     enableHealthcheck?: boolean;
     enableWorker?: boolean;
     enableDkRpc?: boolean;
+    /** OpenAPI document generation options. */
+    openapi?: { contributors?: OpenApiContributor[] };
 }
 
 interface RegisteredCommand {
@@ -108,6 +110,11 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private readonly shutdownDrains = new Set<AppCleanup>();
     private cliServiceMode = false;
     private replMode = false;
+
+    /** OpenAPI contributors registered through `createApp({ openapi: { contributors } })`. */
+    get openapiContributors(): readonly OpenApiContributor[] | undefined {
+        return this.options.openapi?.contributors;
+    }
 
     constructor(readonly options: CreateAppOptions<C>) {
         const configClass = options.config ?? (BaseAppConfig as ClassType<C>);
