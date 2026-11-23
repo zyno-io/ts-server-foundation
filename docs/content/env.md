@@ -114,7 +114,7 @@ The runtime recognizes these built-in config and environment keys. Most are refl
 - logging: `HTTP_REQUEST_LOGGING_MODE`, `HEALTHZ_ENABLE_REQUEST_LOGGING`, `ENABLE_PINO_PRETTY`, `ENABLE_PINO_SINGLE_LINE`, `LOG_LEVEL`
 - telemetry: `SENTRY_DSN`, `OTEL_*`, `ALERTS_SLACK_WEBHOOK_URL`
 - SRPC: `SRPC_AUTH_SECRET`, `SRPC_AUTH_CLOCK_DRIFT_MS`
-- mail: `MAIL_*`, `SMTP_*`, `POSTMARK_SECRET`
+- mail: `MAIL_*`, `SMTP_*`, `POSTMARK_REQUEST_HOST`, `POSTMARK_SECRET`
 - tests and tooling: `TEST_KEEP_DB`, `TEST_RUN_TS`, `TSF_TEST_*`, `PROTOC`
 
 See [Configuration](./configuration.md) for the value-level config reference.

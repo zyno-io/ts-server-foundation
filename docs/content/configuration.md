@@ -183,17 +183,18 @@ const app = createApp({
 
 ### Mail
 
-| Variable               | Type                   | Default     |
-| ---------------------- | ---------------------- | ----------- |
-| `MAIL_FROM`            | `string`               | unset       |
-| `MAIL_FROM_NAME`       | `string`               | unset       |
-| `MAIL_PROVIDER`        | `'smtp' \| 'postmark'` | `smtp`      |
-| `SMTP_HOST`            | `string`               | `127.0.0.1` |
-| `SMTP_PORT`            | `number`               | `1025`      |
-| `SMTP_USER`            | `string`               | unset       |
-| `SMTP_PASSWORD_SECRET` | `string`               | unset       |
-| `SMTP_TLS`             | `boolean`              | `false`     |
-| `POSTMARK_SECRET`      | `string`               | unset       |
+| Variable                | Type                   | Default               |
+| ----------------------- | ---------------------- | --------------------- |
+| `MAIL_FROM`             | `string`               | unset                 |
+| `MAIL_FROM_NAME`        | `string`               | unset                 |
+| `MAIL_PROVIDER`         | `'smtp' \| 'postmark'` | `smtp`                |
+| `SMTP_HOST`             | `string`               | `127.0.0.1`           |
+| `SMTP_PORT`             | `number`               | `1025`                |
+| `SMTP_USER`             | `string`               | unset                 |
+| `SMTP_PASSWORD_SECRET`  | `string`               | unset                 |
+| `SMTP_TLS`              | `boolean`              | `false`               |
+| `POSTMARK_REQUEST_HOST` | `string`               | `api.postmarkapp.com` |
+| `POSTMARK_SECRET`       | `string`               | unset                 |
 
 ## `isDevFeatureEnabled`
 

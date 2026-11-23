@@ -178,6 +178,7 @@ export class BaseAppConfig {
     SMTP_USER?: string;
     SMTP_PASSWORD_SECRET?: string;
     SMTP_TLS: boolean = false;
+    POSTMARK_REQUEST_HOST?: string;
     POSTMARK_SECRET?: string;
 }
 

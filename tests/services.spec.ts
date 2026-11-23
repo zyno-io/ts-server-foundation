@@ -426,6 +426,33 @@ describe('services', () => {
         assert.equal(prepared.subject, '[test] Welcome');
     });
 
+    it('sends Postmark mail over HTTPS to the configured host and defaults to Postmark', async t => {
+        const fetchMock = t.mock.method(globalThis, 'fetch', async () => Response.json({ MessageID: 'message-id' }));
+        const message = {
+            from: { address: 'noreply@example.com' },
+            to: { address: 'alice@example.com' },
+            subject: 'Sign-in code',
+            message: '<p>Test message</p>'
+        };
+        const defaultConfig = { MAIL_PROVIDER: 'postmark' as const, POSTMARK_SECRET: 'test-token' };
+
+        const defaultApp = createApp({ defaultConfig });
+        await defaultApp.get(MailService).send(message);
+
+        const alternateApp = createApp({
+            defaultConfig: { ...defaultConfig, POSTMARK_REQUEST_HOST: 'mail.example.com' }
+        });
+        await alternateApp.get(MailService).send(message);
+
+        assert.deepEqual(
+            fetchMock.mock.calls.map(call => [String(call.arguments[0]), new Headers(call.arguments[1]?.headers).get('X-Postmark-Server-Token')]),
+            [
+                ['https://api.postmarkapp.com/email', 'test-token'],
+                ['https://mail.example.com/email', 'test-token']
+            ]
+        );
+    });
+
     it('constructs LeaderService Redis keys from the configured mutex/default Redis prefix', () => {
         process.env.APP_ENV = 'test';
         process.env.REDIS_PREFIX = 'default-prefix';

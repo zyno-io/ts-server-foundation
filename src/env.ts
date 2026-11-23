@@ -150,6 +150,7 @@ export interface EnvObject {
     SMTP_USER?: string;
     SMTP_PASSWORD_SECRET?: string;
     SMTP_TLS?: string;
+    POSTMARK_REQUEST_HOST?: string;
     POSTMARK_SECRET?: string;
 
     PROTOC?: string;
