@@ -35,7 +35,15 @@ import {
 import { MailService } from '../services/mail';
 import { TemporaryFileCleanupService } from '../services/temporary-files';
 import { sql } from '../database/sql';
-import { OpenApiController, dumpOpenApiSchema, shouldDumpOpenApiSchema, shouldExposeOpenApi, type OpenApiContributor } from '../openapi';
+import {
+    OpenApiController,
+    collectOpenApiRouteWarnings,
+    dumpOpenApiSchema,
+    shouldDumpOpenApiSchema,
+    shouldExposeOpenApi,
+    type OpenApiContributor
+} from '../openapi';
+import { shouldLogOpenApiRouteWarnings } from '../openapi/warnings';
 import { MetricsController } from '../telemetry/otel/metrics.controller';
 import { OtelState } from '../telemetry/otel/helpers';
 import { isOtelMetricsEndpointEnabled } from '../telemetry/otel/metrics';
@@ -105,7 +113,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
     private signalHandlers?: Partial<Record<NodeJS.Signals, () => void>>;
     private forceWorkerRunner = false;
     private readonly devConsole?: DevConsoleRuntime;
-    private openApiDumpTimer?: NodeJS.Timeout;
+    private devStartupTimer?: NodeJS.Timeout;
     private readonly registeredCleanups: RegisteredAppCleanup[] = [];
     private readonly shutdownDrains = new Set<AppCleanup>();
     private cliServiceMode = false;
@@ -283,7 +291,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
                 workerStartAttempted = true;
                 await this.container.get(WorkerRunnerService).start();
             }
-            if (!this.cliServiceMode && !this.replMode && shouldDumpOpenApiSchema(this.config)) this.scheduleOpenApiSchemaDump();
+            if (!this.cliServiceMode && !this.replMode) this.scheduleDevStartupTasks();
             this.started = true;
         } catch (error) {
             const cleanupErrors: unknown[] = [];
@@ -336,7 +344,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         };
 
         if (!this.started) {
-            this.clearOpenApiDumpTimer();
+            this.clearDevStartupTimer();
             await runStep(() => this.devConsole?.close());
             await runStep(() => this.runShutdownDrains());
             await runStep(() => this.runRegisteredCleanups());
@@ -346,7 +354,7 @@ export class App<C extends BaseAppConfig = BaseAppConfig> {
         }
 
         await runStep(() => this.events.dispatch(onServerShutdownRequested, undefined));
-        this.clearOpenApiDumpTimer();
+        this.clearDevStartupTimer();
         if (this.options.enableWorker) {
             await runStep(() => this.container.get(WorkerRunnerService).shutdown());
             await runStep(() => this.container.get(WorkerQueueRegistry).shutdown());
@@ -492,6 +500,7 @@ Examples:
 
     private async runOpenApiGenerationFromEntrypoint(args: string[]): Promise<void> {
         if (args.length) throw new Error(`openapi:generate does not accept arguments: ${args.join(' ')}`);
+        for (const warning of collectOpenApiRouteWarnings(this)) console.error(`Warning: ${warning}`);
         const path = await dumpOpenApiSchema(this);
         console.log(`Wrote OpenAPI schema to ${path}`);
     }
@@ -518,22 +527,38 @@ Examples:
         }
     }
 
-    private scheduleOpenApiSchemaDump(): void {
-        this.clearOpenApiDumpTimer();
+    /**
+     * Logs route documentation warnings and writes the OpenAPI schema, when enabled. Delayed so the
+     * output follows the startup route listing.
+     */
+    private scheduleDevStartupTasks(): void {
+        const logRouteWarnings = shouldLogOpenApiRouteWarnings(this.config);
+        const dumpSchema = shouldDumpOpenApiSchema(this.config);
+        if (!logRouteWarnings && !dumpSchema) return;
+        this.clearDevStartupTimer();
         const logger = this.container.get(ScopedLogger).scoped('app');
-        this.openApiDumpTimer = setTimeout(() => {
-            this.openApiDumpTimer = undefined;
-            void dumpOpenApiSchema(this)
-                .then(path => logger.info(`OpenAPI schema written to: ${path}`))
-                .catch(error => logger.error('Failed to write OpenAPI schema', error));
+        this.devStartupTimer = setTimeout(() => {
+            this.devStartupTimer = undefined;
+            if (logRouteWarnings) {
+                try {
+                    for (const warning of collectOpenApiRouteWarnings(this)) logger.warn(warning);
+                } catch (error) {
+                    logger.error('Failed to check routes for OpenAPI warnings', error);
+                }
+            }
+            if (dumpSchema) {
+                void dumpOpenApiSchema(this)
+                    .then(path => logger.info(`OpenAPI schema written to: ${path}`))
+                    .catch(error => logger.error('Failed to write OpenAPI schema', error));
+            }
         }, 250);
-        this.openApiDumpTimer.unref?.();
+        this.devStartupTimer.unref?.();
     }
 
-    private clearOpenApiDumpTimer(): void {
-        if (!this.openApiDumpTimer) return;
-        clearTimeout(this.openApiDumpTimer);
-        this.openApiDumpTimer = undefined;
+    private clearDevStartupTimer(): void {
+        if (!this.devStartupTimer) return;
+        clearTimeout(this.devStartupTimer);
+        this.devStartupTimer = undefined;
     }
 
     private registerDatabaseHealthcheck(dbClass: ClassType): void {

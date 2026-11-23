@@ -11,7 +11,7 @@ import { getPackageJson } from '../helpers';
 import type { BaseAppConfig } from '../app/config';
 import { Env } from '../env';
 import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult, WebResponseResult } from '../http';
-import type { HttpRouteParameterPlan, HttpRoutePlan } from '../http';
+import { isHttpSingleValueParameter, type HttpRouteParameterPlan, type HttpRoutePlan, type HttpSingleValueParameterPlan } from '../http';
 import { getOpenApiOperationOptions, getOpenApiResponses, isOpenApiIgnored, type OpenApiOperationOptions } from './decorators';
 import {
     allowsUndefined,
@@ -82,7 +82,7 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
     };
     const routes = allRoutes.filter(
         route =>
-            (options.includeInternal || !isInternalRoute(route.path)) &&
+            (options.includeInternal || !isInternalOpenApiRoute(route.path)) &&
             !isOpenApiIgnored(route.controllerClass, route.propertyKey) &&
             toOpenApiMethod(route.method)
     );
@@ -234,15 +234,8 @@ function buildOperation(
     if (docs?.deprecated !== undefined) operation.deprecated = true;
     if (docs?.sunset) operation['x-sunset'] = docs.sunset;
     if (parameters.length) operation.parameters = parameters;
-    if (requestBody) {
-        operation.requestBody = requestBody;
-        const bodyParams = route.parameters.filter(parameter => parameter.kind === 'body');
-        if (bodyParams.length === 1) {
-            const bodyDocs = parameterDocFields(route, bodyParams[0]!);
-            const bodyDescription = describeOpenApiDeprecation(bodyDocs.description, bodyDocs.deprecated);
-            if (bodyDescription) requestBody.description = bodyDescription;
-        }
-    }
+    // Group parameters (HttpBody, HttpQueries) take no docs; their type's members are documented.
+    if (requestBody) operation.requestBody = requestBody;
     const requiresJwt = route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional);
     if (requiresJwt) operation.security = [{ bearerAuth: [] }];
 
@@ -293,15 +286,12 @@ function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof 
     const documentedPathParams = new Set<string>();
 
     for (const parameter of route.parameters) {
-        if (parameter.kind === 'path') {
-            documentedPathParams.add(parameter.name);
-            parameters.push(buildOpenApiParameter('path', parameter, schemaContext, parameterDocFields(route, parameter)));
-        } else if (parameter.kind === 'query') {
-            parameters.push(buildOpenApiParameter('query', parameter, schemaContext, parameterDocFields(route, parameter)));
-        } else if (parameter.kind === 'header') {
-            parameters.push(buildOpenApiParameter('header', parameter, schemaContext, parameterDocFields(route, parameter)));
+        if (isHttpSingleValueParameter(parameter)) {
+            if (parameter.kind === 'path') documentedPathParams.add(parameter.name);
+            // The single-value kinds are the OpenAPI parameter locations.
+            parameters.push(buildOpenApiParameter(parameter.kind, parameter, schemaContext, parameterDocFields(route, parameter)));
         } else if (parameter.kind === 'queries') {
-            parameters.push(...expandObjectParameters('query', parameter, schemaContext, parameterDocFields(route, parameter)));
+            parameters.push(...expandObjectParameters('query', parameter, schemaContext));
         }
     }
 
@@ -336,9 +326,12 @@ function buildOpenApiParameter(
     return applyParameterDocs(result, docs);
 }
 
-/** Description, deprecation and sunset for a parameter: `@param` text wins over inline JSDoc. */
-function parameterDocFields(route: HttpRoutePlan, parameter: HttpRouteParameterPlan): OpenApiDocFields {
-    const tagged = taggedParameterDoc(route, (parameter as { sourceName?: string }).sourceName, (parameter as { name?: string }).name);
+/**
+ * Description, deprecation and sunset for a single-value parameter: `@param` text wins over inline
+ * JSDoc. Group parameters (HttpBody, HttpQueries) take no docs.
+ */
+function parameterDocFields(route: HttpRoutePlan, parameter: HttpSingleValueParameterPlan): OpenApiDocFields {
+    const tagged = taggedParameterDoc(route, parameter.sourceName, parameter.name);
     return { description: tagged || parameter.docs?.description, deprecated: parameter.docs?.deprecated, sunset: parameter.docs?.sunset };
 }
 
@@ -346,7 +339,7 @@ function parameterDocFields(route: HttpRoutePlan, parameter: HttpRouteParameterP
  * Finds the `@param` text for a parameter. The TypeScript parameter name wins; the wire name is
  * only used when no parameter of the handler has that TypeScript name.
  */
-function taggedParameterDoc(route: HttpRoutePlan, sourceName: string | undefined, wireName: string | undefined): string | undefined {
+export function taggedParameterDoc(route: HttpRoutePlan, sourceName: string | undefined, wireName: string | undefined): string | undefined {
     const params = route.docs?.params;
     if (!params) return undefined;
     if (sourceName !== undefined && Object.hasOwn(params, sourceName)) return params[sourceName];
@@ -363,14 +356,14 @@ function applyParameterDocs(parameter: OpenApiParameter, docs: OpenApiDocFields)
     return parameter;
 }
 
+/** Expands an object-typed group parameter into one parameter per member, documented by the member's JSDoc. */
 function expandObjectParameters(
     location: 'query' | 'header',
     parameter: Extract<HttpRouteParameterPlan, { type: Type; name: string }>,
-    schemaContext: ReturnType<typeof createOpenApiSchemaContext>,
-    docs: OpenApiDocFields = {}
+    schemaContext: ReturnType<typeof createOpenApiSchemaContext>
 ): OpenApiParameter[] {
     const properties = listOpenApiTypeProperties(parameter.type);
-    if (!properties.length) return [buildOpenApiParameter(location, parameter, schemaContext, docs)];
+    if (!properties.length) return [buildOpenApiParameter(location, parameter, schemaContext)];
     typeToOpenApiSchema(parameter.type, schemaContext);
     return properties.map(property =>
         applyParameterDocs(
@@ -380,12 +373,7 @@ function expandObjectParameters(
                 required: !parameter.optional && property.required,
                 schema: typeToOpenApiSchema(property.type, schemaContext)
             },
-            {
-                description: property.description,
-                // A deprecated aggregate deprecates every expanded parameter.
-                deprecated: property.deprecated ?? docs.deprecated,
-                sunset: property.sunset ?? docs.sunset
-            }
+            property
         )
     );
 }
@@ -735,7 +723,8 @@ function toOpenApiPath(path: string): string {
     return path.replace(/:([^/]+)/g, '{$1}');
 }
 
-function isInternalRoute(path: string): boolean {
+/** TSF infrastructure routes (health, OpenAPI, metrics, DevConsole), left out of the document by default. */
+export function isInternalOpenApiRoute(path: string): boolean {
     return (
         path === '/openapi.json' ||
         path === '/openapi.yaml' ||

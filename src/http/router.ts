@@ -103,6 +103,29 @@ type HttpRouteParameterPlanKind =
           optional: boolean;
       };
 
+/**
+ * Parameter kinds that bind one wire value (`HttpPath`, `HttpQuery`, `HttpHeader`). Their JSDoc and
+ * `@param` text document the OpenAPI parameter.
+ */
+export const HTTP_SINGLE_VALUE_PARAMETER_KINDS = ['path', 'query', 'header'] as const satisfies readonly HttpRouteParameterPlan['kind'][];
+
+/**
+ * Parameter kinds that expand an object type into the request body or several wire values
+ * (`HttpBody`, `HttpQueries`). They take no docs of their own; their type's members are documented.
+ */
+export const HTTP_GROUP_PARAMETER_KINDS = ['body', 'queries'] as const satisfies readonly HttpRouteParameterPlan['kind'][];
+
+export type HttpSingleValueParameterPlan = Extract<HttpRouteParameterPlan, { kind: (typeof HTTP_SINGLE_VALUE_PARAMETER_KINDS)[number] }>;
+export type HttpGroupParameterPlan = Extract<HttpRouteParameterPlan, { kind: (typeof HTTP_GROUP_PARAMETER_KINDS)[number] }>;
+
+export function isHttpSingleValueParameter(parameter: HttpRouteParameterPlan): parameter is HttpSingleValueParameterPlan {
+    return (HTTP_SINGLE_VALUE_PARAMETER_KINDS as readonly string[]).includes(parameter.kind);
+}
+
+export function isHttpGroupParameter(parameter: HttpRouteParameterPlan): parameter is HttpGroupParameterPlan {
+    return (HTTP_GROUP_PARAMETER_KINDS as readonly string[]).includes(parameter.kind);
+}
+
 const BodyParsePromiseKey = Symbol.for('@zyno-io/ts-server-foundation:http-body-parse-promise');
 
 function isHttpMiddlewareClass(input: HttpMiddlewareInput): input is ClassType<HttpMiddleware> {

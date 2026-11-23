@@ -1,15 +1,27 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
+    collectOpenApiRouteWarnings,
     createApp,
+    Env,
     http,
+    LoggerLevel,
     openapi,
+    resetLogSink,
     serializeOpenApiSchema,
+    setLogSink,
+    type AnyResponse,
     type HttpBody,
     type HttpPath,
     type HttpQueries,
     type HttpQuery,
+    type LogEntry,
     type OpenApiContributor,
     type OpenApiOperation,
     type OpenApiReferenceObject,
@@ -183,15 +195,24 @@ describe('openapi JSDoc documentation', () => {
         );
     });
 
-    it('documents @param on path, query and body parameters, and @returns', () => {
+    it('documents @param on path and query parameters, and @returns', () => {
         const doc = documentFor(DocWidgetsController);
         const get = doc.paths['/widgets/{id}'].get!;
         assert.equal(get.parameters?.find(parameter => parameter.name === 'id')?.description, 'The widget id.');
         assert.equal(get.parameters?.find(parameter => parameter.name === 'verbose')?.description, 'Include everything.');
         assert.equal(get.responses['200'].description, 'The widget, if it exists.');
-        assert.equal(doc.paths['/widgets'].post!.requestBody?.description, 'The widget to create.');
         assert.equal(doc.paths['/widgets'].post!.responses['200'].description, 'OK');
         assert.equal(doc.paths['/widgets/{id}'].delete!.responses['200'].description, 'OK');
+    });
+
+    it('ignores @param on group parameters', () => {
+        const doc = documentFor(DocWidgetsController);
+        const create = doc.paths['/widgets'].post!;
+        assert.ok(create.requestBody);
+        assert.equal(create.requestBody.description, undefined);
+        for (const parameter of doc.paths['/widgets'].get!.parameters ?? []) {
+            assert.notEqual(parameter.description, 'Ignored: expanded properties use their own docs.');
+        }
     });
 
     it('uses property docs for object-expanded query parameters', () => {
@@ -563,15 +584,15 @@ describe('openapi docs review fixes', () => {
         assert.equal(fallback[0].description, 'Matches the wire name because no parameter is called q.');
     });
 
-    it('propagates @deprecated and @sunset of an HttpQueries aggregate to each expanded parameter', () => {
+    it('ignores JSDoc on an HttpQueries parameter; expanded parameters keep only their member docs', () => {
         const op = documentFor(ExtraDocsController).paths['/extra/aggregate'].get!;
         assert.equal(op.deprecated, undefined);
         for (const parameter of op.parameters!) {
-            assert.equal(parameter.deprecated, true);
-            assert.equal(parameter['x-sunset'], '2027-05-05');
+            assert.equal(parameter.deprecated, undefined);
+            assert.equal(parameter['x-sunset'], undefined);
         }
-        assert.equal(op.parameters!.find(parameter => parameter.name === 'text')!.description, 'Free text.\n\n**Deprecated:** Use search.');
-        assert.equal(op.parameters!.find(parameter => parameter.name === 'other')!.description, '**Deprecated:** Use search.');
+        assert.equal(op.parameters!.find(parameter => parameter.name === 'text')!.description, 'Free text.');
+        assert.equal(op.parameters!.find(parameter => parameter.name === 'other')!.description, undefined);
     });
 
     it('gives each contributor its own copy of the inferred operation', () => {
@@ -624,5 +645,230 @@ describe('openapi docs review fixes', () => {
         assert.throws(() => documentFor(SchemesController, [conflicting]), /Conflicting OpenAPI security scheme shared/);
         const same: OpenApiContributor = { name: 'same', operation: () => ({ securitySchemes: { shared: { type: 'http', scheme: 'basic' } } }) };
         assert.doesNotThrow(() => documentFor(SchemesController, [same]));
+    });
+});
+
+/** A row described through an object type alias. */
+type InlineDocsAliasRow = {
+    /** Alias member doc. */
+    c: string;
+    /** Alias holder doc. */
+    nested: {
+        /** Nested alias member doc. */
+        n: string;
+    };
+};
+
+@http.controller('/inline')
+class InlineDocsController {
+    @http.POST('/body')
+    async body(
+        body: HttpBody<{
+            /** Inline body member doc. */
+            d: string;
+        }>
+    ): Promise<{
+        /** Inline return member doc. */
+        e: string;
+    }> {
+        return { e: body.d };
+    }
+
+    @http.GET('/queries')
+    async queries(
+        query: HttpQueries<{
+            /** Inline queries member doc. */
+            f?: string;
+        }>
+    ): Promise<string> {
+        return query.f ?? '';
+    }
+
+    @http.GET('/alias')
+    async alias(): Promise<InlineDocsAliasRow[]> {
+        return [];
+    }
+
+    @http.GET('/array-generic')
+    async arrayGeneric(): Promise<
+        Array<{
+            /** Inline Array<> member doc. */
+            g: string;
+        }>
+    > {
+        return [];
+    }
+
+    @http.GET('/array-suffix')
+    async arraySuffix(): Promise<
+        {
+            /** Inline T[] member doc. */
+            s: string;
+        }[]
+    > {
+        return [];
+    }
+}
+
+describe('openapi member JSDoc on type aliases and inline object literals', () => {
+    const doc = documentFor(InlineDocsController);
+    const jsonSchema = (operation: OpenApiOperation | undefined) => asSchema(operation?.responses['200'].content?.['application/json']?.schema);
+    const propertyDescription = (schema: OpenApiSchemaObject, name: string) => asSchema(schema.properties?.[name]).description;
+
+    it('keeps member docs of an object type alias, including nested members', () => {
+        const row = doc.components!.schemas!.InlineDocsAliasRow;
+        assert.equal(row.description, 'A row described through an object type alias.');
+        assert.equal(propertyDescription(row, 'c'), 'Alias member doc.');
+        assert.equal(propertyDescription(row, 'nested'), 'Alias holder doc.');
+        assert.equal(propertyDescription(asSchema(row.properties?.nested), 'n'), 'Nested alias member doc.');
+    });
+
+    it('keeps member docs of inline body and return objects', () => {
+        const post = doc.paths['/inline/body'].post!;
+        assert.equal(propertyDescription(asSchema(post.requestBody?.content['application/json']?.schema), 'd'), 'Inline body member doc.');
+        assert.equal(propertyDescription(jsonSchema(post), 'e'), 'Inline return member doc.');
+    });
+
+    it('keeps member docs of inline HttpQueries objects on the expanded parameters', () => {
+        const parameters = doc.paths['/inline/queries'].get!.parameters!;
+        assert.equal(parameters.find(parameter => parameter.name === 'f')?.description, 'Inline queries member doc.');
+    });
+
+    it('keeps member docs of inline objects nested in Array<> and T[]', () => {
+        const generic = jsonSchema(doc.paths['/inline/array-generic'].get);
+        assert.equal(propertyDescription(asSchema(generic.items as OpenApiSchemaObject), 'g'), 'Inline Array<> member doc.');
+        const suffix = jsonSchema(doc.paths['/inline/array-suffix'].get);
+        assert.equal(propertyDescription(asSchema(suffix.items as OpenApiSchemaObject), 's'), 'Inline T[] member doc.');
+    });
+});
+
+/** Any JSON value. */
+type WarningsJson = unknown;
+
+@http.controller('/warn')
+class WarningsController {
+    /**
+     * Create.
+     * @param body Ignored on a body.
+     * @param missing Names nothing.
+     */
+    @http.POST()
+    async create(body: HttpBody<DocWidget>): Promise<void> {
+        void body;
+    }
+
+    @http.GET()
+    async list(
+        /** Ignored on a queries group. */
+        filter: HttpQueries<DocWidgetFilter>
+    ) {
+        void filter;
+        return [];
+    }
+
+    /**
+     * Wildcard.
+     * @param filter Ignored on a queries group.
+     */
+    @http.GET('/any')
+    async anything(filter: HttpQueries<DocWidgetFilter>): Promise<any> {
+        return filter;
+    }
+
+    @http.GET('/declared-any')
+    declaredAny(): AnyResponse {
+        return Promise.resolve({});
+    }
+
+    /**
+     * One.
+     * @param id The id.
+     * @param undeclared A path parameter without a handler parameter.
+     */
+    @http.GET('/:id/:undeclared')
+    async one(id: HttpPath<string>): Promise<string> {
+        return id;
+    }
+
+    @openapi.response<DocWidget>({ status: 200 })
+    @http.GET('/decorated')
+    async decorated() {
+        return { id: '', name: '', title: '' };
+    }
+
+    @http.GET('/named-unknown')
+    async namedUnknown(): Promise<WarningsJson> {
+        return null;
+    }
+
+    @openapi.ignore()
+    @http.GET('/ignored')
+    async ignored() {
+        return '';
+    }
+}
+
+describe('openapi route warnings', () => {
+    it('reports missing return types, ignored group parameter docs and unknown @param names', () => {
+        const app = createApp({ controllers: [WarningsController as never] });
+        assert.deepEqual(collectOpenApiRouteWarnings(app), [
+            "@param body on POST /warn (WarningsController -> create) is ignored: group parameters (HttpBody, HttpQueries) take no description; document the type's members instead",
+            '@param missing on POST /warn (WarningsController -> create) matches no parameter',
+            'No return type declared for GET /warn (WarningsController -> list)',
+            "JSDoc on parameter filter on GET /warn (WarningsController -> list) is ignored: group parameters (HttpBody, HttpQueries) take no docs; document the type's members instead",
+            'No return type declared for GET /warn/any (WarningsController -> anything)',
+            "@param filter on GET /warn/any (WarningsController -> anything) is ignored: group parameters (HttpBody, HttpQueries) take no description; document the type's members instead"
+        ]);
+    });
+
+    it('reports nothing for documented routes', () => {
+        assert.deepEqual(collectOpenApiRouteWarnings(createApp({ controllers: [InlineDocsController as never], enableHealthcheck: false })), []);
+    });
+
+    it('logs warnings on the app logger at development startup, without the schema dump', async () => {
+        const dir = await mkdtemp(join(tmpdir(), 'tsf-openapi-warnings-'));
+        const previousCwd = process.cwd();
+        const previousEnv = { APP_ENV: Env.APP_ENV, NODE_TEST_CONTEXT: Env.NODE_TEST_CONTEXT, ENABLE_OPENAPI_SCHEMA: Env.ENABLE_OPENAPI_SCHEMA };
+        const entries: LogEntry[] = [];
+        process.chdir(dir);
+        Env.APP_ENV = 'development';
+        Env.ENABLE_OPENAPI_SCHEMA = 'false';
+        delete Env.NODE_TEST_CONTEXT;
+        setLogSink(entry => entries.push(entry));
+        try {
+            const app = createApp({ controllers: [WarningsController as never] });
+            await app.start();
+            try {
+                await delay(350);
+            } finally {
+                await app.stop();
+            }
+            const warnings = entries.filter(entry => entry.level === LoggerLevel.warning && entry.scope === 'app').map(entry => entry.message);
+            assert.deepEqual(warnings, collectOpenApiRouteWarnings(app));
+            assert.equal(warnings.length, 6);
+            assert.equal(existsSync(join(dir, 'openapi.yaml')), false);
+        } finally {
+            resetLogSink();
+            process.chdir(previousCwd);
+            for (const [key, value] of Object.entries(previousEnv)) Env[key] = value;
+            await rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('logs no warnings at startup under the test runner', async () => {
+        const entries: LogEntry[] = [];
+        setLogSink(entry => entries.push(entry));
+        try {
+            const app = createApp({ controllers: [WarningsController as never], enableHealthcheck: false });
+            await app.start();
+            try {
+                await delay(350);
+            } finally {
+                await app.stop();
+            }
+            assert.equal(entries.filter(entry => entry.level === LoggerLevel.warning).length, 0);
+        } finally {
+            resetLogSink();
+        }
     });
 });

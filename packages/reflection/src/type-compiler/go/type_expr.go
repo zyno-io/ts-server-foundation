@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	shimast "github.com/microsoft/typescript-go/shim/ast"
 )
 
 func typeExpr(info *fileInfo, reg *registry, raw string) string {
@@ -430,9 +432,49 @@ func mergedTypeParameters(existing map[string]bool, names []string) map[string]b
 }
 
 func objectTypeLiteralExpr(info *fileInfo, reg *registry, raw string, ctx *typeContext) string {
+	return objectTypeLiteralExprForNode(info, reg, raw, nil, ctx)
+}
+
+// objectTypeLiteralExprForNode renders an object type literal from its source text. When the
+// TypeLiteral node is available, each member also takes its JSDoc and type node from the AST,
+// because the source text has its comments stripped.
+func objectTypeLiteralExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) string {
+	raw = strings.TrimSpace(stripTypeComments(raw))
 	body := strings.TrimSpace(raw[1 : len(raw)-1])
-	props := propertiesFromBody(body)
+	props := withTypeLiteralMembers(node, propertiesFromBody(body))
 	return "{kind: 18" + objectIndexExpr(info, reg, body, ctx) + ", types: [" + renderUtilityProperties(info, reg, props, ctx) + "]}"
+}
+
+// withTypeLiteralMembers copies the JSDoc and type node of each TypeLiteral property signature
+// onto the matching text-parsed property. A type node is only taken when its text matches.
+func withTypeLiteralMembers(node *shimast.Node, props []utilityProperty) []utilityProperty {
+	if node == nil || node.Kind != shimast.KindTypeLiteral || len(props) == 0 {
+		return props
+	}
+	file := shimast.GetSourceFileOfNode(node)
+	if file == nil {
+		return props
+	}
+	members := map[string]*shimast.Node{}
+	for _, member := range node.Members() {
+		if member.Kind != shimast.KindPropertySignature {
+			continue
+		}
+		if name := memberName(file, member); name != "" {
+			members[name] = member
+		}
+	}
+	for i := range props {
+		member := members[props[i].name]
+		if member == nil {
+			continue
+		}
+		props[i].doc = jsDocForNode(file, member)
+		if memberType := member.Type(); memberType != nil && props[i].typeNode == nil && sameTypeText(props[i].typeText, nodeText(file, memberType)) {
+			props[i].typeNode = memberType
+		}
+	}
+	return props
 }
 
 func objectIndexExpr(info *fileInfo, reg *registry, body string, ctx *typeContext) string {

@@ -111,6 +111,24 @@ func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node 
 		if types := node.AsIntersectionTypeNode().Types; types != nil {
 			nodes = types.Nodes
 		}
+	case shimast.KindTypeLiteral:
+		// Same guards as typeExprCtx, which renders the literal when no node is available.
+		literal := strings.TrimSpace(stripTypeComments(raw))
+		if !isObjectLiteralTypeText(literal) || isFunctionTypeSyntax(literal) {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		key := info.moduleKey + "\x00" + literal
+		if ctx.seen[key] {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		ctx.depth++
+		defer func() { ctx.depth-- }()
+		if ctx.depth > 80 {
+			return "{kind: 2, typeName: " + quote(literal) + "}"
+		}
+		ctx.seen[key] = true
+		defer delete(ctx.seen, key)
+		return objectTypeLiteralExprForNode(info, reg, literal, node, ctx)
 	default:
 		return typeExprCtx(info, reg, raw, ctx)
 	}
@@ -459,7 +477,15 @@ func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, 
 	}
 	if strings.HasSuffix(raw, "[]") {
 		element := strings.TrimSpace(strings.TrimSuffix(raw, "[]"))
-		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, nil, pos, true) + "}", true
+		// Only an inline object element takes its node, so its member JSDoc survives; other
+		// elements (enums, classes, aliases) keep the text path they have always used.
+		var elementNode *shimast.Node
+		if node != nil && node.Kind == shimast.KindArrayType {
+			if element := node.AsArrayTypeNode().ElementType; element != nil && element.Kind == shimast.KindTypeLiteral {
+				elementNode = element
+			}
+		}
+		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, elementNode, pos, true) + "}", true
 	}
 	name, args, ok := generic(raw)
 	if !ok {

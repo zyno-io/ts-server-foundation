@@ -325,3 +325,145 @@ func TestLastOfMultipleJsDocBlocksWins(t *testing.T) {
 		t.Fatalf("summary = %q", got)
 	}
 }
+
+func loadJsDocProbe(t *testing.T, source string) (*fileInfo, *registry) {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tsconfig.json"), []byte(`{"compilerOptions": {"strict": true, "target": "ESNext"}, "include": ["*.ts"], "reflection": true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "probe.ts"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	program, diagnostics, err := driver.LoadProgram(root, "tsconfig.json", driver.LoadProgramOptions{SingleThreaded: true})
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("load: %v %v", err, diagnostics)
+	}
+	t.Cleanup(func() { _ = program.Close() })
+	reg := collectRegistry(program, root, true, true)
+	for _, candidate := range reg.files {
+		if candidate != nil && candidate.file != nil && filepath.Base(candidate.file.FileName()) == "probe.ts" {
+			return candidate, reg
+		}
+	}
+	t.Fatal("probe.ts was not collected")
+	return nil, nil
+}
+
+func TestObjectTypeAliasKeepsMemberJsDoc(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+export type Row = {
+	/** Alias member doc. */
+	c: string;
+	/** Holder doc. */
+	nested: {
+		/** Nested member doc. */
+		n: string;
+	};
+	/** Union doc. */
+	u: 'a' | 'b' | null;
+	/** Readonly doc. */
+	readonly r: string;
+};
+`)
+	alias := info.aliases["Row"]
+	for _, expr := range []string{
+		internalTypeExprForNode(info, reg, alias.body, alias.typeNode, alias.pos),
+		typeExprForNodePreferred(info, reg, "Row", nil, 0, true),
+	} {
+		assertContainsAll(t, expr,
+			`name: "c", type: {kind: 6}, optional: false, description: "Alias member doc."`,
+			`name: "n", type: {kind: 6}, optional: false, description: "Nested member doc."`,
+			`optional: false, description: "Holder doc."`,
+			`name: "u", type: {kind: 12, types: [{kind: 10, literal: "a"}, {kind: 10, literal: "b"}, {kind: 5}]}, optional: false, description: "Union doc."`,
+			`name: "r", type: {kind: 6}, optional: false, description: "Readonly doc."`,
+		)
+	}
+}
+
+func TestInlineObjectLiteralsInHandlerSignaturesKeepMemberJsDoc(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+type HttpQueries<T> = T & { readonly __queries?: T };
+export class Handlers {
+	create(body: HttpBody<{
+		/** Body member doc. */
+		d: string;
+	}>, query: HttpQueries<{
+		/** Queries member doc. */
+		f?: string;
+	}>): Promise<{
+		/** Return member doc. */
+		e: string;
+	}> { return null as never; }
+	generic(): Promise<Array<{
+		/** Array member doc. */
+		g: string;
+	}>> { return null as never; }
+	suffix(): Promise<{
+		/** Suffix member doc. */
+		s: string;
+	}[]> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	if class == nil {
+		t.Fatal("Handlers was not collected")
+	}
+	methods := map[string]methodInfo{}
+	for _, method := range class.methods {
+		methods[method.name] = method
+	}
+	create := methods["create"]
+	returnExpr := func(method methodInfo) string {
+		return typeExprForNodePreferred(info, reg, method.returnType, method.returnTypeNode, class.pos, true)
+	}
+	paramExpr := func(param paramInfo) string {
+		expr, ok := preferredWrapperTypeExprForNode(info, reg, param.typeText, param.typeNode, class.pos)
+		if !ok {
+			t.Fatalf("%s is not a preferred wrapper", param.typeText)
+		}
+		return expr
+	}
+	assertContainsAll(t, paramExpr(create.params[0]), `description: "Body member doc."`)
+	assertContainsAll(t, paramExpr(create.params[1]), `description: "Queries member doc."`)
+	assertContainsAll(t, returnExpr(create), `description: "Return member doc."`)
+	assertContainsAll(t, returnExpr(methods["generic"]), `description: "Array member doc."`)
+	assertContainsAll(t, returnExpr(methods["suffix"]), `{kind: 22, type: {kind: 14, type: {kind: 18`, `description: "Suffix member doc."`)
+}
+
+// TypeScript only attaches a JSDoc block to a type member when the block does not follow another
+// token on the same line, so `{ /** doc */ a: string }` carries no member doc.
+func TestSameLineTypeMemberCommentIsNotJsDoc(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+export type SameLine = { /** Not attached. */ a: string };
+`)
+	alias := info.aliases["SameLine"]
+	for _, member := range alias.typeNode.Members() {
+		if docs := member.JSDoc(info.file); len(docs) != 0 {
+			t.Fatalf("TypeScript attached %d JSDoc blocks to a same-line member", len(docs))
+		}
+	}
+	assertNotContains(t, internalTypeExprForNode(info, reg, alias.body, alias.typeNode, alias.pos), "description")
+}
+
+func TestArrayElementsOtherThanInlineObjectsKeepTheirMetadata(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+export enum Status { Active = 'active', Retired = 'retired' }
+export class Handlers {
+	list(): Promise<Status[]> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	method := class.methods[0]
+	expr := typeExprForNodePreferred(info, reg, method.returnType, method.returnTypeNode, class.pos, true)
+	assertContainsAll(t, expr, `{kind: 22, type: {kind: 14, type: {kind: 11, typeName: "Status"`)
+}
+
+func TestParseFieldStripsReadonly(t *testing.T) {
+	for field, want := range map[string]string{"readonly id: string": "id", "readonly: boolean": "readonly", "readonly?: boolean": "readonly"} {
+		if name, _, _, ok := parseField(field); !ok || name != want {
+			t.Errorf("parseField(%q) = %q, %v; want %q", field, name, ok, want)
+		}
+	}
+}

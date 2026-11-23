@@ -11,3 +11,4 @@ export {
     type SerializeOpenApiOptions
 } from './serializer';
 export * from './types';
+export { collectOpenApiRouteWarnings } from './warnings';

@@ -359,6 +359,12 @@ func parseField(field string) (string, string, bool, bool) {
 	if field == "" {
 		return "", "", false, false
 	}
+	// A `readonly` modifier is not part of the name; `readonly: T` and `readonly?: T` name a property.
+	if after, ok := strings.CutPrefix(field, "readonly "); ok {
+		if after = strings.TrimSpace(after); after != "" && !strings.HasPrefix(after, ":") && !strings.HasPrefix(after, "?") {
+			field = after
+		}
+	}
 	if strings.HasPrefix(field, "[") || strings.HasPrefix(field, "new ") || strings.HasPrefix(field, "abstract new ") || strings.HasPrefix(field, "(") {
 		return "", "", false, false
 	}

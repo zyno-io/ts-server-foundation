@@ -359,16 +359,16 @@ TSF's metadata compiler reads JSDoc and the generator turns it into OpenAPI text
 
 ### Route Methods
 
-| JSDoc                | OpenAPI                                                                                                                |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| First paragraph      | `summary`. Its lines are joined with spaces.                                                                           |
-| Remaining paragraphs | `description`, with paragraph breaks, lists and code fences intact.                                                    |
-| `@param name text`   | `description` of the path, query or header parameter, or of `requestBody` for the body parameter. Text may span lines. |
-| `@returns text`      | `description` of the default success response, replacing `OK` or the status reason phrase. `@return` works too.        |
-| `@deprecated [text]` | `deprecated: true`. A non-empty text is also appended to the description as `**Deprecated:** text`.                    |
-| `@sunset YYYY-MM-DD` | The extension `x-sunset: YYYY-MM-DD`.                                                                                  |
+| JSDoc                | OpenAPI                                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| First paragraph      | `summary`. Its lines are joined with spaces.                                                                                          |
+| Remaining paragraphs | `description`, with paragraph breaks, lists and code fences intact.                                                                   |
+| `@param name text`   | `description` of a path, query or header parameter. Text may span lines. Group parameters are ignored; see [Parameters](#parameters). |
+| `@returns text`      | `description` of the default success response, replacing `OK` or the status reason phrase. `@return` works too.                       |
+| `@deprecated [text]` | `deprecated: true`. A non-empty text is also appended to the description as `**Deprecated:** text`.                                   |
+| `@sunset YYYY-MM-DD` | The extension `x-sunset: YYYY-MM-DD`.                                                                                                 |
 
-Unknown tags are ignored, and a line starting with `@` inside a code fence is treated as code. `@param` names are the handler's TypeScript parameter names, not the wire names given with `HttpQuery<T, { name }>`. A response documented with `openapi.response<T>()` keeps its own description.
+Unknown tags are ignored, and a line starting with `@` inside a code fence is treated as code. `@param` names are the handler's TypeScript parameter names. A wire name given with `HttpQuery<T, { name }>` matches only when no parameter has that TypeScript name. A response documented with `openapi.response<T>()` keeps its own description.
 
 ```ts
 /**
@@ -380,7 +380,6 @@ Unknown tags are ignored, and a line starting with `@` inside a code fence is tr
  *
  * @param id The widget id.
  * @param verbose Include usage history.
- * @param body Fields to change.
  * @returns The widget, if it exists.
  * @deprecated Use `GET /gadgets/:id`.
  * @sunset 2027-03-01
@@ -389,9 +388,16 @@ Unknown tags are ignored, and a line starting with `@` inside a code fence is tr
 async update(id: HttpPath<string>, verbose?: HttpQuery<boolean>, body?: HttpBody<WidgetPatch>): Promise<Widget> {}
 ```
 
-produces:
+produces (`operationId` and `tags` omitted):
 
 ```yaml
+responses:
+    '200':
+        description: The widget, if it exists.
+        content:
+            application/json:
+                schema:
+                    $ref: '#/components/schemas/Widget'
 summary: Fetch a widget.
 description: |-
     Looks the widget up by id.
@@ -401,11 +407,32 @@ description: |-
     **Deprecated:** Use `GET /gadgets/:id`.
 deprecated: true
 x-sunset: 2027-03-01
+parameters:
+    - name: id
+      in: path
+      required: true
+      schema:
+          type: string
+      description: The widget id.
+    - name: verbose
+      in: query
+      required: false
+      schema:
+          type: boolean
+      description: Include usage history.
+requestBody:
+    required: false
+    content:
+        application/json:
+            schema:
+                $ref: '#/components/schemas/WidgetPatch'
 ```
+
+The body has no `@param`: the request body is documented through the members of `WidgetPatch`, as described below.
 
 ### Parameters
 
-A JSDoc comment written directly on a handler parameter also documents it. `@param` text wins when both exist. A `@deprecated` tag there marks the parameter `deprecated: true` and appends the `**Deprecated:**` note to its description.
+Docs apply to single-value parameters only: `HttpPath<T>`, `HttpQuery<T>` and `HttpHeader<T>`. A JSDoc comment written directly on such a parameter also documents it. `@param` text wins when both exist. A `@deprecated` tag there marks the parameter `deprecated: true` and appends the `**Deprecated:**` note to its description.
 
 ```ts
 async list(
@@ -416,11 +443,14 @@ async list(
 ): Promise<Widget[]> {}
 ```
 
-For `HttpQueries<T>`, each expanded query parameter takes the JSDoc of the matching property of `T`.
+Group parameters, `HttpBody<T>` and `HttpQueries<T>`, take no docs of their own. A `@param` tag or JSDoc comment on one is ignored, and TSF logs a [route warning](#route-warnings) for it. Document the members of `T` instead:
+
+- `requestBody` has no `description`. The JSDoc of each member of `T` describes that property of the body schema.
+- Each query parameter expanded from `HttpQueries<T>` takes the JSDoc of the matching member of `T`, including its `@deprecated` and `@sunset`.
 
 ### Properties And Types
 
-JSDoc on class properties and interface members becomes the `description` of that property in the schema. `@deprecated` sets `deprecated: true` and `x-sunset` carries `@sunset`, as for operations. JSDoc on a class, interface or type alias becomes the `description` of its component schema.
+JSDoc on class properties, interface members and members of object types becomes the `description` of that property in the schema. Object types include type aliases such as `type Widget = { ... }` and inline object literals anywhere in a handler signature, for example `HttpBody<{ ... }>`, `HttpQueries<{ ... }>`, `Promise<{ ... }>`, `Promise<Array<{ ... }>>` and `Promise<{ ... }[]>`. `@deprecated` sets `deprecated: true` and `x-sunset` carries `@sunset`, as for operations. JSDoc on a class, interface or type alias becomes the `description` of its component schema.
 
 ```ts
 interface Widget {
@@ -448,7 +478,17 @@ previous:
 ```
 
 ::: warning Limitation
-JSDoc on members of inline anonymous object types is not read when TSF has to parse the type from source text. Declare the object as a named interface, class or type alias when its fields need documentation.
+Put a member's JSDoc on its own line. TypeScript does not attach a JSDoc comment that follows another token on the same line, so `{ /** Not read. */ id: string }` documents nothing. This applies to interfaces and classes as well as object literals.
+
+```ts
+async create(
+    body: HttpBody<{
+        /** Read: the comment starts its own line. */
+        title: string;
+    }>
+): Promise<void> {}
+```
+
 :::
 
 ### Controllers And Tags
@@ -576,6 +616,30 @@ Route exposure follows this precedence:
 | Both unset                                  | Enabled in development/test and disabled elsewhere. |
 
 The explicit route flag always wins when it conflicts with the legacy schema flag. Both `/openapi.json` and `/openapi.yaml` use the same decision.
+
+## Route Warnings
+
+TSF checks the routes that go into the document and reports:
+
+| Warning                                                                  | Cause                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `No return type declared for <METHOD> <path> (<Controller> -> <method>)` | The handler has no return type annotation, or returns `any`, `unknown`, `Promise<any>` or `Promise<unknown>`, and has no `openapi.response<T>()`. TSF does not infer return types, so the response schema is empty. A named alias such as `AnyResponse` counts as declared. |
+| `@param <name> on <route> is ignored: group parameters …`                | A `@param` tag names an `HttpBody` or `HttpQueries` parameter.                                                                                                                                                                                                              |
+| `JSDoc on parameter <name> on <route> is ignored: group parameters …`    | A JSDoc comment is written directly on an `HttpBody` or `HttpQueries` parameter.                                                                                                                                                                                            |
+| `@param <name> on <route> matches no parameter`                          | A `@param` tag names no handler parameter and no path parameter.                                                                                                                                                                                                            |
+
+TSF infrastructure routes and `openapi.ignore()`d routes are skipped. The warnings never fail generation:
+
+- In development, outside a Node test process (`NODE_TEST_CONTEXT`) and outside CLI service and REPL mode, TSF logs each warning on the `app` logger 250 ms after startup. This happens whether or not the [startup dump](#startup-yaml-dump) is enabled.
+- `openapi:generate` prints each one to stderr, prefixed with `Warning:`, before writing the file.
+
+`collectOpenApiRouteWarnings(app)` returns the same messages as strings, for a test or CI check:
+
+```ts
+import { collectOpenApiRouteWarnings } from '@zyno-io/ts-server-foundation';
+
+assert.deepEqual(collectOpenApiRouteWarnings(app), []);
+```
 
 ## Startup YAML Dump
 
