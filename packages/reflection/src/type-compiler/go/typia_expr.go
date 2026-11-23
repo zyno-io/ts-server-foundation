@@ -1525,11 +1525,13 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 		if override, ok := typiaSourcePropertyOverrideExpr(info, reg, "", propName, state.pos, overrideSources...); ok {
 			valueExpr = override
 		}
-		properties = append(properties, "{kind: 20, name: "+quote(propName)+", type: "+valueExpr+", optional: "+boolLit(optional)+"}")
+		propItems := append([]string{"kind: 20", "name: " + quote(propName), "type: " + valueExpr, "optional: " + boolLit(optional)}, typiaJsDoc(prop.Description, prop.JsDocTags).fieldItems()...)
+		properties = append(properties, "{"+strings.Join(propItems, ", ")+"}")
 	}
 	items := []string{"kind: 18"}
 	if named {
 		items = append(items, "typeName: "+quote(name))
+		items = append(items, typiaJsDoc(obj.Description, obj.JsDocTags).fieldItems()...)
 	}
 	if indexExpr != "" {
 		items = append(items, "index: "+indexExpr)

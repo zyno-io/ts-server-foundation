@@ -5,6 +5,7 @@ import {
     ReflectionKind,
     type ClassMetadata,
     type ClassType,
+    type MethodDocs,
     type MethodMetadata,
     type ParameterMetadata,
     type PropertyMetadata,
@@ -54,6 +55,18 @@ export class ReflectionClass<T = any> {
 
     getClassType(): ClassType<T> {
         return this.classType;
+    }
+
+    getDescription(): string {
+        return this.metadata.description ?? '';
+    }
+
+    getDeprecated(): string | undefined {
+        return this.metadata.deprecated;
+    }
+
+    getSunset(): string | undefined {
+        return this.metadata.sunset;
     }
 
     getCollectionName(): string | undefined {
@@ -118,6 +131,15 @@ export class ReflectionProperty {
         return this.metadata.description ?? '';
     }
 
+    /** The `@deprecated` text, an empty string when the tag has no text, or undefined when not deprecated. */
+    getDeprecated(): string | undefined {
+        return this.metadata.deprecated;
+    }
+
+    getSunset(): string | undefined {
+        return this.metadata.sunset;
+    }
+
     isPublic(): boolean {
         return true;
     }
@@ -176,8 +198,22 @@ export class ReflectionProperty {
 export class ReflectionMethod {
     constructor(private readonly metadata: MethodMetadata) {}
 
+    /** The JSDoc summary. */
     getDescription(): string {
         return this.metadata.description ?? '';
+    }
+
+    /** Structured JSDoc (body, `@param`, `@returns`, `@deprecated`, `@sunset`), when present. */
+    getDocs(): MethodDocs | undefined {
+        return this.metadata.docs;
+    }
+
+    getDeprecated(): string | undefined {
+        return this.metadata.docs?.deprecated;
+    }
+
+    getSunset(): string | undefined {
+        return this.metadata.docs?.sunset;
     }
 
     getParameters(): ReflectionParameter[] {
@@ -194,6 +230,18 @@ export class ReflectionParameter {
 
     getName(): string {
         return this.metadata.name;
+    }
+
+    getDescription(): string {
+        return this.metadata.description ?? '';
+    }
+
+    getDeprecated(): string | undefined {
+        return this.metadata.deprecated;
+    }
+
+    getSunset(): string | undefined {
+        return this.metadata.sunset;
     }
 
     getType(): Type {

@@ -305,6 +305,7 @@ func aliasFromNode(file *shimast.SourceFile, node *shimast.Node) aliasInfo {
 		typeNode: node.Type(),
 		exported: node.ModifierFlags()&shimast.ModifierFlagsExport != 0,
 		pos:      node.Pos(),
+		doc:      jsDocForNode(file, node),
 	}
 }
 
@@ -331,6 +332,7 @@ func interfaceFromNode(file *shimast.SourceFile, node *shimast.Node) interfaceIn
 		exported:   node.ModifierFlags()&shimast.ModifierFlagsExport != 0,
 		pos:        node.Pos(),
 		source:     "ast",
+		doc:        jsDocForNode(file, node),
 	}
 }
 
@@ -349,6 +351,7 @@ func interfacePropertiesFromNode(file *shimast.SourceFile, node *shimast.Node) [
 			typeText: nodeText(file, member.Type()),
 			typeNode: member.Type(),
 			optional: member.QuestionToken() != nil,
+			doc:      jsDocForNode(file, member),
 		})
 	}
 	return props

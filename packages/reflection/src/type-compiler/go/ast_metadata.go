@@ -75,6 +75,7 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 		end:                  node.End(),
 		ambient:              node.ModifierFlags()&shimast.ModifierFlagsAmbient != 0 || node.Flags&shimast.NodeFlagsAmbient != 0,
 		decoratedMethodsOnly: info.decoratedMethodsOnly,
+		doc:                  jsDocForNode(file, node),
 	}
 	for _, member := range node.Members() {
 		if member.ModifierFlags()&shimast.ModifierFlagsPrivate != 0 {
@@ -95,6 +96,7 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 				typeNode:    member.Type(),
 				declaration: member,
 				optional:    member.QuestionToken() != nil,
+				doc:         jsDocForNode(file, member),
 			})
 		case shimast.KindMethodDeclaration:
 			name := memberName(file, member)
@@ -102,9 +104,11 @@ func classFromNode(info *fileInfo, node *shimast.Node) *classInfo {
 				continue
 			}
 			preferTypia := isHttpRouteMethod(info, member)
+			doc := jsDocForNode(file, member)
 			method := methodInfo{
 				name:           name,
-				description:    jsDocDescription(file, member),
+				description:    doc.summary,
+				doc:            doc,
 				typeParams:     typeParameterNames(member),
 				returnType:     nodeText(file, member.Type()),
 				returnTypeNode: member.Type(),
@@ -283,6 +287,7 @@ func paramsFromNode(file *shimast.SourceFile, node *shimast.Node) []paramInfo {
 			typeNode:   param.Type(),
 			optional:   param.QuestionToken() != nil || param.Initializer() != nil,
 			hasDefault: param.Initializer() != nil,
+			doc:        jsDocForNode(file, param),
 		})
 	}
 	return params
@@ -295,37 +300,6 @@ func nodeText(file *shimast.SourceFile, node *shimast.Node) string {
 	return strings.TrimSpace(stripTypeComments(file.Text()[node.Pos():node.End()]))
 }
 
-func jsDocDescription(file *shimast.SourceFile, node *shimast.Node) string {
-	docs := node.JSDoc(file)
-	if len(docs) == 0 {
-		return ""
-	}
-	doc := docs[len(docs)-1]
-	return cleanJsDocDescription(file.Text()[doc.Pos():doc.End()])
-}
-
-func cleanJsDocDescription(raw string) string {
-	raw = strings.TrimSpace(raw)
-	raw = strings.TrimPrefix(raw, "/**")
-	raw = strings.TrimSuffix(raw, "*/")
-	lines := strings.Split(raw, "\n")
-	parts := []string{}
-	for _, line := range lines {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "*"))
-		if strings.HasPrefix(line, "@") {
-			break
-		}
-		if line == "" {
-			if len(parts) > 0 {
-				break
-			}
-			continue
-		}
-		parts = append(parts, line)
-	}
-	return strings.Join(parts, " ")
-}
-
 func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func(string) string) string {
 	props := []string{}
 	for _, prop := range class.properties {
@@ -334,6 +308,7 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func
 			"type: " + referMetadataType(typeRef, cachedTypeExpr(info, reg, prop.typeText, prop.typeNode, class.pos, prop.metadataText)),
 			"optional: " + boolLit(prop.optional),
 		}
+		items = append(items, prop.doc.fieldItems()...)
 		flags := collectFlags(info, reg, prop.typeText)
 		if flags["primaryKey"] != "" {
 			items = append(items, "primaryKey: true")
@@ -361,10 +336,17 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func
 		if method.description != "" {
 			items = append(items, "description: "+quote(method.description))
 		}
+		if docs := method.doc.docsExpr(); docs != "" {
+			items = append(items, "docs: "+docs)
+		}
 		methods = append(methods, "{"+strings.Join(items, ", ")+"}")
 	}
+	classDocs := ""
+	if items := class.doc.fieldItems(); len(items) != 0 {
+		classDocs = ", " + strings.Join(items, ", ")
+	}
 	return "{kind: 16, name: " + quote(class.name) +
-		", typeName: " + quote(class.name) +
+		", typeName: " + quote(class.name) + classDocs +
 		", classType: () => " + class.name +
 		", properties: [" + strings.Join(props, ", ") + "]" +
 		", methods: [" + strings.Join(methods, ", ") + "]" +
@@ -376,7 +358,8 @@ func paramsExpr(info *fileInfo, reg *registry, params []paramInfo, pos int, type
 	out := []string{}
 	for _, param := range params {
 		typeExpr := referMetadataType(typeRef, cachedTypeExpr(info, reg, param.typeText, param.typeNode, pos, param.metadataText))
-		out = append(out, "{name: "+quote(param.name)+", type: "+typeExpr+", optional: "+boolLit(param.optional)+", default: "+boolLit(param.hasDefault)+"}")
+		items := append([]string{"name: " + quote(param.name), "type: " + typeExpr, "optional: " + boolLit(param.optional), "default: " + boolLit(param.hasDefault)}, param.doc.fieldItems()...)
+		out = append(out, "{"+strings.Join(items, ", ")+"}")
 	}
 	return "[" + strings.Join(out, ", ") + "]"
 }

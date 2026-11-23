@@ -475,7 +475,9 @@ export function utilitySourcePropertiesFromType(type: Type): TypePropertySignatu
                     name: property.name,
                     type: property.getType(),
                     optional: property.isOptional() ? true : undefined,
-                    description: property.getDescription() || undefined
+                    description: property.getDescription() || undefined,
+                    deprecated: property.getDeprecated(),
+                    sunset: property.getSunset()
                 }));
         } catch (error) {
             if (error instanceof Error && error.message.startsWith('No runtime type metadata for ')) return [];
@@ -505,7 +507,9 @@ export function cloneUtilityProperty(property: TypePropertySignature): TypePrope
         name: property.name,
         type: property.type,
         optional: property.optional ? true : undefined,
-        description: property.description
+        description: property.description,
+        deprecated: property.deprecated,
+        sunset: property.sunset
     };
 }
 

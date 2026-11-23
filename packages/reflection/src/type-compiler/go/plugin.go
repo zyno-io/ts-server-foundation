@@ -60,6 +60,7 @@ type aliasInfo struct {
 	metadataTooLarge bool
 	exported         bool
 	pos              int
+	doc              jsDocInfo
 }
 
 type interfaceInfo struct {
@@ -71,6 +72,7 @@ type interfaceInfo struct {
 	exported   bool
 	pos        int
 	source     string
+	doc        jsDocInfo
 }
 
 type enumInfo struct {
@@ -96,6 +98,7 @@ type classInfo struct {
 	ctor                 []paramInfo
 	hasCtor              bool
 	decoratedMethodsOnly bool
+	doc                  jsDocInfo
 }
 
 type propertyInfo struct {
@@ -105,6 +108,7 @@ type propertyInfo struct {
 	declaration  *shimast.Node
 	metadataText string
 	optional     bool
+	doc          jsDocInfo
 }
 
 type utilityProperty struct {
@@ -113,6 +117,7 @@ type utilityProperty struct {
 	typeNode *shimast.Node
 	optional bool
 	owner    *fileInfo
+	doc      jsDocInfo
 }
 
 type methodInfo struct {
@@ -125,6 +130,7 @@ type methodInfo struct {
 	preferTypia        bool
 	decorated          bool
 	params             []paramInfo
+	doc                jsDocInfo
 }
 
 type functionInfo struct {
@@ -142,6 +148,7 @@ type paramInfo struct {
 	metadataText string
 	optional     bool
 	hasDefault   bool
+	doc          jsDocInfo
 }
 
 type callInfo struct {
