@@ -15,7 +15,9 @@ export class PostmarkProvider implements MailProvider {
         if (!this.config.POSTMARK_SECRET) {
             throw new Error('POSTMARK_SECRET is not set');
         }
-        this.postmarkClient = new ServerClient(this.config.POSTMARK_SECRET);
+        const requestHost = this.config.POSTMARK_REQUEST_HOST;
+        const options = requestHost ? { requestHost, useHttps: true } : undefined;
+        this.postmarkClient = new ServerClient(this.config.POSTMARK_SECRET, options);
     }
 
     async send(message: PreparedMessageProperties): Promise<string> {

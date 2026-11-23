@@ -144,7 +144,8 @@ Uses nodemailer. Configured via `SMTP_*` environment variables.
 
 ### Postmark
 
-Uses the Postmark API. Configured via `POSTMARK_SECRET`.
+Uses the Postmark API over HTTPS. Set `POSTMARK_SECRET` to the API token for the configured service.
+For a Postmark-compatible service such as Thinpost, set `POSTMARK_REQUEST_HOST` to its hostname without a scheme or path.
 
 Both providers implement the `MailProvider` interface:
 
@@ -158,14 +159,15 @@ The return value is a provider-specific message ID.
 
 ## Configuration
 
-| Variable               | Type      | Default     | Description                    |
-| ---------------------- | --------- | ----------- | ------------------------------ |
-| `MAIL_PROVIDER`        | `string`  | `smtp`      | Provider: `smtp` or `postmark` |
-| `MAIL_FROM`            | `string`  | —           | Default sender address         |
-| `MAIL_FROM_NAME`       | `string`  | —           | Default sender name            |
-| `SMTP_HOST`            | `string`  | `127.0.0.1` | SMTP host                      |
-| `SMTP_PORT`            | `number`  | `1025`      | SMTP port                      |
-| `SMTP_USER`            | `string`  | —           | SMTP username                  |
-| `SMTP_PASSWORD_SECRET` | `string`  | —           | SMTP password                  |
-| `SMTP_TLS`             | `boolean` | `false`     | Enable TLS                     |
-| `POSTMARK_SECRET`      | `string`  | —           | Postmark API token             |
+| Variable                | Type      | Default               | Description                        |
+| ----------------------- | --------- | --------------------- | ---------------------------------- |
+| `MAIL_PROVIDER`         | `string`  | `smtp`                | Provider: `smtp` or `postmark`     |
+| `MAIL_FROM`             | `string`  | —                     | Default sender address             |
+| `MAIL_FROM_NAME`        | `string`  | —                     | Default sender name                |
+| `SMTP_HOST`             | `string`  | `127.0.0.1`           | SMTP host                          |
+| `SMTP_PORT`             | `number`  | `1025`                | SMTP port                          |
+| `SMTP_USER`             | `string`  | —                     | SMTP username                      |
+| `SMTP_PASSWORD_SECRET`  | `string`  | —                     | SMTP password                      |
+| `SMTP_TLS`              | `boolean` | `false`               | Enable TLS                         |
+| `POSTMARK_REQUEST_HOST` | `string`  | `api.postmarkapp.com` | Postmark-compatible HTTPS hostname |
+| `POSTMARK_SECRET`       | `string`  | —                     | Postmark API token                 |
