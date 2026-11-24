@@ -136,6 +136,84 @@ describe('http router', () => {
         assert.equal(incomplete.statusCode, 400);
     });
 
+    it('validates numeric enum and number literal types as numbers', async () => {
+        enum NumericLevel {
+            Low = 1,
+            High = 2
+        }
+
+        @http.controller('/numeric-literals')
+        class NumericLiteralController {
+            @http.POST('/body')
+            body(body: HttpBody<{ level: NumericLevel }>) {
+                return body;
+            }
+
+            @http.POST('/array')
+            array(body: HttpBody<Array<{ level: NumericLevel }>>) {
+                return body;
+            }
+
+            @http.GET('/queries')
+            queries(query: HttpQueries<{ page: 1 | 2 }>) {
+                return query;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [NumericLiteralController] });
+
+        const ok = await app.request(HttpRequest.POST('/numeric-literals/body', { level: 1 }));
+        assert.equal(ok.statusCode, 200);
+        assert.deepStrictEqual(ok.json, { level: 1 });
+        assert.equal((await app.request(HttpRequest.POST('/numeric-literals/body', { level: 3 }))).statusCode, 400);
+
+        const arrayOk = await app.request(HttpRequest.POST('/numeric-literals/array', [{ level: 1 }]));
+        assert.equal(arrayOk.statusCode, 200);
+        assert.deepStrictEqual(arrayOk.json, [{ level: 1 }]);
+
+        const queryOk = await app.request(HttpRequest.GET('/numeric-literals/queries?page=1'));
+        assert.equal(queryOk.statusCode, 200);
+        assert.deepStrictEqual(queryOk.json, { page: 1 });
+        assert.equal((await app.request(HttpRequest.GET('/numeric-literals/queries?page=3'))).statusCode, 400);
+    });
+
+    it('keeps raw strings for unions that accept them and coerces number literals only as a last resort', async () => {
+        @http.controller('/union-literals')
+        class UnionLiteralController {
+            @http.POST('/literal-string')
+            literalString(body: HttpBody<{ v: 1 | '1' }>) {
+                return body;
+            }
+
+            @http.POST('/literal-or-string')
+            literalOrString(body: HttpBody<{ v: 1 | string }>) {
+                return body;
+            }
+
+            @http.POST('/number-or-string')
+            numberOrString(body: HttpBody<{ v: number | string }>) {
+                return body;
+            }
+
+            @http.GET('/queries')
+            queries(query: HttpQueries<{ page: 1 | 2 }>) {
+                return query;
+            }
+        }
+
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [UnionLiteralController] });
+        const post = async (path: string, v: unknown) => (await app.request(HttpRequest.POST(`/union-literals${path}`, { v }))).json;
+
+        assert.deepStrictEqual(await post('/literal-string', '1'), { v: '1' });
+        assert.deepStrictEqual(await post('/literal-string', 1), { v: 1 });
+        assert.deepStrictEqual(await post('/literal-or-string', '1'), { v: '1' });
+        // Unchanged from main (verified there): the raw string is kept.
+        assert.deepStrictEqual(await post('/number-or-string', '1'), { v: '1' });
+        assert.deepStrictEqual((await app.request(HttpRequest.GET('/union-literals/queries?page=1'))).json, { page: 1 });
+    });
+
     it('keeps instance method metadata when comments mention static', async () => {
         @http.controller('/comment-static')
         class TestController {

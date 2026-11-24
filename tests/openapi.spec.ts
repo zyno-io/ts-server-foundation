@@ -2052,6 +2052,49 @@ describe('openapi', () => {
         }
     });
 
+    it('documents numeric enums and number literal unions as numbers', () => {
+        enum OpenApiNumericLevel {
+            Low = 1,
+            High = 2
+        }
+
+        @http.controller('numeric-literals')
+        class NumericLiteralOpenApiController {
+            @http.POST('body')
+            body(_body: HttpBody<{ level: OpenApiNumericLevel; page: 1 | 2 }>) {
+                return { ok: true };
+            }
+
+            @http.POST('array')
+            array(_body: HttpBody<Array<{ level: OpenApiNumericLevel }>>) {
+                return { ok: true };
+            }
+
+            @http.GET('queries')
+            queries(_query: HttpQueries<{ page: 1 | 2 }>): { level: OpenApiNumericLevel } {
+                return { level: OpenApiNumericLevel.Low };
+            }
+        }
+
+        const app = createApp({ controllers: [NumericLiteralOpenApiController], enableHealthcheck: false });
+        const doc = serializeOpenApiSchema(app);
+
+        assert.deepStrictEqual(doc.components?.schemas?.OpenApiNumericLevel, { enum: [1, 2], type: 'number' });
+        const bodySchema = schemaObject(doc.paths['/numeric-literals/body'].post?.requestBody?.content['application/json'].schema);
+        const properties = bodySchema.properties as Record<string, unknown>;
+        assert.deepStrictEqual(properties.level, { $ref: '#/components/schemas/OpenApiNumericLevel' });
+        assert.deepStrictEqual(properties.page, { enum: [1, 2], type: 'number' });
+
+        const arraySchema = schemaObject(doc.paths['/numeric-literals/array'].post?.requestBody?.content['application/json'].schema);
+        // The array element may inline the enum rather than reference it; either way the values stay numeric.
+        assert.deepStrictEqual((arraySchema.items as OpenApiSchemaObject).properties?.level, { enum: [1, 2], type: 'number' });
+        const pageParam = doc.paths['/numeric-literals/queries'].get?.parameters?.find(parameter => parameter.name === 'page');
+        assert.deepStrictEqual(schemaObject(pageParam?.schema), { enum: [1, 2], type: 'number' });
+        const responseSchema = doc.paths['/numeric-literals/queries'].get?.responses['200'].content?.['application/json'].schema;
+        assert.doesNotMatch(JSON.stringify(responseSchema), /"1"/);
+        assert.match(JSON.stringify(responseSchema), /OpenApiNumericLevel|"enum":\[1,2\]/);
+    });
+
     it('dumps OpenAPI YAML to disk', async () => {
         const app = createApp({
             controllers: [OpenApiUsersController],

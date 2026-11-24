@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -2347,6 +2348,16 @@ func typiaLiteralExpr(value any) string {
 	case float64:
 		return typiaFloatLiteral(v, 64)
 	default:
+		// tsgo reports number literals as jsnum.Number (a named float64, in an
+		// internal package). Bigint literals (jsnum.PseudoBigInt) stay quoted:
+		// nothing at runtime converts JSON or query input into a bigint.
+		rv := reflect.ValueOf(v)
+		switch rv.Kind() {
+		case reflect.Float64:
+			return typiaFloatLiteral(rv.Float(), 64)
+		case reflect.Float32:
+			return typiaFloatLiteral(rv.Float(), 32)
+		}
 		return quote(fmt.Sprint(v))
 	}
 }
