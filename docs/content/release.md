@@ -75,7 +75,7 @@ The package publishes:
 - `types.d.ts`
 - `package.json`
 
-`@zyno-io/ts-reflection` is published from `packages/reflection` with its own ESM and CommonJS runtime entrypoints, plus the CommonJS `/type-compiler` plugin. CI gives reflection and foundation the same release version, rewrites foundation's workspace dependency to that concrete version, then publishes reflection before foundation.
+`@zyno-io/ts-reflection` is published from `packages/reflection` with its own ESM and CommonJS runtime entrypoints, plus the CommonJS `/type-compiler` plugin. CI gives reflection and foundation the same release version, rewrites foundation's workspace dependency to that concrete version, then publishes reflection before foundation. Publishing happens only from the GitHub mirror (`.github/workflows/publish-npm.yml`, npm trusted publishing to npmjs); GitLab CI tests and builds but does not publish. Consumers using the private registry resolve `@zyno-io` packages through its npmjs fallback.
 
 Foundation supports the root export, `/otel`, and compatibility subpaths for metadata runtime and the type compiler. The reflection package supports its root export plus `/type-metadata-runtime` and `/type-compiler`. Although `package.json` is included in either tarball, it is not exposed through the package `exports` map. See [Public API](./public-api.md).
 
