@@ -11,6 +11,7 @@ import {
     createApp,
     Env,
     http,
+    HttpRequest,
     LoggerLevel,
     openapi,
     resetLogSink,
@@ -152,7 +153,13 @@ class DocWidgetsController {
 }
 
 function documentFor(controller: new (...args: never[]) => unknown, contributors?: OpenApiContributor[]) {
-    return serializeOpenApiSchema(createApp({ controllers: [controller as never], enableHealthcheck: false, openapi: { contributors } }));
+    return serializeOpenApiSchema(
+        createApp({
+            controllers: [controller as never],
+            enableHealthcheck: false,
+            openapi: { contributors }
+        })
+    );
 }
 
 const asSchema = (value: OpenApiSchemaObject | OpenApiReferenceObject | undefined) => value as OpenApiSchemaObject;
@@ -163,7 +170,10 @@ describe('openapi JSDoc documentation', () => {
         assert.equal(reflection.getDescription(), 'Manages widgets.\n\nWidgets are the unit of billing.');
         const method = reflection.getMethod('get');
         assert.equal(method.getDescription(), 'Fetch a widget.');
-        assert.deepEqual(method.getDocs()?.params, { id: 'The widget id.', verbose: 'Include everything.' });
+        assert.deepEqual(method.getDocs()?.params, {
+            id: 'The widget id.',
+            verbose: 'Include everything.'
+        });
         assert.equal(method.getDocs()?.returns, 'The widget, if it exists.');
         assert.equal(ReflectionClass.from(DocWidgetFilter).getProperty('limit').getDeprecated(), 'Use `cursor`.');
         assert.equal(ReflectionClass.from(DocWidgetFilter).getProperty('q').getDeprecated(), undefined);
@@ -257,7 +267,10 @@ describe('openapi JSDoc documentation', () => {
         assert.equal(legacy.description, undefined);
 
         const record = doc.components!.schemas!.DocWidgetRecord;
-        assert.deepStrictEqual(record.properties?.widget, { $ref: '#/components/schemas/DocWidget', description: 'The owning widget.' });
+        assert.deepStrictEqual(record.properties?.widget, {
+            $ref: '#/components/schemas/DocWidget',
+            description: 'The owning widget.'
+        });
         assert.deepStrictEqual(record.properties?.previous, {
             $ref: '#/components/schemas/DocWidget',
             description: 'The widget again.\n\n**Deprecated:** Embed it instead.',
@@ -268,7 +281,12 @@ describe('openapi JSDoc documentation', () => {
 
     it('describes the controller tag', () => {
         const doc = documentFor(DocWidgetsController);
-        assert.deepStrictEqual(doc.tags, [{ name: 'docWidgets', description: 'Manages widgets.\n\nWidgets are the unit of billing.' }]);
+        assert.deepStrictEqual(doc.tags, [
+            {
+                name: 'docWidgets',
+                description: 'Manages widgets.\n\nWidgets are the unit of billing.'
+            }
+        ]);
         assert.equal(documentFor(UndocumentedController).tags, undefined);
     });
 });
@@ -282,7 +300,10 @@ class UndocumentedController {
 }
 
 describe('openapi contributors', () => {
-    @openapi.operation({ extensions: { 'x-controller': 'c' }, description: 'Controller description.' })
+    @openapi.operation({
+        extensions: { 'x-controller': 'c' },
+        description: 'Controller description.'
+    })
     @http.controller('/contrib')
     class ContribController {
         /** Inferred summary. */
@@ -291,7 +312,10 @@ describe('openapi contributors', () => {
             return '';
         }
 
-        @openapi.operation({ operationId: 'explicitTwo', summary: 'Method summary' })
+        @openapi.operation({
+            operationId: 'explicitTwo',
+            summary: 'Method summary'
+        })
         @http.GET('/two')
         two(): string {
             return '';
@@ -299,17 +323,27 @@ describe('openapi contributors', () => {
     }
 
     it('layers inferred, contributors in order, controller, then method', () => {
-        const seen: Array<{ route: string; inferred: string | undefined; defaultOperationId: string }> = [];
+        const seen: Array<{
+            route: string;
+            inferred: string | undefined;
+            defaultOperationId: string;
+        }> = [];
         const first: OpenApiContributor = {
             name: 'first',
             operation: ({ route, inferred, defaultOperationId }) => {
-                seen.push({ route: route.path, inferred: inferred.summary, defaultOperationId });
+                seen.push({
+                    route: route.path,
+                    inferred: inferred.summary,
+                    defaultOperationId
+                });
                 return {
                     summary: 'First summary',
                     description: 'First description',
                     tags: ['first'],
                     extensions: { 'x-a': 1, 'x-shared': 'first' },
-                    securitySchemes: { keyAuth: { type: 'apiKey', in: 'header', name: 'x-key' } },
+                    securitySchemes: {
+                        keyAuth: { type: 'apiKey', in: 'header', name: 'x-key' }
+                    },
                     security: [{ keyAuth: [] }],
                     appendDescription: ['First appendix.']
                 };
@@ -320,7 +354,9 @@ describe('openapi contributors', () => {
             operation: () => ({
                 summary: 'Second summary',
                 extensions: { 'x-b': 2, 'x-shared': 'second' },
-                securitySchemes: { keyAuth: { type: 'apiKey', in: 'header', name: 'x-key' } },
+                securitySchemes: {
+                    keyAuth: { type: 'apiKey', in: 'header', name: 'x-key' }
+                },
                 appendDescription: ['Second appendix.']
             })
         };
@@ -333,10 +369,18 @@ describe('openapi contributors', () => {
         assert.equal(one['x-shared'], 'second');
         assert.equal(one['x-controller'], 'c');
         assert.deepEqual(one.security, [{ keyAuth: [] }]);
-        assert.deepEqual(doc.components?.securitySchemes?.keyAuth, { type: 'apiKey', in: 'header', name: 'x-key' });
+        assert.deepEqual(doc.components?.securitySchemes?.keyAuth, {
+            type: 'apiKey',
+            in: 'header',
+            name: 'x-key'
+        });
         // Controller openapi.operation() replaces the contributor description; appendices follow it.
         assert.equal(one.description, 'Controller description.\n\nFirst appendix.\n\nSecond appendix.');
-        assert.deepEqual(seen[0], { route: '/contrib/one', inferred: 'Inferred summary.', defaultOperationId: 'getContribOne' });
+        assert.deepEqual(seen[0], {
+            route: '/contrib/one',
+            inferred: 'Inferred summary.',
+            defaultOperationId: 'getContribOne'
+        });
 
         const two = doc.paths['/contrib/two'].get!;
         assert.equal(two.operationId, 'explicitTwo');
@@ -344,9 +388,19 @@ describe('openapi contributors', () => {
     });
 
     it('lets SerializeOpenApiOptions.contributors replace registered ones', () => {
-        const registered: OpenApiContributor = { name: 'registered', operation: () => ({ summary: 'registered' }) };
-        const override: OpenApiContributor = { name: 'override', operation: () => ({ summary: 'override' }) };
-        const app = createApp({ controllers: [ContribController], enableHealthcheck: false, openapi: { contributors: [registered] } });
+        const registered: OpenApiContributor = {
+            name: 'registered',
+            operation: () => ({ summary: 'registered' })
+        };
+        const override: OpenApiContributor = {
+            name: 'override',
+            operation: () => ({ summary: 'override' })
+        };
+        const app = createApp({
+            controllers: [ContribController],
+            enableHealthcheck: false,
+            openapi: { contributors: [registered] }
+        });
         assert.equal(serializeOpenApiSchema(app).paths['/contrib/one'].get!.summary, 'registered');
         assert.equal(serializeOpenApiSchema(app, { contributors: [override] }).paths['/contrib/one'].get!.summary, 'override');
     });
@@ -359,18 +413,39 @@ describe('openapi contributors', () => {
                 return '';
             }
         }
-        const doc = documentFor(AppendController, [{ name: 'append', operation: () => ({ appendDescription: ['One.', 'Two.'] }) }]);
+        const doc = documentFor(AppendController, [
+            {
+                name: 'append',
+                operation: () => ({ appendDescription: ['One.', 'Two.'] })
+            }
+        ]);
         assert.equal(doc.paths['/append'].get!.description, 'One.\n\nTwo.');
     });
 
     it('conflicting contributor security schemes fail', () => {
-        const a: OpenApiContributor = { name: 'a', operation: () => ({ securitySchemes: { s: { type: 'http', scheme: 'basic' } } }) };
-        const b: OpenApiContributor = { name: 'b', operation: () => ({ securitySchemes: { s: { type: 'http', scheme: 'digest' } } }) };
+        const a: OpenApiContributor = {
+            name: 'a',
+            operation: () => ({
+                securitySchemes: { s: { type: 'http', scheme: 'basic' } }
+            })
+        };
+        const b: OpenApiContributor = {
+            name: 'b',
+            operation: () => ({
+                securitySchemes: { s: { type: 'http', scheme: 'digest' } }
+            })
+        };
         assert.throws(() => documentFor(ContribController, [a, b]), /Conflicting OpenAPI security scheme s/);
     });
 
     it('calls validateOperation on every contributor with the final operation and ids', () => {
-        const calls: Array<{ contributor: string; path: string; operationId: string; explicit?: string; defaultId: string }> = [];
+        const calls: Array<{
+            contributor: string;
+            path: string;
+            operationId: string;
+            explicit?: string;
+            defaultId: string;
+        }> = [];
         const record = (name: string): OpenApiContributor => ({
             name,
             validateOperation: ({
@@ -397,8 +472,20 @@ describe('openapi contributors', () => {
         assert.deepEqual(
             calls.filter(call => call.path === '/contrib/two'),
             [
-                { contributor: 'x', path: '/contrib/two', operationId: 'explicitTwo', explicit: 'explicitTwo', defaultId: 'getContribTwo' },
-                { contributor: 'y', path: '/contrib/two', operationId: 'explicitTwo', explicit: 'explicitTwo', defaultId: 'getContribTwo' }
+                {
+                    contributor: 'x',
+                    path: '/contrib/two',
+                    operationId: 'explicitTwo',
+                    explicit: 'explicitTwo',
+                    defaultId: 'getContribTwo'
+                },
+                {
+                    contributor: 'y',
+                    path: '/contrib/two',
+                    operationId: 'explicitTwo',
+                    explicit: 'explicitTwo',
+                    defaultId: 'getContribTwo'
+                }
             ]
         );
         assert.equal(calls.find(call => call.path === '/contrib/one' && call.contributor === 'x')?.explicit, undefined);
@@ -435,7 +522,10 @@ describe('openapi contributors', () => {
                     {
                         name: 'doc',
                         document: (document, routes) => {
-                            calls.push({ paths: Object.keys(document.paths).sort(), routes: routes.map(route => route.path).sort() });
+                            calls.push({
+                                paths: Object.keys(document.paths).sort(),
+                                routes: routes.map(route => route.path).sort()
+                            });
                         }
                     }
                 ]
@@ -538,7 +628,10 @@ class ExtraDocsController {
     }
 }
 
-@openapi.operation({ securitySchemes: { shared: { type: 'http', scheme: 'basic' } }, security: [{ shared: [] }] })
+@openapi.operation({
+    securitySchemes: { shared: { type: 'http', scheme: 'basic' } },
+    security: [{ shared: [] }]
+})
 @http.controller('/schemes')
 class SchemesController {
     @http.GET()
@@ -617,20 +710,31 @@ describe('openapi docs review fixes', () => {
     });
 
     it('rejects contributors that set operationId or non-x- extensions', () => {
-        const withOperationId = { name: 'ids', operation: () => ({ operationId: 'nope' }) } as unknown as OpenApiContributor;
+        const withOperationId = {
+            name: 'ids',
+            operation: () => ({ operationId: 'nope' })
+        } as unknown as OpenApiContributor;
         assert.throws(() => documentFor(ExtraDocsController, [withOperationId]), /cannot set operationId/);
-        const badExtension = { name: 'ext', operation: () => ({ extensions: { owner: 'x' } }) } as unknown as OpenApiContributor;
+        const badExtension = {
+            name: 'ext',
+            operation: () => ({ extensions: { owner: 'x' } })
+        } as unknown as OpenApiContributor;
         assert.throws(() => documentFor(ExtraDocsController, [badExtension]), /extensions must start with x-/);
     });
 
     it('keeps the required ParsedJwt bearerAuth rule for contributor security', () => {
-        const removes: OpenApiContributor = { name: 'removes', operation: () => ({ security: [] }) };
+        const removes: OpenApiContributor = {
+            name: 'removes',
+            operation: () => ({ security: [] })
+        };
         assert.throws(() => documentFor(JwtController, [removes]), /cannot remove required ParsedJwt authentication/);
         const adds: OpenApiContributor = {
             name: 'adds',
             operation: () => ({
                 security: [{ bearerAuth: [], extra: [] }],
-                securitySchemes: { extra: { type: 'apiKey', in: 'header', name: 'x-extra' } }
+                securitySchemes: {
+                    extra: { type: 'apiKey', in: 'header', name: 'x-extra' }
+                }
             })
         };
         const doc = documentFor(JwtController, [adds]);
@@ -640,10 +744,17 @@ describe('openapi docs review fixes', () => {
     it('fails when a contributor scheme conflicts with a decorator scheme', () => {
         const conflicting: OpenApiContributor = {
             name: 'conflicting',
-            operation: () => ({ securitySchemes: { shared: { type: 'http', scheme: 'digest' } } })
+            operation: () => ({
+                securitySchemes: { shared: { type: 'http', scheme: 'digest' } }
+            })
         };
         assert.throws(() => documentFor(SchemesController, [conflicting]), /Conflicting OpenAPI security scheme shared/);
-        const same: OpenApiContributor = { name: 'same', operation: () => ({ securitySchemes: { shared: { type: 'http', scheme: 'basic' } } }) };
+        const same: OpenApiContributor = {
+            name: 'same',
+            operation: () => ({
+                securitySchemes: { shared: { type: 'http', scheme: 'basic' } }
+            })
+        };
         assert.doesNotThrow(() => documentFor(SchemesController, [same]));
     });
 });
@@ -822,13 +933,25 @@ describe('openapi route warnings', () => {
     });
 
     it('reports nothing for documented routes', () => {
-        assert.deepEqual(collectOpenApiRouteWarnings(createApp({ controllers: [InlineDocsController as never], enableHealthcheck: false })), []);
+        assert.deepEqual(
+            collectOpenApiRouteWarnings(
+                createApp({
+                    controllers: [InlineDocsController as never],
+                    enableHealthcheck: false
+                })
+            ),
+            []
+        );
     });
 
     it('logs warnings on the app logger at development startup, without the schema dump', async () => {
         const dir = await mkdtemp(join(tmpdir(), 'tsf-openapi-warnings-'));
         const previousCwd = process.cwd();
-        const previousEnv = { APP_ENV: Env.APP_ENV, NODE_TEST_CONTEXT: Env.NODE_TEST_CONTEXT, ENABLE_OPENAPI_SCHEMA: Env.ENABLE_OPENAPI_SCHEMA };
+        const previousEnv = {
+            APP_ENV: Env.APP_ENV,
+            NODE_TEST_CONTEXT: Env.NODE_TEST_CONTEXT,
+            ENABLE_OPENAPI_SCHEMA: Env.ENABLE_OPENAPI_SCHEMA
+        };
         const entries: LogEntry[] = [];
         process.chdir(dir);
         Env.APP_ENV = 'development';
@@ -859,7 +982,10 @@ describe('openapi route warnings', () => {
         const entries: LogEntry[] = [];
         setLogSink(entry => entries.push(entry));
         try {
-            const app = createApp({ controllers: [WarningsController as never], enableHealthcheck: false });
+            const app = createApp({
+                controllers: [WarningsController as never],
+                enableHealthcheck: false
+            });
             await app.start();
             try {
                 await delay(350);
@@ -870,5 +996,106 @@ describe('openapi route warnings', () => {
         } finally {
             resetLogSink();
         }
+    });
+});
+
+enum RtLevel {
+    Low = 1,
+    High = 2
+}
+
+enum RtStatus {
+    Active = 'active',
+    Retired = 'retired'
+}
+
+type RtReadonlyIndex = { readonly [key: string]: number };
+
+class RtReadonlyHolder {
+    ro!: RtReadonlyIndex;
+}
+
+type CmtAlias = {
+    a: string; // trailing line note
+    /** Alias b doc. */ b: number;
+    /* preceding block */
+    /** Alias c doc. */
+    c: number;
+};
+
+class CmtClass {
+    a!: string; // trailing line note
+    /** Class b doc. */
+    b!: number;
+    /* preceding block */ /** Class c doc. */
+    c!: number;
+}
+
+@http.controller('/rt')
+class RtController {
+    @http.POST('/rows')
+    async rows(body: HttpBody<{ level: RtLevel; status: RtStatus }[]>): Promise<{ level: RtLevel; status: RtStatus }[]> {
+        return body;
+    }
+
+    @http.POST('/readonly-index')
+    async readonlyIndex(body: HttpBody<RtReadonlyHolder>): Promise<string> {
+        return JSON.stringify(body.ro);
+    }
+
+    @http.POST('/comments')
+    async comments(body: HttpBody<CmtAlias>): Promise<CmtClass> {
+        return { a: body.a, b: body.b, c: body.c };
+    }
+}
+
+describe('inline object arrays, readonly index signatures and neighbouring comments', () => {
+    const app = createApp({
+        controllers: [RtController],
+        enableHealthcheck: false
+    });
+
+    it('validates and coerces enum members of inline object array elements', async () => {
+        const ok = await app.request(HttpRequest.POST('/rt/rows', [{ level: 1, status: 'active' }]));
+        assert.equal(ok.statusCode, 200, JSON.stringify(ok.json));
+        const coerced = await app.request(HttpRequest.POST('/rt/rows', [{ level: '1', status: 'active' }]));
+        assert.equal(coerced.statusCode, 200, JSON.stringify(coerced.json));
+        assert.strictEqual(coerced.json[0].level, 1);
+        const bad = await app.request(HttpRequest.POST('/rt/rows', [{ level: 1, status: 'nope' }]));
+        assert.equal(bad.statusCode, 400);
+    });
+
+    it('keeps enum $refs for inline object array bodies and returns', () => {
+        const doc = serializeOpenApiSchema(app);
+        const post = doc.paths['/rt/rows'].post!;
+        const bodySchema = asSchema(post.requestBody?.content['application/json']?.schema);
+        const returnSchema = asSchema(post.responses['200'].content?.['application/json']?.schema);
+        for (const schema of [bodySchema, returnSchema]) {
+            const item = asSchema(schema.items as OpenApiSchemaObject);
+            assert.equal((item.properties?.level as OpenApiReferenceObject).$ref, '#/components/schemas/RtLevel');
+            assert.equal((item.properties?.status as OpenApiReferenceObject).$ref, '#/components/schemas/RtStatus');
+        }
+        assert.ok(doc.components!.schemas!.RtLevel);
+        assert.ok(doc.components!.schemas!.RtStatus);
+    });
+
+    it('validates readonly index signatures', async () => {
+        const bad = await app.request(HttpRequest.POST('/rt/readonly-index', { ro: { a: 'nope' } }));
+        assert.equal(bad.statusCode, 400, JSON.stringify(bad.json));
+        const ok = await app.request(HttpRequest.POST('/rt/readonly-index', { ro: { a: 1 } }));
+        assert.equal(ok.statusCode, 200, JSON.stringify(ok.json));
+    });
+
+    it('does not glue neighbouring comments into member descriptions', () => {
+        const doc = serializeOpenApiSchema(app);
+        const alias = doc.components!.schemas!.CmtAlias;
+        const cls = doc.components!.schemas!.CmtClass;
+        const description = (schema: OpenApiSchemaObject, name: string) => asSchema(schema.properties?.[name]).description;
+        assert.equal(description(alias, 'a'), undefined);
+        assert.equal(description(alias, 'b'), 'Alias b doc.');
+        assert.equal(description(alias, 'c'), 'Alias c doc.');
+        assert.equal(description(cls, 'a'), undefined);
+        assert.equal(description(cls, 'b'), 'Class b doc.');
+        assert.equal(description(cls, 'c'), 'Class c doc.');
     });
 });

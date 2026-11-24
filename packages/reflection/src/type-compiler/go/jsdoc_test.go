@@ -467,3 +467,47 @@ func TestParseFieldStripsReadonly(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexSignatureTypeAcceptsReadonly(t *testing.T) {
+	for _, body := range []string{"readonly [key: string]: number", "readonly[key: string]: number", "[key: string]: number"} {
+		if got, ok := indexSignatureType(body); !ok || got != "number" {
+			t.Errorf("indexSignatureType(%q) = %q, %v", body, got, ok)
+		}
+	}
+	if _, ok := indexSignatureType("readonlyx: number"); ok {
+		t.Error("readonlyx must not be an index signature")
+	}
+}
+
+func TestMemberJsDocIgnoresNeighbouringComments(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+export type CmtAlias = { a: string; // trailing line note
+	/** Alias b doc. */ b: number;
+	/* block */
+	/** Alias c doc. */
+	c: number };
+export class CmtCls {
+	a: string; // trailing line note
+	/** Class b doc. */
+	b: number;
+	/* block */ /** Class c doc. */
+	c: number;
+}
+`)
+	alias := info.aliases["CmtAlias"]
+	expr := internalTypeExprForNode(info, reg, alias.body, alias.typeNode, alias.pos)
+	assertContainsAll(t, expr, `description: "Alias b doc."`, `description: "Alias c doc."`)
+	assertNotContains(t, expr, "trailing")
+	assertNotContains(t, expr, "block")
+	cls := reg.classes["CmtCls"]
+	if cls == nil {
+		t.Fatal("CmtCls missing")
+	}
+	got := map[string]string{}
+	for _, prop := range cls.properties {
+		got[prop.name] = prop.doc.description()
+	}
+	if got["b"] != "Class b doc." || got["c"] != "Class c doc." || got["a"] != "" {
+		t.Fatalf("class member docs = %#v", got)
+	}
+}

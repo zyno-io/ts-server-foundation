@@ -332,7 +332,12 @@ func jsDocForNode(file *shimast.SourceFile, node *shimast.Node) jsDocInfo {
 		return jsDocInfo{}
 	}
 	doc := docs[len(docs)-1]
-	return parseJsDoc(file.Text()[doc.Pos():doc.End()])
+	text := file.Text()[doc.Pos():doc.End()]
+	// The node's JSDoc range can begin at a trailing or preceding comment; start at the `/**`.
+	if start := strings.LastIndex(text, "/**"); start > 0 {
+		text = text[start:]
+	}
+	return parseJsDoc(text)
 }
 
 // typiaJsDoc converts the documentation typia collected for a checker-resolved property or type

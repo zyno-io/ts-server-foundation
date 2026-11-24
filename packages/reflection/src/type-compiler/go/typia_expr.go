@@ -477,15 +477,19 @@ func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, 
 	}
 	if strings.HasSuffix(raw, "[]") {
 		element := strings.TrimSpace(strings.TrimSuffix(raw, "[]"))
-		// Only an inline object element takes its node, so its member JSDoc survives; other
-		// elements (enums, classes, aliases) keep the text path they have always used.
+		// An inline object element is compiled from its node by the internal compiler, so member
+		// JSDoc survives and enum members keep their $ref metadata; other elements keep the
+		// typia-preferred text path.
 		var elementNode *shimast.Node
 		if node != nil && node.Kind == shimast.KindArrayType {
 			if element := node.AsArrayTypeNode().ElementType; element != nil && element.Kind == shimast.KindTypeLiteral {
 				elementNode = element
 			}
 		}
-		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, elementNode, pos, true) + "}", true
+		if elementNode != nil {
+			return "{kind: 14, type: " + internalTypeExprForNode(info, reg, element, elementNode, pos) + "}", true
+		}
+		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, nil, pos, true) + "}", true
 	}
 	name, args, ok := generic(raw)
 	if !ok {

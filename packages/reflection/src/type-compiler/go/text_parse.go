@@ -387,6 +387,11 @@ func parseField(field string) (string, string, bool, bool) {
 func indexSignatureType(body string) (string, bool) {
 	for _, field := range splitInterfaceFields(body) {
 		field = strings.TrimSpace(field)
+		if rest, ok := strings.CutPrefix(field, "readonly"); ok {
+			if trimmed := strings.TrimSpace(rest); strings.HasPrefix(trimmed, "[") {
+				field = trimmed
+			}
+		}
 		if !strings.HasPrefix(field, "[") {
 			continue
 		}
