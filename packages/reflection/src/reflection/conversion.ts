@@ -225,7 +225,7 @@ function validateValue(value: unknown, type: Type, path = ''): ValidatorError[] 
     return errors;
 }
 
-function deserializeValue(value: unknown, type: Type): unknown {
+function deserializeValue(value: unknown, type: Type, coerceNumberLiterals = true): unknown {
     if (value === null || value === undefined) return value;
 
     if (type.kind === ReflectionKind.intersection) {
@@ -258,6 +258,15 @@ function deserializeValue(value: unknown, type: Type): unknown {
         result = Number(value);
     } else if (concrete.kind === ReflectionKind.boolean) {
         result = coerceBooleanValue(value);
+    } else if (
+        coerceNumberLiterals &&
+        concrete.kind === ReflectionKind.literal &&
+        typeof concrete.literal === 'number' &&
+        typeof value === 'string' &&
+        value.trim() !== ''
+    ) {
+        const numeric = Number(value);
+        if (numeric === concrete.literal) result = numeric;
     } else if (concrete.kind === ReflectionKind.enum && typeof value === 'string') {
         const numeric = Number(value);
         if (!Number.isNaN(numeric) && concrete.values.includes(numeric)) result = numeric;
@@ -266,11 +275,15 @@ function deserializeValue(value: unknown, type: Type): unknown {
     } else if (concrete.kind === ReflectionKind.tuple && Array.isArray(value)) {
         result = concrete.types.map((item, index) => deserializeValue(value[index], item.type));
     } else if (concrete.kind === ReflectionKind.union) {
-        for (const item of concrete.types) {
-            const candidate = deserializeValue(value, item);
-            if (validateValue(candidate, item).length === 0) {
-                result = candidate;
-                break;
+        // Number literal coercion ("1" -> 1) is a last resort so it never beats a member that already accepts the raw string.
+        const passes = coerceNumberLiterals ? [false, true] : [false];
+        search: for (const coerce of passes) {
+            for (const item of concrete.types) {
+                const candidate = deserializeValue(value, item, coerce);
+                if (validateValue(candidate, item).length === 0) {
+                    result = candidate;
+                    break search;
+                }
             }
         }
     } else if (concrete.kind === ReflectionKind.class) {
