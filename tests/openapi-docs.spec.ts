@@ -821,6 +821,87 @@ class InlineDocsController {
     }
 }
 
+/** Registers a route through http verbs, as wrapper decorators in consuming libraries do. */
+function WrappedRoute(method: 'GET' | 'POST' | 'PUT', path?: string) {
+    return function <T extends object>(target: T, propertyKey: string | symbol, descriptor: PropertyDescriptor) {
+        return http[method](path)(target, propertyKey, descriptor);
+    };
+}
+
+@http.controller('/wrapped')
+class WrappedInlineDocsController {
+    @WrappedRoute('PUT', ':id')
+    async body(
+        id: string,
+        body: HttpBody<{
+            /** Wrapped body member doc. */
+            name: string;
+        }>
+    ): Promise<{
+        /** Wrapped return member doc. */
+        e: string;
+    }> {
+        return { e: id + body.name };
+    }
+
+    @WrappedRoute('GET', 'queries')
+    async queries(
+        query: HttpQueries<{
+            /** Wrapped queries member doc. */
+            f?: string;
+        }>
+    ): Promise<string> {
+        return query.f ?? '';
+    }
+
+    @WrappedRoute('POST', 'rows')
+    async rows(
+        body: HttpBody<
+            {
+                /** Wrapped body row doc. */
+                r: string;
+                items: {
+                    /** Wrapped nested item doc. */
+                    i: string;
+                }[];
+            }[]
+        >
+    ): Promise<
+        Array<{
+            /** Wrapped Array<> member doc. */
+            g: string;
+        }>
+    > {
+        return body.map(row => ({ g: row.r }));
+    }
+}
+
+describe('openapi member JSDoc on inline object literals of wrapper-decorated routes', () => {
+    const doc = documentFor(WrappedInlineDocsController);
+    const jsonBody = (operation: OpenApiOperation | undefined) => asSchema(operation?.requestBody?.content['application/json']?.schema);
+    const jsonResponse = (operation: OpenApiOperation | undefined) => asSchema(operation?.responses['200'].content?.['application/json']?.schema);
+    const propertyDescription = (schema: OpenApiSchemaObject, name: string) => asSchema(schema.properties?.[name]).description;
+
+    it('keeps member docs of inline body and return objects', () => {
+        const put = doc.paths['/wrapped/{id}'].put!;
+        assert.equal(propertyDescription(jsonBody(put), 'name'), 'Wrapped body member doc.');
+        assert.equal(propertyDescription(jsonResponse(put), 'e'), 'Wrapped return member doc.');
+    });
+
+    it('keeps member docs of inline HttpQueries objects on the expanded parameters', () => {
+        const parameters = doc.paths['/wrapped/queries'].get!.parameters!;
+        assert.equal(parameters.find(parameter => parameter.name === 'f')?.description, 'Wrapped queries member doc.');
+    });
+
+    it('keeps member docs of inline objects in arrays, including nested arrays', () => {
+        const post = doc.paths['/wrapped/rows'].post!;
+        const row = asSchema(jsonBody(post).items as OpenApiSchemaObject);
+        assert.equal(propertyDescription(row, 'r'), 'Wrapped body row doc.');
+        assert.equal(propertyDescription(asSchema(asSchema(row.properties?.items).items as OpenApiSchemaObject), 'i'), 'Wrapped nested item doc.');
+        assert.equal(propertyDescription(asSchema(jsonResponse(post).items as OpenApiSchemaObject), 'g'), 'Wrapped Array<> member doc.');
+    });
+});
+
 describe('openapi member JSDoc on type aliases and inline object literals', () => {
     const doc = documentFor(InlineDocsController);
     const jsonSchema = (operation: OpenApiOperation | undefined) => asSchema(operation?.responses['200'].content?.['application/json']?.schema);
