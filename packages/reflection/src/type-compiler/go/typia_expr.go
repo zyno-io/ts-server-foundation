@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,6 +111,24 @@ func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node 
 		if types := node.AsIntersectionTypeNode().Types; types != nil {
 			nodes = types.Nodes
 		}
+	case shimast.KindTypeLiteral:
+		// Same guards as typeExprCtx, which renders the literal when no node is available.
+		literal := strings.TrimSpace(stripTypeComments(raw))
+		if !isObjectLiteralTypeText(literal) || isFunctionTypeSyntax(literal) {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		key := info.moduleKey + "\x00" + literal
+		if ctx.seen[key] {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		ctx.depth++
+		defer func() { ctx.depth-- }()
+		if ctx.depth > 80 {
+			return "{kind: 2, typeName: " + quote(literal) + "}"
+		}
+		ctx.seen[key] = true
+		defer delete(ctx.seen, key)
+		return objectTypeLiteralExprForNode(info, reg, literal, node, ctx)
 	default:
 		return typeExprCtx(info, reg, raw, ctx)
 	}
@@ -458,6 +477,18 @@ func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, 
 	}
 	if strings.HasSuffix(raw, "[]") {
 		element := strings.TrimSpace(strings.TrimSuffix(raw, "[]"))
+		// An inline object element is compiled from its node by the internal compiler, so member
+		// JSDoc survives and enum members keep their $ref metadata; other elements keep the
+		// typia-preferred text path.
+		var elementNode *shimast.Node
+		if node != nil && node.Kind == shimast.KindArrayType {
+			if element := node.AsArrayTypeNode().ElementType; element != nil && element.Kind == shimast.KindTypeLiteral {
+				elementNode = element
+			}
+		}
+		if elementNode != nil {
+			return "{kind: 14, type: " + internalTypeExprForNode(info, reg, element, elementNode, pos) + "}", true
+		}
 		return "{kind: 14, type: " + typeExprForNodePreferred(info, reg, element, nil, pos, true) + "}", true
 	}
 	name, args, ok := generic(raw)
@@ -1525,11 +1556,13 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 		if override, ok := typiaSourcePropertyOverrideExpr(info, reg, "", propName, state.pos, overrideSources...); ok {
 			valueExpr = override
 		}
-		properties = append(properties, "{kind: 20, name: "+quote(propName)+", type: "+valueExpr+", optional: "+boolLit(optional)+"}")
+		propItems := append([]string{"kind: 20", "name: " + quote(propName), "type: " + valueExpr, "optional: " + boolLit(optional)}, typiaJsDoc(prop.Description, prop.JsDocTags).fieldItems()...)
+		properties = append(properties, "{"+strings.Join(propItems, ", ")+"}")
 	}
 	items := []string{"kind: 18"}
 	if named {
 		items = append(items, "typeName: "+quote(name))
+		items = append(items, typiaJsDoc(obj.Description, obj.JsDocTags).fieldItems()...)
 	}
 	if indexExpr != "" {
 		items = append(items, "index: "+indexExpr)
@@ -1567,7 +1600,11 @@ func isResolvedInternalNamedObjectExpr(expr string, name string) bool {
 		!isUnresolvedInternalTypeExpr(expr, name)
 }
 
+var quotedStringPattern = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+
 func internalObjectExprCarriesSourceMetadata(expr string) bool {
+	// Documentation strings may mention these keys; only look outside quoted strings.
+	expr = quotedStringPattern.ReplaceAllString(expr, `""`)
 	return strings.Contains(expr, "literal:") ||
 		strings.Contains(expr, "classType: () => Date") ||
 		strings.Contains(expr, "annotations:")

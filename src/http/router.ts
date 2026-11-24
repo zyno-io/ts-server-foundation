@@ -6,6 +6,7 @@ import {
     isReflectedType,
     typeAnnotation,
     validatedDeserialize,
+    type MethodDocs,
     type ReflectionParameter
 } from '../reflection';
 
@@ -57,7 +58,10 @@ export interface HttpRoutePlan {
     moduleId?: number;
     propertyKey: string | symbol;
     methodName: string;
+    /** JSDoc summary of the handler method (first paragraph). */
     description?: string;
+    /** Structured JSDoc of the handler method: body, `@param`, `@returns`, `@deprecated`, `@sunset`. */
+    docs?: MethodDocs;
     returnType: Type;
     parameters: HttpRouteParameterPlan[];
     middlewares: HttpMiddlewareInput[];
@@ -65,7 +69,21 @@ export interface HttpRoutePlan {
     uploadPolicy: MultipartRequestPolicy;
 }
 
-export type HttpRouteParameterPlan =
+/** JSDoc written inline on a handler parameter (`/** text *\/` or `/** @deprecated ... *\/`). */
+export interface HttpRouteParameterDocs {
+    description?: string;
+    deprecated?: string;
+    sunset?: string;
+}
+
+export type HttpRouteParameterPlan = HttpRouteParameterPlanKind & {
+    /** The handler's TypeScript parameter name, which `@param` tags refer to. */
+    sourceName?: string;
+    /** Inline JSDoc on the parameter. */
+    docs?: HttpRouteParameterDocs;
+};
+
+type HttpRouteParameterPlanKind =
     | { kind: 'request' }
     | { kind: 'requestStream' }
     | { kind: 'response' }
@@ -84,6 +102,29 @@ export type HttpRouteParameterPlan =
           name: string;
           optional: boolean;
       };
+
+/**
+ * Parameter kinds that bind one wire value (`HttpPath`, `HttpQuery`, `HttpHeader`). Their JSDoc and
+ * `@param` text document the OpenAPI parameter.
+ */
+export const HTTP_SINGLE_VALUE_PARAMETER_KINDS = ['path', 'query', 'header'] as const satisfies readonly HttpRouteParameterPlan['kind'][];
+
+/**
+ * Parameter kinds that expand an object type into the request body or several wire values
+ * (`HttpBody`, `HttpQueries`). They take no docs of their own; their type's members are documented.
+ */
+export const HTTP_GROUP_PARAMETER_KINDS = ['body', 'queries'] as const satisfies readonly HttpRouteParameterPlan['kind'][];
+
+export type HttpSingleValueParameterPlan = Extract<HttpRouteParameterPlan, { kind: (typeof HTTP_SINGLE_VALUE_PARAMETER_KINDS)[number] }>;
+export type HttpGroupParameterPlan = Extract<HttpRouteParameterPlan, { kind: (typeof HTTP_GROUP_PARAMETER_KINDS)[number] }>;
+
+export function isHttpSingleValueParameter(parameter: HttpRouteParameterPlan): parameter is HttpSingleValueParameterPlan {
+    return (HTTP_SINGLE_VALUE_PARAMETER_KINDS as readonly string[]).includes(parameter.kind);
+}
+
+export function isHttpGroupParameter(parameter: HttpRouteParameterPlan): parameter is HttpGroupParameterPlan {
+    return (HTTP_GROUP_PARAMETER_KINDS as readonly string[]).includes(parameter.kind);
+}
 
 const BodyParsePromiseKey = Symbol.for('@zyno-io/ts-server-foundation:http-body-parse-promise');
 
@@ -156,6 +197,7 @@ export class HttpRouter {
                 propertyKey: route.propertyKey,
                 methodName: String(route.propertyKey),
                 description: method.getDescription() || undefined,
+                docs: method.getDocs(),
                 returnType: method.getReturnType(),
                 parameters,
                 middlewares: [...controller.middlewares, ...route.middlewares],
@@ -377,75 +419,91 @@ export class HttpRouter {
         const method = ReflectionClass.from(controllerClass).getMethod(propertyKey);
         const customResolvers = getRouteParameterResolverMetadata(controllerClass);
         return method.getParameters().map(parameter => {
-            const type = parameter.getType();
-            if (isReflectedClass(type, HttpRequestStream)) return { kind: 'requestStream' };
-            if (isReflectedClass(type, HttpRequest)) return { kind: 'request' };
-            if (isReflectedClass(type, HttpResponse)) return { kind: 'response' };
-            if (type.kind === ReflectionKind.class && type.classType === ParsedJwt) {
-                return { kind: 'jwt', optional: parameter.isOptional() };
-            }
-            if (type.kind === ReflectionKind.class && type.classType === FileUpload) {
-                return { kind: 'file', name: cleanParameterName(parameter.getName()), type, optional: parameter.isOptional() };
-            }
-            if (type.kind === ReflectionKind.class) {
-                const custom = customResolvers.find(item => item.type === type.classType) ?? this.findGlobalResolver(type.classType, type.typeName);
-                if (custom) {
-                    return {
-                        kind: 'custom',
-                        resolver: custom.resolver,
-                        type,
-                        reflectionParameter: parameter,
-                        name: parameter.getName(),
-                        optional: parameter.isOptional()
-                    };
-                }
-            }
-            if (hasHttpMarker(type, 'httpBody', 'HttpBody')) {
-                return {
-                    kind: 'body',
-                    name: cleanParameterName(parameter.getName()),
-                    type: getAnnotationValueType(type, 'httpBody') ?? type,
-                    optional: parameter.isOptional()
-                };
-            }
-            if (hasHttpMarker(type, 'httpQueries', 'HttpQueries')) {
-                return {
-                    kind: 'queries',
-                    name: cleanParameterName(parameter.getName()),
-                    type: getAnnotationValueType(type, 'httpQueries') ?? type,
-                    optional: parameter.isOptional()
-                };
-            }
-            if (hasHttpMarker(type, 'httpPath', 'HttpPath')) {
-                return {
-                    kind: 'path',
-                    name: getPathAnnotationName(type, parameter.getName(), pathParams),
-                    type: getAnnotationValueType(type, 'httpPath') ?? type,
-                    optional: parameter.isOptional()
-                };
-            }
-            if (hasHttpMarker(type, 'httpQuery', 'HttpQuery')) {
-                return {
-                    kind: 'query',
-                    name: getHttpQueryAnnotationName(type, parameter.getName()),
-                    type: getHttpQueryAnnotationValueType(type) ?? type,
-                    optional: parameter.isOptional()
-                };
-            }
-            if (hasHttpMarker(type, 'httpHeader', 'HttpHeader')) {
-                return {
-                    kind: 'header',
-                    name: getAnnotationName(type, 'httpHeader', cleanParameterName(parameter.getName())),
-                    type: getAnnotationValueType(type, 'httpHeader') ?? type,
-                    optional: parameter.isOptional()
-                };
-            }
-            const inferredPathName = inferPathParameterName(parameter.getName(), pathParams);
-            if (inferredPathName) return { kind: 'path', name: inferredPathName, type, optional: parameter.isOptional() };
-            throw new Error(
-                `Cannot infer HTTP parameter ${String(propertyKey)}.${parameter.getName()} for ${methodName}; use HttpBody<T>, HttpQuery<T>, HttpQueries<T>, HttpPath<T>, HttpRequest, or HttpResponse`
-            );
+            const plan = this.compileParameter(parameter, controllerClass, propertyKey, methodName, pathParams, customResolvers);
+            const docs: HttpRouteParameterDocs = {};
+            if (parameter.getDescription()) docs.description = parameter.getDescription();
+            if (parameter.getDeprecated() !== undefined) docs.deprecated = parameter.getDeprecated();
+            if (parameter.getSunset()) docs.sunset = parameter.getSunset();
+            return { ...plan, sourceName: parameter.getName(), ...(Object.keys(docs).length ? { docs } : {}) };
         });
+    }
+
+    private compileParameter(
+        parameter: ReflectionParameter,
+        controllerClass: ClassType,
+        propertyKey: string | symbol,
+        methodName: HttpMethod,
+        pathParams: string[],
+        customResolvers: ReturnType<typeof getRouteParameterResolverMetadata>
+    ): HttpRouteParameterPlanKind {
+        const type = parameter.getType();
+        if (isReflectedClass(type, HttpRequestStream)) return { kind: 'requestStream' };
+        if (isReflectedClass(type, HttpRequest)) return { kind: 'request' };
+        if (isReflectedClass(type, HttpResponse)) return { kind: 'response' };
+        if (type.kind === ReflectionKind.class && type.classType === ParsedJwt) {
+            return { kind: 'jwt', optional: parameter.isOptional() };
+        }
+        if (type.kind === ReflectionKind.class && type.classType === FileUpload) {
+            return { kind: 'file', name: cleanParameterName(parameter.getName()), type, optional: parameter.isOptional() };
+        }
+        if (type.kind === ReflectionKind.class) {
+            const custom = customResolvers.find(item => item.type === type.classType) ?? this.findGlobalResolver(type.classType, type.typeName);
+            if (custom) {
+                return {
+                    kind: 'custom',
+                    resolver: custom.resolver,
+                    type,
+                    reflectionParameter: parameter,
+                    name: parameter.getName(),
+                    optional: parameter.isOptional()
+                };
+            }
+        }
+        if (hasHttpMarker(type, 'httpBody', 'HttpBody')) {
+            return {
+                kind: 'body',
+                name: cleanParameterName(parameter.getName()),
+                type: getAnnotationValueType(type, 'httpBody') ?? type,
+                optional: parameter.isOptional()
+            };
+        }
+        if (hasHttpMarker(type, 'httpQueries', 'HttpQueries')) {
+            return {
+                kind: 'queries',
+                name: cleanParameterName(parameter.getName()),
+                type: getAnnotationValueType(type, 'httpQueries') ?? type,
+                optional: parameter.isOptional()
+            };
+        }
+        if (hasHttpMarker(type, 'httpPath', 'HttpPath')) {
+            return {
+                kind: 'path',
+                name: getPathAnnotationName(type, parameter.getName(), pathParams),
+                type: getAnnotationValueType(type, 'httpPath') ?? type,
+                optional: parameter.isOptional()
+            };
+        }
+        if (hasHttpMarker(type, 'httpQuery', 'HttpQuery')) {
+            return {
+                kind: 'query',
+                name: getHttpQueryAnnotationName(type, parameter.getName()),
+                type: getHttpQueryAnnotationValueType(type) ?? type,
+                optional: parameter.isOptional()
+            };
+        }
+        if (hasHttpMarker(type, 'httpHeader', 'HttpHeader')) {
+            return {
+                kind: 'header',
+                name: getAnnotationName(type, 'httpHeader', cleanParameterName(parameter.getName())),
+                type: getAnnotationValueType(type, 'httpHeader') ?? type,
+                optional: parameter.isOptional()
+            };
+        }
+        const inferredPathName = inferPathParameterName(parameter.getName(), pathParams);
+        if (inferredPathName) return { kind: 'path', name: inferredPathName, type, optional: parameter.isOptional() };
+        throw new Error(
+            `Cannot infer HTTP parameter ${String(propertyKey)}.${parameter.getName()} for ${methodName}; use HttpBody<T>, HttpQuery<T>, HttpQueries<T>, HttpPath<T>, HttpRequest, or HttpResponse`
+        );
     }
 
     private findGlobalResolver(type: ClassType, typeName?: string): CompiledRouteParameterResolver | undefined {

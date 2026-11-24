@@ -4,18 +4,21 @@ import { STATUS_CODES } from 'node:http';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
-import { isReflectedType, ReflectionKind, Type, typeAnnotation } from '../reflection';
+import { isReflectedType, ReflectionClass, ReflectionKind, Type, typeAnnotation } from '../reflection';
 import { stringify } from 'yaml';
 
 import { getPackageJson } from '../helpers';
 import type { BaseAppConfig } from '../app/config';
 import { Env } from '../env';
 import { EmptyResponseResult, JsonResponseResult, RawResponseResult, RedirectResponseResult, WebResponseResult } from '../http';
-import type { HttpRouteParameterPlan, HttpRoutePlan } from '../http';
-import { getOpenApiOperationOptions, getOpenApiResponses, isOpenApiIgnored } from './decorators';
+import { isHttpSingleValueParameter, type HttpRouteParameterPlan, type HttpRoutePlan, type HttpSingleValueParameterPlan } from '../http';
+import { getOpenApiOperationOptions, getOpenApiResponses, isOpenApiIgnored, type OpenApiOperationOptions } from './decorators';
 import {
     allowsUndefined,
+    applyOpenApiDocFields,
     createOpenApiSchemaContext,
+    describeOpenApiDeprecation,
+    type OpenApiDocFields,
     listOpenApiTypeProperties,
     typeHasOpenApiFileUpload,
     typeRequiresOpenApiFileUpload,
@@ -23,6 +26,7 @@ import {
     unwrapOpenApiType
 } from './schema';
 import type {
+    OpenApiContributor,
     OpenApiDocument,
     OpenApiHttpMethod,
     OpenApiOperation,
@@ -36,7 +40,10 @@ import type {
 export interface SerializeOpenApiOptions {
     title?: string;
     version?: string;
+    /** Include TSF infrastructure routes (health, openapi, metrics, devconsole). */
     includeInternal?: boolean;
+    /** Replaces the contributors registered on the app (`createApp({ openapi: { contributors } })`). */
+    contributors?: readonly OpenApiContributor[];
 }
 
 export interface DumpOpenApiOptions extends SerializeOpenApiOptions {
@@ -63,14 +70,22 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
 
     const operationIds = new Set<string>();
     const securitySchemes: Record<string, unknown> = {};
-    const routes = app.router
-        .listRoutes()
-        .filter(
-            route =>
-                (options.includeInternal || !isInternalRoute(route.path)) &&
-                !isOpenApiIgnored(route.controllerClass, route.propertyKey) &&
-                toOpenApiMethod(route.method)
-        );
+    const contributors = options.contributors ?? app.openapiContributors ?? [];
+    const allRoutes = app.router.listRoutes();
+    const controllerTags = new Map<string, string>();
+    const addSecuritySchemes = (schemes: Record<string, unknown> | undefined) => {
+        for (const [name, scheme] of Object.entries(schemes ?? {})) {
+            if (Object.hasOwn(securitySchemes, name) && !isDeepStrictEqual(securitySchemes[name], scheme))
+                throw new Error(`Conflicting OpenAPI security scheme ${name}`);
+            securitySchemes[name] = scheme;
+        }
+    };
+    const routes = allRoutes.filter(
+        route =>
+            (options.includeInternal || !isInternalOpenApiRoute(route.path)) &&
+            !isOpenApiIgnored(route.controllerClass, route.propertyKey) &&
+            toOpenApiMethod(route.method)
+    );
     const handlerRoutes = new Map<HttpRoutePlan['controllerClass'], Map<string | symbol, Map<string, number>>>();
     for (const route of routes) {
         const methods = handlerRoutes.get(route.controllerClass) ?? new Map();
@@ -85,23 +100,32 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
         const path = toOpenApiPath(route.path);
         document.paths[path] ??= {};
         if (document.paths[path][method]) throw new Error(`Duplicate OpenAPI route ${method} ${path}`);
-        const operation = buildOperation(route, schemaContext);
-        if ((handlerRoutes.get(route.controllerClass)?.get(route.propertyKey)?.get(route.method) ?? 0) > 1) {
-            const suffix = createHash('sha256').update(path).digest('hex').slice(0, 12);
-            operation.operationId += '_' + suffix;
+        const idSuffix =
+            (handlerRoutes.get(route.controllerClass)?.get(route.propertyKey)?.get(route.method) ?? 0) > 1
+                ? '_' + createHash('sha256').update(path).digest('hex').slice(0, 12)
+                : '';
+        const { operation, explicitOperationId, defaultOperationId } = buildOperation(
+            route,
+            schemaContext,
+            contributors,
+            addSecuritySchemes,
+            idSuffix
+        );
+        for (const contributor of contributors) {
+            contributor.validateOperation?.({ route, operation, explicitOperationId, defaultOperationId });
         }
 
+        const derivedTag = getControllerTagName(route.controllerClass);
+        if (operation.tags?.includes(derivedTag) && !controllerTags.has(derivedTag)) {
+            controllerTags.set(derivedTag, getControllerDescription(route.controllerClass) ?? '');
+        }
         if (operationIds.has(operation.operationId)) throw new Error(`Duplicate OpenAPI operationId ${operation.operationId}`);
         operationIds.add(operation.operationId);
         document.paths[path][method] = operation;
-        for (const metadata of getOpenApiOperationOptions(route.controllerClass, route.propertyKey)) {
-            for (const [name, scheme] of Object.entries(metadata.securitySchemes ?? {})) {
-                if (Object.hasOwn(securitySchemes, name) && !isDeepStrictEqual(securitySchemes[name], scheme))
-                    throw new Error(`Conflicting OpenAPI security scheme ${name}`);
-                securitySchemes[name] = scheme;
-            }
-        }
     }
+
+    const tags = [...controllerTags].filter(([, description]) => description).map(([name, description]) => ({ name, description }));
+    if (tags.length) document.tags = tags;
 
     if (Object.keys(schemaContext.schemas).length) {
         document.components ??= {};
@@ -130,6 +154,8 @@ export function serializeOpenApiSchema(app: OpenApiSerializableApp, options: Ser
             }
         }
     }
+
+    for (const contributor of contributors) contributor.document?.(document, allRoutes);
 
     return document;
 }
@@ -171,34 +197,88 @@ function isFalseyConfigValue(value: boolean | string | undefined): boolean {
     return value === false || value === 'false' || value === '0';
 }
 
-function buildOperation(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): OpenApiOperation {
+interface BuiltOperation {
+    operation: OpenApiOperation;
+    explicitOperationId?: string;
+    defaultOperationId: string;
+}
+
+/**
+ * Builds one operation. Layers, later replacing earlier: inferred (types and JSDoc), contributors
+ * in registration order, the controller's `openapi.operation()`, then the method's.
+ * Contributor `appendDescription` paragraphs are appended to the final description.
+ */
+function buildOperation(
+    route: HttpRoutePlan,
+    schemaContext: ReturnType<typeof createOpenApiSchemaContext>,
+    contributors: readonly OpenApiContributor[],
+    addSecuritySchemes: (schemes: Record<string, unknown> | undefined) => void,
+    idSuffix: string
+): BuiltOperation {
     const parameters = buildParameters(route, schemaContext);
     const requestBody = buildRequestBody(route, schemaContext);
     const tagName = getControllerTagName(route.controllerClass);
+    const baseOperationId = getOperationId(route, tagName);
+    const defaultOperationId = baseOperationId + idSuffix;
     const operation: OpenApiOperation = {
-        operationId: getOperationId(route, tagName),
+        operationId: baseOperationId,
         tags: [tagName],
         responses: buildResponses(route, schemaContext)
     };
 
-    const description = getRouteDescription(route);
-    if (description) operation.summary = description;
+    const summary = getRouteDescription(route);
+    if (summary) operation.summary = summary;
+    const docs = route.docs;
+    const description = describeOpenApiDeprecation(docs?.body, docs?.deprecated);
+    if (description) operation.description = description;
+    if (docs?.deprecated !== undefined) operation.deprecated = true;
+    if (docs?.sunset) operation['x-sunset'] = docs.sunset;
     if (parameters.length) operation.parameters = parameters;
+    // Group parameters (HttpBody, HttpQueries) take no docs; their type's members are documented.
     if (requestBody) operation.requestBody = requestBody;
-    if (route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional)) {
-        operation.security = [{ bearerAuth: [] }];
+    const requiresJwt = route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional);
+    if (requiresJwt) operation.security = [{ bearerAuth: [] }];
+
+    const applyLayer = (layer: OpenApiOperationOptions & { appendDescription?: string[] }) => {
+        const { securitySchemes, extensions, appendDescription: _append, ...fields } = layer;
+        for (const name of Object.keys(extensions ?? {})) {
+            if (!name.startsWith('x-')) throw new Error('OpenAPI extensions must start with x-');
+        }
+        Object.assign(operation, Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)), extensions);
+        addSecuritySchemes(securitySchemes);
+    };
+
+    const appended: string[] = [];
+    if (contributors.length) {
+        const inferredSnapshot = { ...operation, operationId: defaultOperationId };
+        for (const contributor of contributors) {
+            // Each contributor gets its own copy, so one cannot affect what the next sees.
+            const inferred = structuredClone(inferredSnapshot);
+            const result = contributor.operation?.({ route, inferred, defaultOperationId });
+            if (!result) continue;
+            if ('operationId' in result && (result as { operationId?: unknown }).operationId !== undefined) {
+                throw new Error(`OpenAPI contributor ${contributor.name} cannot set operationId`);
+            }
+            applyLayer(result);
+            appended.push(...(result.appendDescription ?? []).filter(paragraph => paragraph.trim()));
+        }
     }
+
+    let explicitOperationId: string | undefined;
     for (const metadata of getOpenApiOperationOptions(route.controllerClass, route.propertyKey)) {
-        const { securitySchemes: _schemes, extensions, ...fields } = metadata;
-        Object.assign(operation, fields, extensions);
+        if (metadata.operationId) explicitOperationId = metadata.operationId;
+        applyLayer(metadata);
     }
-    if (route.parameters.some(parameter => parameter.kind === 'jwt' && !parameter.optional)) {
+    if (appended.length) operation.description = [operation.description, ...appended].filter(Boolean).join('\n\n');
+    operation.operationId += idSuffix;
+
+    if (requiresJwt) {
         if (!operation.security?.length || operation.security.some(requirement => !Object.hasOwn(requirement, 'bearerAuth'))) {
             throw new Error('OpenAPI security metadata cannot remove required ParsedJwt authentication');
         }
     }
 
-    return operation;
+    return { operation, explicitOperationId, defaultOperationId };
 }
 
 function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): OpenApiParameter[] {
@@ -206,13 +286,10 @@ function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof 
     const documentedPathParams = new Set<string>();
 
     for (const parameter of route.parameters) {
-        if (parameter.kind === 'path') {
-            documentedPathParams.add(parameter.name);
-            parameters.push(buildOpenApiParameter('path', parameter, schemaContext));
-        } else if (parameter.kind === 'query') {
-            parameters.push(buildOpenApiParameter('query', parameter, schemaContext));
-        } else if (parameter.kind === 'header') {
-            parameters.push(buildOpenApiParameter('header', parameter, schemaContext));
+        if (isHttpSingleValueParameter(parameter)) {
+            if (parameter.kind === 'path') documentedPathParams.add(parameter.name);
+            // The single-value kinds are the OpenAPI parameter locations.
+            parameters.push(buildOpenApiParameter(parameter.kind, parameter, schemaContext, parameterDocFields(route, parameter)));
         } else if (parameter.kind === 'queries') {
             parameters.push(...expandObjectParameters('query', parameter, schemaContext));
         }
@@ -220,10 +297,12 @@ function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof 
 
     for (const name of route.paramNames) {
         if (documentedPathParams.has(name)) continue;
+        const description = taggedParameterDoc(route, undefined, name);
         parameters.push({
             name,
             in: 'path',
             required: true,
+            ...(description ? { description } : {}),
             schema: { type: 'string' }
         });
     }
@@ -234,17 +313,50 @@ function buildParameters(route: HttpRoutePlan, schemaContext: ReturnType<typeof 
 function buildOpenApiParameter(
     location: 'path' | 'query' | 'header',
     parameter: Extract<HttpRouteParameterPlan, { type: Type; name: string }>,
-    schemaContext: ReturnType<typeof createOpenApiSchemaContext>
+    schemaContext: ReturnType<typeof createOpenApiSchemaContext>,
+    docs: OpenApiDocFields = {}
 ): OpenApiParameter {
     const schema = typeToOpenApiSchema(parameter.type, schemaContext);
-    return {
+    const result: OpenApiParameter = {
         name: parameter.name,
         in: location,
         required: location === 'path' ? true : !parameter.optional && !allowsUndefined(parameter.type),
         schema: isEmptySchema(schema) ? { type: 'string' } : schema
     };
+    return applyParameterDocs(result, docs);
 }
 
+/**
+ * Description, deprecation and sunset for a single-value parameter: `@param` text wins over inline
+ * JSDoc. Group parameters (HttpBody, HttpQueries) take no docs.
+ */
+function parameterDocFields(route: HttpRoutePlan, parameter: HttpSingleValueParameterPlan): OpenApiDocFields {
+    const tagged = taggedParameterDoc(route, parameter.sourceName, parameter.name);
+    return { description: tagged || parameter.docs?.description, deprecated: parameter.docs?.deprecated, sunset: parameter.docs?.sunset };
+}
+
+/**
+ * Finds the `@param` text for a parameter. The TypeScript parameter name wins; the wire name is
+ * only used when no parameter of the handler has that TypeScript name.
+ */
+export function taggedParameterDoc(route: HttpRoutePlan, sourceName: string | undefined, wireName: string | undefined): string | undefined {
+    const params = route.docs?.params;
+    if (!params) return undefined;
+    if (sourceName !== undefined && Object.hasOwn(params, sourceName)) return params[sourceName];
+    if (wireName === undefined || !Object.hasOwn(params, wireName)) return undefined;
+    const claimedByAnotherParameter = route.parameters.some(item => item.sourceName === wireName);
+    return claimedByAnotherParameter ? undefined : params[wireName];
+}
+
+function applyParameterDocs(parameter: OpenApiParameter, docs: OpenApiDocFields): OpenApiParameter {
+    const description = describeOpenApiDeprecation(docs.description, docs.deprecated);
+    if (description) parameter.description = description;
+    if (docs.deprecated !== undefined) parameter.deprecated = true;
+    if (docs.sunset) parameter['x-sunset'] = docs.sunset;
+    return parameter;
+}
+
+/** Expands an object-typed group parameter into one parameter per member, documented by the member's JSDoc. */
 function expandObjectParameters(
     location: 'query' | 'header',
     parameter: Extract<HttpRouteParameterPlan, { type: Type; name: string }>,
@@ -253,13 +365,17 @@ function expandObjectParameters(
     const properties = listOpenApiTypeProperties(parameter.type);
     if (!properties.length) return [buildOpenApiParameter(location, parameter, schemaContext)];
     typeToOpenApiSchema(parameter.type, schemaContext);
-    return properties.map(property => ({
-        name: property.name,
-        in: location,
-        required: !parameter.optional && property.required,
-        description: property.description,
-        schema: typeToOpenApiSchema(property.type, schemaContext)
-    }));
+    return properties.map(property =>
+        applyParameterDocs(
+            {
+                name: property.name,
+                in: location,
+                required: !parameter.optional && property.required,
+                schema: typeToOpenApiSchema(property.type, schemaContext)
+            },
+            property
+        )
+    );
 }
 
 function buildRequestBody(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): OpenApiRequestBody | undefined {
@@ -342,9 +458,7 @@ function schemaForJsonBodyWithoutFileUploads(type: Type, schemaContext: ReturnTy
 
     for (const property of listOpenApiTypeProperties(type)) {
         if (typeHasOpenApiFileUpload(property.type)) continue;
-        const propertySchema = typeToOpenApiSchema(property.type, schemaContext);
-        if (property.description && !('$ref' in propertySchema)) propertySchema.description = property.description;
-        schema.properties![property.name] = propertySchema;
+        schema.properties![property.name] = applyOpenApiDocFields(typeToOpenApiSchema(property.type, schemaContext), property);
         if (property.required) required.push(property.name);
     }
 
@@ -388,6 +502,8 @@ function schemaForMultipleBodies(
 
 function buildResponses(route: HttpRoutePlan, schemaContext: ReturnType<typeof createOpenApiSchemaContext>): Record<string, OpenApiResponse> {
     const responses = buildInferredResponses(route, schemaContext);
+    const returns = route.docs?.returns;
+    if (returns) for (const response of Object.values(responses)) response.description = returns;
     for (const response of getOpenApiResponses(route.controllerClass, route.propertyKey)) {
         const typedResponse = buildTypedResponse(response.status, response.type, schemaContext, response.description);
         const result = typedResponse[String(response.status)]!;
@@ -607,7 +723,8 @@ function toOpenApiPath(path: string): string {
     return path.replace(/:([^/]+)/g, '{$1}');
 }
 
-function isInternalRoute(path: string): boolean {
+/** TSF infrastructure routes (health, OpenAPI, metrics, DevConsole), left out of the document by default. */
+export function isInternalOpenApiRoute(path: string): boolean {
     return (
         path === '/openapi.json' ||
         path === '/openapi.yaml' ||
@@ -618,6 +735,8 @@ function isInternalRoute(path: string): boolean {
         path.startsWith('/_devconsole')
     );
 }
+
+type RouteControllerClass = HttpRoutePlan['controllerClass'];
 
 function getControllerTagName(controllerClass: { name: string }): string {
     return camelCaseIdentifier(controllerClass.name.replace(/Controller$/, '') || controllerClass.name || 'controller');
@@ -646,6 +765,14 @@ function camelCaseIdentifier(parts: string | string[]): string {
 function isRequiredParameterType(type: Type): boolean {
     const unwrapped = unwrapOpenApiType(type);
     return !(unwrapped.kind === ReflectionKind.union && unwrapped.types.some(item => item.kind === ReflectionKind.undefined));
+}
+
+function getControllerDescription(controllerClass: RouteControllerClass): string | undefined {
+    try {
+        return ReflectionClass.from(controllerClass).getDescription() || undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 function getRouteDescription(route: HttpRoutePlan): string | undefined {

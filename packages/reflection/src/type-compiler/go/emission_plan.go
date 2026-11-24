@@ -315,7 +315,7 @@ func aliasMetadataExpression(info *fileInfo, reg *registry) string {
 		if alias, ok := info.aliases[name]; ok {
 			if len(alias.params) == 0 {
 				if expr := cachedAliasTypeExpr(info, reg, alias); expr != "" && !metadataExprTooLarge(expr) {
-					entries = append(entries, quote(name)+": "+withTypeName(expr, name))
+					entries = append(entries, quote(name)+": "+withTypeDocs(withTypeName(expr, name), alias.doc))
 				}
 			}
 			continue
@@ -333,7 +333,7 @@ func aliasMetadataExpression(info *fileInfo, reg *registry) string {
 		if alias, owner, _, ok := resolveExportedAlias(info, reg, name, map[string]bool{}); ok {
 			if len(alias.params) == 0 {
 				if expr := cachedAliasTypeExpr(owner, reg, alias); expr != "" && !metadataExprTooLarge(expr) {
-					entries = append(entries, quote(name)+": "+withTypeName(expr, name))
+					entries = append(entries, quote(name)+": "+withTypeDocs(withTypeName(expr, name), alias.doc))
 				}
 			}
 			continue

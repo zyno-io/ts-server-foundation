@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	shimast "github.com/microsoft/typescript-go/shim/ast"
 )
 
 func typeExpr(info *fileInfo, reg *registry, raw string) string {
@@ -374,6 +376,7 @@ func interfaceObjectLiteralExpr(info *fileInfo, reg *registry, typeName string, 
 		"typeName: " + quote(typeName),
 		"types: [" + renderUtilityProperties(info, reg, props, ctx) + "]",
 	}
+	items = append(items, decl.doc.fieldItems()...)
 	if len(decl.params) != 0 {
 		items = append(items, "typeParameters: "+stringSliceExpr(decl.params))
 	}
@@ -401,6 +404,7 @@ func interfaceObjectLiteralExprPreferred(info *fileInfo, reg *registry, typeName
 		"typeName: " + quote(typeName),
 		"types: [" + renderPreferredUtilityProperties(info, reg, props, ctx) + "]",
 	}
+	items = append(items, decl.doc.fieldItems()...)
 	if len(decl.params) != 0 {
 		items = append(items, "typeParameters: "+stringSliceExpr(decl.params))
 	}
@@ -428,9 +432,49 @@ func mergedTypeParameters(existing map[string]bool, names []string) map[string]b
 }
 
 func objectTypeLiteralExpr(info *fileInfo, reg *registry, raw string, ctx *typeContext) string {
+	return objectTypeLiteralExprForNode(info, reg, raw, nil, ctx)
+}
+
+// objectTypeLiteralExprForNode renders an object type literal from its source text. When the
+// TypeLiteral node is available, each member also takes its JSDoc and type node from the AST,
+// because the source text has its comments stripped.
+func objectTypeLiteralExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) string {
+	raw = strings.TrimSpace(stripTypeComments(raw))
 	body := strings.TrimSpace(raw[1 : len(raw)-1])
-	props := propertiesFromBody(body)
+	props := withTypeLiteralMembers(node, propertiesFromBody(body))
 	return "{kind: 18" + objectIndexExpr(info, reg, body, ctx) + ", types: [" + renderUtilityProperties(info, reg, props, ctx) + "]}"
+}
+
+// withTypeLiteralMembers copies the JSDoc and type node of each TypeLiteral property signature
+// onto the matching text-parsed property. A type node is only taken when its text matches.
+func withTypeLiteralMembers(node *shimast.Node, props []utilityProperty) []utilityProperty {
+	if node == nil || node.Kind != shimast.KindTypeLiteral || len(props) == 0 {
+		return props
+	}
+	file := shimast.GetSourceFileOfNode(node)
+	if file == nil {
+		return props
+	}
+	members := map[string]*shimast.Node{}
+	for _, member := range node.Members() {
+		if member.Kind != shimast.KindPropertySignature {
+			continue
+		}
+		if name := memberName(file, member); name != "" {
+			members[name] = member
+		}
+	}
+	for i := range props {
+		member := members[props[i].name]
+		if member == nil {
+			continue
+		}
+		props[i].doc = jsDocForNode(file, member)
+		if memberType := member.Type(); memberType != nil && props[i].typeNode == nil && sameTypeText(props[i].typeText, nodeText(file, memberType)) {
+			props[i].typeNode = memberType
+		}
+	}
+	return props
 }
 
 func objectIndexExpr(info *fileInfo, reg *registry, body string, ctx *typeContext) string {
@@ -481,7 +525,7 @@ func renderUtilityProperty(info *fileInfo, reg *registry, prop utilityProperty, 
 	if prop.optional {
 		t = "{kind: 12, types: [" + t + ", {kind: 4}]}"
 	}
-	return "{kind: 20, name: " + quote(prop.name) + ", type: " + t + ", optional: " + boolLit(prop.optional) + "}"
+	return renderPropertySignature(prop, t)
 }
 
 func renderPreferredUtilityProperty(info *fileInfo, reg *registry, prop utilityProperty, ctx *typeContext) string {
@@ -505,7 +549,12 @@ func renderPreferredUtilityProperty(info *fileInfo, reg *registry, prop utilityP
 	if prop.optional {
 		t = "{kind: 12, types: [" + t + ", {kind: 4}]}"
 	}
-	return "{kind: 20, name: " + quote(prop.name) + ", type: " + t + ", optional: " + boolLit(prop.optional) + "}"
+	return renderPropertySignature(prop, t)
+}
+
+func renderPropertySignature(prop utilityProperty, typeExpr string) string {
+	items := append([]string{"kind: 20", "name: " + quote(prop.name), "type: " + typeExpr, "optional: " + boolLit(prop.optional)}, prop.doc.fieldItems()...)
+	return "{" + strings.Join(items, ", ") + "}"
 }
 
 func mapUtilityProperties(values []utilityProperty, mapper func(utilityProperty) string) []string {
@@ -701,7 +750,7 @@ func utilitySourceProperties(info *fileInfo, reg *registry, source string, ctx *
 	if class, owner, ok := resolveClassRefAt(info, reg, source, ctx.pos); ok {
 		props := make([]utilityProperty, 0, len(class.properties))
 		for _, prop := range class.properties {
-			props = append(props, utilityProperty{name: prop.name, typeText: prop.typeText, typeNode: prop.typeNode, optional: prop.optional, owner: owner})
+			props = append(props, utilityProperty{name: prop.name, typeText: prop.typeText, typeNode: prop.typeNode, optional: prop.optional, owner: owner, doc: prop.doc})
 		}
 		return props, owner, true
 	}
@@ -1162,9 +1211,9 @@ func importedAliasExpr(reg *registry, ref importRef) string {
 
 func aliasTypeExprCtx(owner *fileInfo, reg *registry, alias aliasInfo, name string, ctx *typeContext) string {
 	if strings.TrimSpace(alias.metadataText) != "" {
-		return withTypeName(alias.metadataText, name)
+		return withTypeDocs(withTypeName(alias.metadataText, name), alias.doc)
 	}
-	return withTypeName(internalTypeExprForNodeCtx(owner, reg, alias.body, alias.typeNode, ctx), name)
+	return withTypeDocs(withTypeName(internalTypeExprForNodeCtx(owner, reg, alias.body, alias.typeNode, ctx), name), alias.doc)
 }
 
 func ensureAliasMetadata(owner *fileInfo, reg *registry, name string, alias aliasInfo) aliasInfo {
@@ -1283,6 +1332,17 @@ func importedRuntimeValueExpr(info *fileInfo, reg *registry, spec string, export
 
 func runtimeIdentifierExpr(name string) string {
 	return "(typeof " + name + " !== \"undefined\" ? " + name + " : (typeof exports !== \"undefined\" ? exports." + name + " : undefined))"
+}
+
+// withTypeDocs appends `description`, `deprecated` and `sunset` entries from a declaration's
+// JSDoc to an object-literal type expression.
+func withTypeDocs(expr string, doc jsDocInfo) string {
+	items := doc.fieldItems()
+	expr = strings.TrimSpace(expr)
+	if len(items) == 0 || !strings.HasPrefix(expr, "{") || !strings.HasSuffix(expr, "}") {
+		return expr
+	}
+	return strings.TrimSuffix(expr, "}") + ", " + strings.Join(items, ", ") + "}"
 }
 
 func withTypeName(expr string, name string) string {

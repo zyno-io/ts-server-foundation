@@ -1221,16 +1221,3 @@ func TestClassMetadataCanOmitUndecoratedMethods(t *testing.T) {
 	assertContainsAll(t, got, "name: \"index\"")
 	assertNotContains(t, got, "name: \"helper\"")
 }
-
-func TestCleanJsDocDescriptionUsesTheFirstParagraph(t *testing.T) {
-	got := cleanJsDocDescription(`/**
- * List users using the documented summary.
- * Continues on the next line.
- *
- * This detail is not part of the summary.
- * @returns users
- */`)
-	if got != "List users using the documented summary. Continues on the next line." {
-		t.Fatalf("description = %q", got)
-	}
-}

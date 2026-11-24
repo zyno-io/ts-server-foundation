@@ -31,7 +31,12 @@ export type AbstractClassType<T = any> = abstract new (...args: any[]) => T;
 export interface TypeBase<K extends ReflectionKind = ReflectionKind> {
     kind: K;
     typeName?: string;
+    /** JSDoc description: the summary paragraph, then any further paragraphs separated by a blank line. */
     description?: string;
+    /** Text of a JSDoc `@deprecated` tag; an empty string when the tag has no text. */
+    deprecated?: string;
+    /** Date (YYYY-MM-DD) from a JSDoc `@sunset` tag. */
+    sunset?: string;
     parent?: Type;
     annotations?: Record<string, Type>;
     validation?: ValidationAnnotation[];
@@ -117,6 +122,8 @@ export interface PropertyMetadata {
     index?: Record<string, any>;
     unique?: Record<string, any>;
     description?: string;
+    deprecated?: string;
+    sunset?: string;
 }
 
 export interface ParameterMetadata {
@@ -124,13 +131,35 @@ export interface ParameterMetadata {
     type: Type;
     optional?: boolean;
     default?: boolean;
+    description?: string;
+    deprecated?: string;
+    sunset?: string;
+}
+
+/**
+ * Structured JSDoc for a method, emitted only when it has more than a summary.
+ * The summary itself stays in `MethodMetadata.description`.
+ */
+export interface MethodDocs {
+    /** Description paragraphs after the first one, with line and paragraph breaks preserved. */
+    body?: string;
+    /** `@param name text` entries keyed by parameter name. */
+    params?: Record<string, string>;
+    /** `@returns` / `@return` text. */
+    returns?: string;
+    /** `@deprecated` text; an empty string when the tag has no text. */
+    deprecated?: string;
+    /** `@sunset` date (YYYY-MM-DD). */
+    sunset?: string;
 }
 
 export interface MethodMetadata {
     name: string | symbol;
     parameters: ParameterMetadata[];
     returnType: Type;
+    /** The JSDoc summary (first paragraph, lines joined by spaces). */
     description?: string;
+    docs?: MethodDocs;
 }
 
 export interface ClassMetadata extends TypeBase<ReflectionKind.class> {

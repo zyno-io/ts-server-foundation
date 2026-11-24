@@ -1,6 +1,7 @@
-import type { HttpRouter } from '../http';
+import type { HttpRouter, HttpRoutePlan } from '../http';
 import type { BaseAppConfig } from '../app';
 import type { TypeAnnotation } from '../reflection';
+import type { OpenApiOperationOptions } from './decorators';
 
 export type ApiName<T extends string> = TypeAnnotation<'openapi:name', T>;
 export type ApiType<Name extends string, T> = T & ApiName<Name>;
@@ -9,6 +10,41 @@ export type ApiResponse<T, Status extends number = 200> = Promise<T>;
 export interface OpenApiSerializableApp {
     readonly router: HttpRouter;
     readonly config: BaseAppConfig;
+    /** Contributors registered with `createApp({ openapi: { contributors } })`. */
+    readonly openapiContributors?: readonly OpenApiContributor[];
+}
+
+/**
+ * Lets a library or application add operation metadata and validate the generated document
+ * without decorating every controller. Register with `createApp({ openapi: { contributors } })`
+ * or override per call with `SerializeOpenApiOptions.contributors`.
+ */
+export interface OpenApiContributor {
+    readonly name: string;
+    /**
+     * Runs after inference (including JSDoc) and before `openapi.operation()` decorators.
+     * Fields replace earlier values; `extensions` merge; `securitySchemes` merge with the usual conflict check.
+     * `appendDescription` paragraphs are appended to the final description, joined by blank lines.
+     */
+    operation?(ctx: {
+        route: HttpRoutePlan;
+        inferred: Readonly<OpenApiOperation>;
+        defaultOperationId: string;
+    }): (Omit<OpenApiOperationOptions, 'operationId'> & { appendDescription?: string[] }) | undefined;
+    /** Called on the final operation; throw to fail generation. */
+    validateOperation?(ctx: {
+        route: HttpRoutePlan;
+        operation: Readonly<OpenApiOperation>;
+        /** The operationId set through `openapi.operation()`, if any. */
+        explicitOperationId?: string;
+        /** The automatically generated operationId. */
+        defaultOperationId: string;
+    }): void;
+    /**
+     * Called once with the finished document and every registered route, including
+     * `openapi.ignore()`d and TSF-internal routes. Throw to fail generation.
+     */
+    document?(document: OpenApiDocument, routes: readonly HttpRoutePlan[]): void;
 }
 
 export interface OpenApiDocument {
@@ -19,6 +55,8 @@ export interface OpenApiDocument {
         version: string;
     };
     paths: Record<string, OpenApiPathItem>;
+    /** Controller tags with their JSDoc descriptions. */
+    tags?: Array<{ name: string; description?: string }>;
     components?: {
         schemas?: Record<string, OpenApiSchemaObject>;
         securitySchemes?: Record<string, unknown>;
@@ -46,10 +84,13 @@ export interface OpenApiParameter {
     in: 'path' | 'query' | 'header';
     required?: boolean;
     description?: string;
+    deprecated?: boolean;
     schema: OpenApiSchemaObject | OpenApiReferenceObject;
+    [extension: `x-${string}`]: unknown;
 }
 
 export interface OpenApiRequestBody {
+    description?: string;
     required?: boolean;
     content: Record<string, OpenApiMediaType>;
 }
@@ -68,6 +109,10 @@ export interface OpenApiResponse {
 
 export interface OpenApiReferenceObject {
     $ref: string;
+    /** Siblings of `$ref` are allowed by OpenAPI 3.1. */
+    description?: string;
+    deprecated?: boolean;
+    [extension: `x-${string}`]: unknown;
 }
 
 export interface OpenApiDiscriminatorObject {
@@ -81,6 +126,7 @@ export interface OpenApiSchemaObject {
     enum?: unknown[];
     const?: unknown;
     description?: string;
+    deprecated?: boolean;
     properties?: Record<string, OpenApiSchemaObject | OpenApiReferenceObject>;
     required?: string[];
     items?: OpenApiSchemaObject | OpenApiReferenceObject;

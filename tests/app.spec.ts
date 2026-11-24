@@ -1374,7 +1374,9 @@ void app.run();
         process.env.APP_ENV = 'test';
         process.argv.splice(0, process.argv.length, 'node', 'dist/src/index.js', 'openapi:generate');
         const logs: string[] = [];
+        const errors: string[] = [];
         console.log = (...args: unknown[]) => logs.push(args.map(String).join(' '));
+        console.error = (...args: unknown[]) => errors.push(args.map(String).join(' '));
 
         @http.controller('/entrypoint-openapi')
         class EntrypointOpenApiController {
@@ -1394,6 +1396,7 @@ void app.run();
             logs.some(line => line.includes('Wrote OpenAPI schema to')),
             true
         );
+        assert.deepEqual(errors, ['Warning: No return type declared for GET /entrypoint-openapi (EntrypointOpenApiController -> get)']);
     });
 
     it('logs startup route details outside test mode', async () => {
