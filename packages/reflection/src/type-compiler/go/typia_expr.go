@@ -146,7 +146,7 @@ func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node 
 			return typeExprCtx(info, reg, raw, ctx)
 		}
 		defer leave()
-		return "{kind: 14, type: " + internalTypeExprForNodeCtx(info, reg, elementRaw, element, ctx) + "}"
+		return "{kind: 14, type: " + internalArgTypeExprForNodeCtx(info, reg, elementRaw, element, ctx) + "}"
 	case shimast.KindTypeReference:
 		if expr, ok := internalWrapperTypeExprForNode(info, reg, raw, node, ctx); ok {
 			return expr
@@ -201,7 +201,7 @@ func internalWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, n
 	}
 	defer leave()
 	value := func() string {
-		return internalTypeExprForNodeCtx(info, reg, argRaw, typeArgs[0], ctx)
+		return internalArgTypeExprForNodeCtx(info, reg, argRaw, typeArgs[0], ctx)
 	}
 	switch name {
 	case "Array", "ReadonlyArray":
@@ -239,11 +239,32 @@ func internalWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, n
 func enterInternalWrapperNode(info *fileInfo, raw string, ctx *typeContext) (func(), bool) {
 	text := strings.TrimSpace(stripTypeComments(raw))
 	key := info.moduleKey + "\x00" + text
-	if isFunctionTypeSyntax(text) || ctx.seen[key] {
+	if isFunctionTypeSyntax(text) || ctx.seen[key] || ctx.depth+1 > 80 {
 		return nil, false
 	}
+	ctx.depth++
 	ctx.seen[key] = true
-	return func() { delete(ctx.seen, key) }, true
+	return func() { delete(ctx.seen, key); ctx.depth-- }, true
+}
+
+// internalArgTypeExprForNodeCtx renders a wrapper argument or array element from its node. A union
+// or intersection gets typeExprCtx's depth and seen bookkeeping, which the text path applied to it.
+func internalArgTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) string {
+	inner := node
+	for inner != nil && inner.Kind == shimast.KindParenthesizedType {
+		inner = inner.AsParenthesizedTypeNode().Type
+	}
+	if inner != nil && (inner.Kind == shimast.KindUnionType || inner.Kind == shimast.KindIntersectionType) {
+		text := strings.TrimSpace(strings.TrimPrefix(trimParens(strings.TrimSpace(stripTypeComments(raw))), "readonly "))
+		key := info.moduleKey + "\x00" + text
+		if ctx.seen[key] || ctx.depth+1 > 80 {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		ctx.depth++
+		ctx.seen[key] = true
+		defer func() { delete(ctx.seen, key); ctx.depth-- }()
+	}
+	return internalTypeExprForNodeCtx(info, reg, raw, node, ctx)
 }
 
 // containsInlineTypeLiteral reports whether internalTypeExprForNodeCtx can reach an inline object

@@ -561,6 +561,42 @@ export class Handlers {
 	}
 }
 
+// Union and intersection wrapper arguments mark their text as seen, and each wrapper level counts
+// toward the depth limit, exactly as on the text path, so recursive generics stop at the same place.
+func TestInternalWrapperNodePathMatchesTextPathForRecursiveGenerics(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+type GI<T> = { v: T; r: { x: GI<T> } & { y: string } };
+type G<T> = { v: T; r: { x: G<T> } | null };
+type Deep<T> = { v: T; inner?: Deep<T[]> };
+type DeepA<T> = { v: T; inner?: DeepA<Array<T>> };
+export class Handlers {
+	a(body: HttpBody<{ x: GI<string> } & { y: string }>): void {}
+	b(body: HttpBody<{ x: G<string> } | null>): void {}
+	c(body: HttpBody<{ d: Deep<string> }>): void {}
+	d(): Promise<Array<{ d: DeepA<number> }>> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	for _, method := range class.methods {
+		for _, param := range method.params {
+			ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+			want := typeExprCtx(info, reg, param.typeText, ctx)
+			if got := internalTypeExprForNode(info, reg, param.typeText, param.typeNode, class.pos); got != want {
+				t.Fatalf("%s parameter:\nnode: %s\ntext: %s", method.name, got, want)
+			}
+		}
+		if method.returnTypeNode == nil {
+			continue
+		}
+		ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+		want := typeExprCtx(info, reg, method.returnType, ctx)
+		if got := internalTypeExprForNode(info, reg, method.returnType, method.returnTypeNode, class.pos); got != want {
+			t.Fatalf("%s return:\nnode: %s\ntext: %s", method.name, got, want)
+		}
+	}
+}
+
 // A wrapper rendered from its node stops recursion at the same depth as the text path did. Alias
 // members already take the node path, so the expected output is pinned rather than compared with
 // typeExprCtx.
