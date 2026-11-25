@@ -852,7 +852,7 @@ func typiaTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shima
 		return "", false
 	}
 	typ := reg.checker.GetTypeFromTypeNode(node)
-	return typiaTypeExprFromType(info, reg, typ, pos, raw)
+	return typiaTypeExprFromTypeForNode(info, reg, typ, pos, raw, node)
 }
 
 func shouldUseTypiaType(info *fileInfo, reg *registry, raw string) bool {
@@ -1538,6 +1538,12 @@ func isFrameworkMetadataName(name string) bool {
 }
 
 func typiaTypeExprFromType(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, raw string) (string, bool) {
+	return typiaTypeExprFromTypeForNode(info, reg, typ, pos, raw, nil)
+}
+
+// typiaTypeExprFromTypeForNode is typiaTypeExprFromType for a type read from node, the source type
+// node whose text is raw. The node lets source property overrides keep member JSDoc.
+func typiaTypeExprFromTypeForNode(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, raw string, node *shimast.Node) (string, bool) {
 	if typ == nil || typ.IsTypeParameter() {
 		return "", false
 	}
@@ -1569,7 +1575,9 @@ func typiaTypeExprFromType(info *fileInfo, reg *registry, typ *shimchecker.Type,
 		reg.typiaFailures[typ] = true
 		return "", false
 	}
-	expr := typiaMetadataExpr(info, reg, result.Data, true, newTypiaRenderStateForSource(pos, raw))
+	state := newTypiaRenderStateForSource(pos, raw)
+	state.sourceNode = node
+	expr := typiaMetadataExpr(info, reg, result.Data, true, state)
 	reg.typiaCache[cacheKey] = expr
 	return expr, true
 }
@@ -1582,6 +1590,8 @@ type typiaRenderState struct {
 	objects   map[*schemametadata.MetadataObjectType]bool
 	pos       int
 	sourceRaw string
+	// sourceNode is the type node sourceRaw was read from, when known.
+	sourceNode *shimast.Node
 }
 
 func newTypiaRenderState(pos ...int) *typiaRenderState {
@@ -1798,7 +1808,7 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 		}
 		overrideSources = append(overrideSources, state.sourceRaw)
 		if override, ok := typiaSourcePropertyOverrideExpr(info, reg, "", propName, state.pos, overrideSources...); ok {
-			valueExpr = override
+			valueExpr = documentedPropertyOverrideExpr(info, reg, valueExpr, override, propName, len(state.objects) == 1, state)
 		}
 		propItems := append([]string{"kind: 20", "name: " + quote(propName), "type: " + valueExpr, "optional: " + boolLit(optional)}, typiaJsDoc(prop.Description, prop.JsDocTags).fieldItems()...)
 		properties = append(properties, "{"+strings.Join(propItems, ", ")+"}")
@@ -1813,6 +1823,100 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 	}
 	items = append(items, "types: ["+strings.Join(properties, ", ")+"]")
 	return typiaTaggedExpr("{"+strings.Join(items, ", ")+"}", object.Tags)
+}
+
+// documentedPropertyOverrideExpr chooses the value of a property whose source metadata overrides
+// Typia's. The override is rendered from source text, which carries no JSDoc, so it drops the docs
+// of members of inline objects in the property, such as `items: { /** doc */ a: string }[]`.
+// The override's structure always wins, so validation is unchanged; only its docs are recovered:
+//   - When Typia's value has the same structure apart from docs, Typia's value is kept, since
+//     Typia reads member JSDoc from the checker.
+//   - Otherwise, for a member of the root inline object, the member is rendered from its type
+//     node, whose node path keeps member JSDoc, and used when it has the override's structure.
+func documentedPropertyOverrideExpr(info *fileInfo, reg *registry, typiaExpr string, override string, propName string, root bool, state *typiaRenderState) string {
+	bare := withoutJsDocFields(override)
+	if withoutJsDocFields(typiaExpr) == bare {
+		return typiaExpr
+	}
+	if !root {
+		return override
+	}
+	member := sourceTypeLiteralMemberTypeNode(state.sourceNode, propName)
+	memberRaw, ok := sourceTypeNodeText(info, member)
+	if !ok {
+		return override
+	}
+	if nodeExpr := internalTypeExprForNode(info, reg, memberRaw, member, state.pos); withoutJsDocFields(nodeExpr) == bare {
+		return nodeExpr
+	}
+	return override
+}
+
+// sourceTypeLiteralMemberTypeNode returns the type node of the named property of an inline object
+// type node, looking through parentheses.
+func sourceTypeLiteralMemberTypeNode(node *shimast.Node, name string) *shimast.Node {
+	for node != nil && node.Kind == shimast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	if node == nil || node.Kind != shimast.KindTypeLiteral {
+		return nil
+	}
+	file := shimast.GetSourceFileOfNode(node)
+	if file == nil {
+		return nil
+	}
+	for _, member := range node.Members() {
+		if member.Kind == shimast.KindPropertySignature && member.Type() != nil && memberName(file, member) == name {
+			return member.Type()
+		}
+	}
+	return nil
+}
+
+// withoutJsDocFields removes the JSDoc fields that jsDocInfo.fieldItems adds, leaving the structure
+// that validation reads. It scans quoted strings as units, so text inside a string literal, such
+// as a literal type `'x, description: '`, is never taken for a field.
+func withoutJsDocFields(expr string) string {
+	var out strings.Builder
+	for index := 0; index < len(expr); {
+		if expr[index] == '"' {
+			end := quotedStringEnd(expr, index)
+			out.WriteString(expr[index:end])
+			index = end
+			continue
+		}
+		if end, ok := jsDocFieldEnd(expr, index); ok {
+			index = end
+			continue
+		}
+		out.WriteByte(expr[index])
+		index++
+	}
+	return out.String()
+}
+
+// jsDocFieldEnd reports the end of a `, description: "..."`, `, deprecated: "..."` or
+// `, sunset: "..."` field that starts at index, outside any string.
+func jsDocFieldEnd(expr string, index int) (int, bool) {
+	for _, key := range []string{", description: \"", ", deprecated: \"", ", sunset: \""} {
+		if strings.HasPrefix(expr[index:], key) {
+			return quotedStringEnd(expr, index+len(key)-1), true
+		}
+	}
+	return 0, false
+}
+
+// quotedStringEnd returns the index just past the Go-quoted string that starts at start.
+func quotedStringEnd(expr string, start int) int {
+	for index := start + 1; index < len(expr); index++ {
+		switch expr[index] {
+		case '\\':
+			index++
+		case '"':
+			return index + 1
+		}
+	}
+	return len(expr)
 }
 
 func typiaNamedObjectInternalOverrideExpr(info *fileInfo, reg *registry, name string, pos int) (string, bool) {
