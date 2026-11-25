@@ -12,7 +12,6 @@ workflow:
 stages:
   - test
   - build
-  - deploy
   - mirror
 
 osv scan:
@@ -104,23 +103,6 @@ test-and-build:
       - package.json
       - packages/reflection/dist/
       - packages/reflection/package.json
-
-deploy:
-  stage: deploy
-  rules:
-    - if: $CI_COMMIT_MESSAGE =~ /\[skip deploy\]/
-      when: never
-    - if: $CI_COMMIT_BRANCH == "main"
-      when: on_success
-  needs:
-    - build:devconsole
-    - test-and-build
-  script:
-    - |
-      npm config set -- //${PRIVATE_NPM_HOST}/:_authToken="${PRIVATE_NPM_PUBLISHER_TOKEN}"
-
-      (cd packages/reflection && npm publish --registry https://${PRIVATE_NPM_HOST}/)
-      npm publish --registry https://${PRIVATE_NPM_HOST}/
 
 mirror:
   stage: mirror

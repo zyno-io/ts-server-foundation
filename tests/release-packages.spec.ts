@@ -43,20 +43,17 @@ describe('release package preparation', () => {
         assert.equal(foundation.dependencies['@zyno-io/ts-reflection'], '26.803.1200');
     });
 
-    it('retains reflection artifacts and publishes reflection ahead of foundation', () => {
-        const pipeline = parse(readFileSync(join(process.cwd(), '.gitlab-ci.yml'), 'utf8')) as {
-            'test-and-build': { script: string[]; artifacts: { paths: string[] } };
-            deploy: { script: string[] };
-        };
+    it('publishes only to npmjs, reflection before foundation', () => {
+        const gitlab = readFileSync(join(process.cwd(), '.gitlab-ci.yml'), 'utf8');
+        const pipeline = parse(gitlab) as Record<string, unknown>;
+        assert.equal(pipeline.deploy, undefined);
+        assert.doesNotMatch(gitlab, /npm publish|PRIVATE_NPM/);
 
-        assert.match(pipeline['test-and-build'].script.join('\n'), /node scripts\/prepare-release-packages\.cjs/);
-        assert.deepStrictEqual(
-            pipeline['test-and-build'].artifacts.paths.filter(path => path.startsWith('packages/reflection/')),
-            ['packages/reflection/dist/', 'packages/reflection/package.json']
-        );
-        const privateReflectionPublish = '(cd packages/reflection && npm publish --registry https://${PRIVATE_NPM_HOST}/)';
-        const privateFoundationPublish = 'npm publish --registry https://${PRIVATE_NPM_HOST}/';
-        const deployScript = pipeline.deploy.script.join('\n');
-        assert.ok(deployScript.indexOf(privateReflectionPublish) < deployScript.indexOf(privateFoundationPublish));
+        const workflow = readFileSync(join(process.cwd(), '.github', 'workflows', 'publish-npm.yml'), 'utf8');
+        const reflectionPublish = '(cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)';
+        const foundationPublish = '\n          npm publish --registry https://registry.npmjs.org/ --access public';
+        assert.ok(workflow.includes(reflectionPublish));
+        assert.ok(workflow.indexOf(reflectionPublish) < workflow.indexOf(foundationPublish));
+        assert.match(workflow, /run: yarn build\n/);
     });
 });
