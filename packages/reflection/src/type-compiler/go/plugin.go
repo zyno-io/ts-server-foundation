@@ -22,14 +22,16 @@ type registry struct {
 	// fileOrder lists files in program order. Metadata generation queries the
 	// checker and fills caches as it goes, so it must visit files in this stable
 	// order rather than in Go's randomized map order; see orderedFiles.
-	fileOrder            []*fileInfo
-	byPath               map[string]*fileInfo
-	checker              *shimchecker.Checker
-	typiaCache           map[typiaCacheKey]string
-	typiaFailures        map[*shimchecker.Type]bool
-	classes              map[string]*classInfo
-	external             map[string]map[string][]functionInfo
-	externalPackageRoots map[string]string
+	fileOrder     []*fileInfo
+	byPath        map[string]*fileInfo
+	checker       *shimchecker.Checker
+	typiaCache    map[typiaCacheKey]string
+	typiaFailures map[*shimchecker.Type]bool
+	// aliasMetadataInProgress marks aliases whose metadata precomputeAliasMetadata is computing.
+	aliasMetadataInProgress map[string]bool
+	classes                 map[string]*classInfo
+	external                map[string]map[string][]functionInfo
+	externalPackageRoots    map[string]string
 }
 
 type typiaCacheKey struct {

@@ -10,9 +10,17 @@ export type SameFileLiveStatus = Exclude<SameFileAccountStatus, 'deleted'>;
 export const SAME_FILE_KINDS = ['monitor', 'probe'] as const;
 export type SameFileKind = (typeof SAME_FILE_KINDS)[number];
 
+// ALive references BLive, which sorts after it; both are filled in the same alias pass.
+export type SameFileALive = SameFileBLive | null;
+export type SameFileBLive = Exclude<SameFileAccountStatus, 'deleted'>;
+
 class SameFileAccount {
     status!: SameFileLiveStatus;
     kind!: SameFileKind;
+}
+
+class SameFileOrderedAccount {
+    alive!: SameFileALive;
 }
 
 describe('same-file exported aliases', () => {
@@ -21,5 +29,14 @@ describe('same-file exported aliases', () => {
         assert.deepStrictEqual(validate({ status: 'suspended', kind: 'probe' }, SameFileAccount), []);
         const errors = validate({ status: 'deleted', kind: 'other' }, SameFileAccount).map(error => error.path);
         assert.deepStrictEqual(errors.sort(), ['kind', 'status']);
+    });
+
+    it('validates an alias that references a later same-file alias', () => {
+        assert.deepStrictEqual(validate({ alive: 'active' }, SameFileOrderedAccount), []);
+        assert.deepStrictEqual(validate({ alive: null }, SameFileOrderedAccount), []);
+        assert.deepStrictEqual(
+            validate({ alive: 'deleted' }, SameFileOrderedAccount).map(error => error.path),
+            ['alive']
+        );
     });
 });
