@@ -689,7 +689,14 @@ func checkerPromiseTypeExpr(info *fileInfo, reg *registry, typ *shimchecker.Type
 	if !ok {
 		return "", false
 	}
-	return "{kind: 22, type: " + inner + "}", true
+	expr := "{kind: 22, type: " + inner + "}"
+	// A named Promise alias keeps its name, as the text path keeps it for an alias written in the
+	// signature. The router and OpenAPI read TSF's response aliases, such as EmptyResponse (204) and
+	// RedirectResponse (302), by this name.
+	if alias := typ.Alias(); alias != nil && alias.Symbol() != nil && alias.Symbol().Name != "" {
+		expr = withTypeName(expr, alias.Symbol().Name)
+	}
+	return expr, true
 }
 
 // checkerAwaitedTypeExpr renders an awaited type. It fails when Typia cannot describe the type,
