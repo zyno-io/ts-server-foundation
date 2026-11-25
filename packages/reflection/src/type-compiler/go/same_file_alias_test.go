@@ -91,3 +91,52 @@ export class Consumer {
 		}
 	}
 }
+
+// Aliases exported through a local export list, `export { X }` or `export type { X }`, are
+// exported: they are precomputed and published like aliases with their own export keyword, so the
+// owning file reads the same metadata as importers.
+func TestAliasesExportedThroughExportListsArePrecomputed(t *testing.T) {
+	reg := loadAliasFixture(t, map[string]string{
+		"entity.ts": `
+type AccountStatus = 'active' | 'suspended' | 'deleted';
+type ListedLive = Exclude<AccountStatus, 'deleted'>;
+type TypeListedLive = Exclude<AccountStatus, 'deleted'>;
+type Internal = Exclude<AccountStatus, 'deleted'>;
+export { ListedLive };
+export type { TypeListedLive };
+export class Account {
+	listed!: ListedLive;
+	typeListed!: TypeListedLive;
+}
+`,
+		"consumer.ts": `
+import { ListedLive, TypeListedLive } from './entity';
+export class Consumer {
+	listed!: ListedLive;
+	typeListed!: TypeListedLive;
+}
+`,
+	})
+	var entity *fileInfo
+	for _, info := range reg.orderedFiles() {
+		if filepath.Base(info.file.FileName()) == "entity.ts" {
+			entity = info
+		}
+	}
+	if entity == nil {
+		t.Fatal("entity.ts was not collected")
+	}
+	for name, exported := range map[string]bool{"ListedLive": true, "TypeListedLive": true, "Internal": false} {
+		if got := entity.aliases[name].exported; got != exported {
+			t.Errorf("%s exported = %v, want %v", name, got, exported)
+		}
+	}
+	for _, name := range []string{"ListedLive", "TypeListedLive"} {
+		if strings.TrimSpace(entity.aliases[name].metadataText) == "" {
+			t.Errorf("%s was not precomputed", name)
+		}
+	}
+	for _, item := range []struct{ class, prop string }{{"Account", "listed"}, {"Account", "typeListed"}, {"Consumer", "listed"}, {"Consumer", "typeListed"}} {
+		assertResolvedLiveStatus(t, item.class+"."+item.prop, classProperty(t, reg, item.class, item.prop))
+	}
+}

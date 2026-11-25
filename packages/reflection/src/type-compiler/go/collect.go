@@ -54,6 +54,7 @@ func collectRegistry(prog *driver.Program, cwd string, emitTypeAliases bool, emi
 	}
 	for _, info := range reg.orderedFiles() {
 		collectAstDeclarations(info, reg)
+		markLocalExportListDeclarations(info)
 	}
 	for _, info := range reg.orderedFiles() {
 		collectGenericCalls(info, reg)
@@ -822,6 +823,33 @@ func packageReexportRef(reg *registry, ref importRef, seen map[string]bool) (imp
 		return importRef{exportName: next.exportName, spec: next.spec}, true
 	}
 	return packageReexportRef(reg, next, seen)
+}
+
+// markLocalExportListDeclarations marks aliases and interfaces that a local export list exports
+// under their own name, such as `type X = ...; export { X }` or `export type { X }`, as exported.
+// A declaration's exported flag otherwise comes only from its own export keyword, so these were
+// neither precomputed nor published, and the owning file's metadata differed from importers'.
+// A renamed export (`export { X as Y }`) is already a local re-export.
+func markLocalExportListDeclarations(info *fileInfo) {
+	localNamedRe := regexp.MustCompile(`(?m)export\s+(?:type\s+)?\{([^}]+)\}\s*(?:;|$)`)
+	for _, match := range localNamedRe.FindAllStringSubmatch(info.file.Text(), -1) {
+		for _, item := range strings.Split(match[1], ",") {
+			localName, exportName, ok := parseExportItem(item)
+			if !ok || localName != exportName {
+				continue
+			}
+			if _, imported := info.imports[localName]; imported {
+				continue
+			}
+			if alias, ok := info.aliases[localName]; ok && !alias.exported {
+				alias.exported = true
+				info.aliases[localName] = alias
+			}
+			for index := range info.interfaces[localName] {
+				info.interfaces[localName][index].exported = true
+			}
+		}
+	}
 }
 
 func parseExportItem(item string) (string, string, bool) {

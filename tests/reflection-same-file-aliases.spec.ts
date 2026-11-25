@@ -14,6 +14,12 @@ export type SameFileKind = (typeof SAME_FILE_KINDS)[number];
 export type SameFileALive = SameFileBLive | null;
 export type SameFileBLive = Exclude<SameFileAccountStatus, 'deleted'>;
 
+// Exported through export lists rather than their own export keyword.
+type SameFileListedLive = Exclude<SameFileAccountStatus, 'deleted'>;
+type SameFileTypeListedLive = Exclude<SameFileAccountStatus, 'deleted'>;
+export { SameFileListedLive };
+export type { SameFileTypeListedLive };
+
 class SameFileAccount {
     status!: SameFileLiveStatus;
     kind!: SameFileKind;
@@ -21,6 +27,8 @@ class SameFileAccount {
 
 class SameFileOrderedAccount {
     alive!: SameFileALive;
+    listed!: SameFileListedLive;
+    typeListed!: SameFileTypeListedLive;
 }
 
 describe('same-file exported aliases', () => {
@@ -31,12 +39,10 @@ describe('same-file exported aliases', () => {
         assert.deepStrictEqual(errors.sort(), ['kind', 'status']);
     });
 
-    it('validates an alias that references a later same-file alias', () => {
-        assert.deepStrictEqual(validate({ alive: 'active' }, SameFileOrderedAccount), []);
-        assert.deepStrictEqual(validate({ alive: null }, SameFileOrderedAccount), []);
-        assert.deepStrictEqual(
-            validate({ alive: 'deleted' }, SameFileOrderedAccount).map(error => error.path),
-            ['alive']
-        );
+    it('validates an alias that references a later same-file alias, and aliases exported through export lists', () => {
+        assert.deepStrictEqual(validate({ alive: 'active', listed: 'suspended', typeListed: 'active' }, SameFileOrderedAccount), []);
+        assert.deepStrictEqual(validate({ alive: null, listed: 'active', typeListed: 'suspended' }, SameFileOrderedAccount), []);
+        const errors = validate({ alive: 'deleted', listed: 'deleted', typeListed: 'deleted' }, SameFileOrderedAccount).map(error => error.path);
+        assert.deepStrictEqual(errors.sort(), ['alive', 'listed', 'typeListed']);
     });
 });
