@@ -44,21 +44,51 @@ func collectRegistry(prog *driver.Program, cwd string, emitTypeAliases bool, emi
 			reexports:            map[string]importRef{},
 		}
 		reg.files[file.FileName()] = info
+		reg.fileOrder = append(reg.fileOrder, info)
 		reg.byPath[info.moduleKey] = info
 		collectTextDeclarations(info)
 	}
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		collectImports(info, reg)
 		collectReexports(info, reg)
 	}
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		collectAstDeclarations(info, reg)
 	}
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		collectGenericCalls(info, reg)
 	}
 	precomputeMetadataExpressions(reg, emitTypeAliases)
 	return reg
+}
+
+// orderedFiles returns the registry's files in a stable order: program order
+// when collectRegistry built the registry, otherwise sorted by file name.
+//
+// Every pass that can reach the checker, Typia or a lazily filled cache must
+// iterate files through this, never by ranging over reg.files. The checker
+// creates types, resolves aliases and instantiates generics on first request,
+// and the compiler caches alias, Typia and failure results on first use, so
+// the order of the first requests shapes the emitted metadata. Go randomizes
+// map iteration, so ranging over the map made identical sources compile to
+// different output from one build to the next.
+func (reg *registry) orderedFiles() []*fileInfo {
+	if reg == nil {
+		return nil
+	}
+	if len(reg.fileOrder) == len(reg.files) {
+		return reg.fileOrder
+	}
+	names := make([]string, 0, len(reg.files))
+	for name := range reg.files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	ordered := make([]*fileInfo, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, reg.files[name])
+	}
+	return ordered
 }
 
 // Yarn PnP keeps JavaScript packages inside ZipFS, which Node can read but the

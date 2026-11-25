@@ -53,7 +53,7 @@ func resolveImport(fromFile string, spec string, reg *registry) *fileInfo {
 }
 
 func resolveReflectionPackageImport(reg *registry) *fileInfo {
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		fileName := filepath.ToSlash(info.file.FileName())
 		if strings.HasSuffix(fileName, "/@zyno-io/ts-reflection/dist/index.d.ts") ||
 			strings.HasSuffix(fileName, "/packages/reflection/dist/index.d.ts") {

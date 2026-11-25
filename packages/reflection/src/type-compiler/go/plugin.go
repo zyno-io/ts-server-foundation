@@ -18,7 +18,11 @@ const foundationPackageSpec = "@zyno-io/ts-server-foundation"
 const reflectionPackageSpec = "@zyno-io/ts-reflection"
 
 type registry struct {
-	files                map[string]*fileInfo
+	files map[string]*fileInfo
+	// fileOrder lists files in program order. Metadata generation queries the
+	// checker and fills caches as it goes, so it must visit files in this stable
+	// order rather than in Go's randomized map order; see orderedFiles.
+	fileOrder            []*fileInfo
 	byPath               map[string]*fileInfo
 	checker              *shimchecker.Checker
 	typiaCache           map[typiaCacheKey]string

@@ -94,7 +94,7 @@ func isShareableMetadataType(expression *shimast.Node) bool {
 
 func buildEmissionPlans(reg *registry, program *driver.Program, emitTypeAliases bool, emitMetadataRuntimeImport bool) (emissionPlans, error) {
 	plans := emissionPlans{}
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		if info == nil || info.file == nil || info.file.IsDeclarationFile {
 			continue
 		}

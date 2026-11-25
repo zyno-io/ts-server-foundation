@@ -6,7 +6,7 @@ func precomputeMetadataExpressions(reg *registry, emitTypeAliases bool) {
 	}
 	// TypeScript-Go emits files in parallel, and checker-backed Typia reads are not
 	// safe from WriteFile callbacks. Cache metadata for emitted source files first.
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		if !info.precompute {
 			continue
 		}
