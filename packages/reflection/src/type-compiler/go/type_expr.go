@@ -148,6 +148,9 @@ func typeExprCtx(info *fileInfo, reg *registry, raw string, ctx *typeContext) st
 	case "PrimaryKey", "AutoIncrement", "Reference", "Index", "Unique":
 		return "{kind: 2, typeName: " + quote(raw) + "}"
 	}
+	if ref, ok := packageReexportImport(info, reg, raw); ok {
+		return externalImportedTypeExpr(ref, raw)
+	}
 	return "{kind: 16, typeName: " + quote(raw) + ", classType: () => " + runtimeValueExpr(info, reg, raw) + "}"
 }
 
@@ -313,6 +316,9 @@ func genericTypeExpr(info *fileInfo, reg *registry, name string, args []string, 
 			return interfaceObjectLiteralExpr(owner, reg, name, instantiateInterfaceDecl(decl, args), ctx)
 		}
 		if ref, ok := info.imports[name]; ok && isExternalImportRef(ref) {
+			return withTypeArguments(externalImportedTypeExpr(ref, name), info, reg, args, ctx)
+		}
+		if ref, ok := packageReexportImport(info, reg, name); ok {
 			return withTypeArguments(externalImportedTypeExpr(ref, name), info, reg, args, ctx)
 		}
 		return "{kind: 16, typeName: " + quote(name) + ", classType: () => " + runtimeValueExpr(info, reg, name) + typeArgumentsProperty(info, reg, args, ctx) + "}"

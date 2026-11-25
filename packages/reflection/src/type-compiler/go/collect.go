@@ -742,7 +742,10 @@ func collectReexports(info *fileInfo, reg *registry) {
 	namedRe := regexp.MustCompile(`(?m)export\s+(?:type\s+)?\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]`)
 	for _, match := range namedRe.FindAllStringSubmatch(text, -1) {
 		target := resolveImport(info.file.FileName(), match[2], reg)
-		if target == nil {
+		source := ""
+		if target != nil {
+			source = target.moduleKey
+		} else if strings.HasPrefix(match[2], ".") {
 			continue
 		}
 		for _, item := range strings.Split(match[1], ",") {
@@ -757,7 +760,8 @@ func collectReexports(info *fileInfo, reg *registry) {
 			if len(parts) == 2 {
 				localName = strings.TrimSpace(parts[1])
 			}
-			info.reexports[localName] = importRef{source: target.moduleKey, exportName: exportName, spec: match[2]}
+			// A package re-export keeps an empty source, like a package import.
+			info.reexports[localName] = importRef{source: source, exportName: exportName, spec: match[2]}
 		}
 	}
 
@@ -777,6 +781,47 @@ func collectReexports(info *fileInfo, reg *registry) {
 			}
 		}
 	}
+}
+
+// packageReexportImport resolves an import of a local module's named package re-export, such as
+// `export type { Dto } from '@scope/pkg'`, to the package export, following any chain of local
+// barrels. A local barrel's package re-export has no declaration in the registry, so the text
+// path cannot resolve the name and used to fall through to a class reference to a type-only
+// name, which OpenAPI renders as an empty object. Callers use the result only at that fallback,
+// where it resolves the name exactly like an import from the package: the import itself keeps
+// the barrel's identity, so Typia-preferred surfaces still read the checker's structure.
+//
+// TSF's own packages are excluded: framework semantics such as route verbs and wrappers follow
+// import identity.
+func packageReexportImport(info *fileInfo, reg *registry, name string) (importRef, bool) {
+	ref, ok := info.imports[name]
+	if !ok || isExternalImportRef(ref) {
+		return importRef{}, false
+	}
+	return packageReexportRef(reg, ref, map[string]bool{})
+}
+
+func packageReexportRef(reg *registry, ref importRef, seen map[string]bool) (importRef, bool) {
+	target := reg.byPath[ref.source]
+	if target == nil {
+		return importRef{}, false
+	}
+	key := target.moduleKey + "\x00" + ref.exportName
+	if seen[key] {
+		return importRef{}, false
+	}
+	seen[key] = true
+	next, ok := target.reexports[ref.exportName]
+	if !ok {
+		return importRef{}, false
+	}
+	if next.source == "" {
+		if !isExternalImportRef(next) || isFoundationImportRef(next) {
+			return importRef{}, false
+		}
+		return importRef{exportName: next.exportName, spec: next.spec}, true
+	}
+	return packageReexportRef(reg, next, seen)
 }
 
 func parseExportItem(item string) (string, string, bool) {
