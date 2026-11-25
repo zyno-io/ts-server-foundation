@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -627,6 +628,90 @@ func cachedTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Nod
 		return cached
 	}
 	return typeExprForNode(info, reg, raw, node, pos)
+}
+
+// methodReturnTypeExpr renders a method's return type. A return type that the checker resolves to a
+// Promise or PromiseLike is rendered as a promise of its awaited type however it is spelled, so a
+// route declared `async m(): ReturnType<Service['m']>`, `Api['m']` or `Async<Dto>` describes Dto
+// rather than the Promise object.
+func methodReturnTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int, preferTypia bool) string {
+	expr := typeExprForNodePreferred(info, reg, raw, node, pos, preferTypia)
+	trimmed := strings.TrimSpace(expr)
+	// A promise is already rendered. A package type keeps its package boundary: its metadata is
+	// loaded from the package, and the checker's view of it names types the importer cannot reach.
+	if strings.HasPrefix(trimmed, "{kind: 22") || strings.HasPrefix(trimmed, runtimeAliasPlaceholderName+"(") ||
+		typeContainsExternalImportReference(info, reg, raw, map[string]bool{}) {
+		return expr
+	}
+	if promised, ok := checkerPromiseTypeExprForNode(info, reg, node, pos); ok {
+		return promised
+	}
+	return expr
+}
+
+// checkerPromiseTypeExprForNode renders the type of node as a promise when the checker resolves it
+// to the global Promise or PromiseLike, keeping the status of TSF's ApiResponse alias of Promise. The text paths
+// recognize these wrappers only when they are written literally; an alias, an indexed access or a
+// utility such as ReturnType reaches Typia as an ordinary object and becomes the Promise's own
+// members, such as Symbol.toStringTag.
+func checkerPromiseTypeExprForNode(info *fileInfo, reg *registry, node *shimast.Node, pos int) (string, bool) {
+	if reg == nil || reg.checker == nil || node == nil {
+		return "", false
+	}
+	return checkerPromiseTypeExpr(info, reg, reg.checker.GetTypeFromTypeNode(node), pos, 0)
+}
+
+func checkerPromiseTypeExpr(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, depth int) (string, bool) {
+	if typ == nil || depth > 8 {
+		return "", false
+	}
+	symbol := typ.Symbol()
+	if symbol == nil || (symbol.Name != "Promise" && symbol.Name != "PromiseLike") || !isTypeScriptLibSymbol(symbol) {
+		return "", false
+	}
+	if alias := typ.Alias(); alias != nil && alias.Symbol() != nil && alias.Symbol().Name == "ApiResponse" && len(alias.TypeArguments()) != 0 {
+		args := alias.TypeArguments()
+		body, ok := checkerAwaitedTypeExpr(info, reg, args[0], pos, depth+1)
+		if !ok {
+			return "", false
+		}
+		status := literalArg("200")
+		if len(args) > 1 && args[1] != nil && args[1].IsNumberLiteral() {
+			status = "{kind: 10, literal: " + typiaLiteralExpr(args[1].AsLiteralType().Value()) + "}"
+		}
+		return "{kind: 22, typeName: \"ApiResponse\", type: " + body + ", typeArguments: [" + body + ", " + status + "]}", true
+	}
+	args := shimchecker.Checker_getTypeArguments(reg.checker, typ)
+	if len(args) != 1 {
+		return "", false
+	}
+	inner, ok := checkerAwaitedTypeExpr(info, reg, args[0], pos, depth+1)
+	if !ok {
+		return "", false
+	}
+	return "{kind: 22, type: " + inner + "}", true
+}
+
+// checkerAwaitedTypeExpr renders an awaited type. It fails when Typia cannot describe the type,
+// so the caller keeps the existing rendering rather than replacing it with an unknown.
+func checkerAwaitedTypeExpr(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, depth int) (string, bool) {
+	if expr, ok := checkerPromiseTypeExpr(info, reg, typ, pos, depth); ok {
+		return expr, true
+	}
+	return typiaTypeExprFromType(info, reg, typ, pos, "")
+}
+
+func isTypeScriptLibSymbol(symbol *shimast.Symbol) bool {
+	if symbol == nil || len(symbol.Declarations) == 0 {
+		return false
+	}
+	for _, declaration := range symbol.Declarations {
+		file := shimast.GetSourceFileOfNode(declaration)
+		if file == nil || !isTypeScriptLibDeclaration(filepath.ToSlash(file.FileName())) {
+			return false
+		}
+	}
+	return true
 }
 
 func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {

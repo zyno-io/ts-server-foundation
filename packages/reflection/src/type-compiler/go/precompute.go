@@ -71,7 +71,7 @@ func precomputeClassMetadataExpressions(info *fileInfo, reg *registry, class *cl
 		if class.decoratedMethodsOnly && !method.decorated {
 			continue
 		}
-		method.returnMetadataText = typeExprForNodePreferred(info, reg, method.returnType, method.returnTypeNode, class.pos, method.preferTypia)
+		method.returnMetadataText = methodReturnTypeExpr(info, reg, method.returnType, method.returnTypeNode, class.pos, method.preferTypia)
 		precomputeParamMetadataExpressions(info, reg, method.params, class.pos, method.preferTypia)
 	}
 	precomputeParamMetadataExpressions(info, reg, class.ctor, class.pos, false)
