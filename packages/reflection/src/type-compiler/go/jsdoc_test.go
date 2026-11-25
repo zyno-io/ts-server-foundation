@@ -432,6 +432,194 @@ export class Handlers {
 	assertContainsAll(t, returnExpr(methods["suffix"]), `{kind: 22, type: {kind: 14, type: {kind: 18`, `description: "Suffix member doc."`)
 }
 
+// A route registered through a wrapper decorator (one that calls http.POST itself) is not a TSF http
+// verb decorator, so its signature is compiled with preferTypia off. Inline object literals inside
+// the HttpBody, HttpQueries, Promise, Array and T[] wrappers must keep their member JSDoc there too.
+func TestInlineObjectLiteralsKeepMemberJsDocWithoutTsfRouteDecorator(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+type HttpQueries<T> = T & { readonly __queries?: T };
+type ApiResponse<T, S extends number = 200> = T & { readonly __status?: S };
+declare function Route(method: string): MethodDecorator;
+class Identity {}
+export class Handlers {
+	@Route('POST')
+	create(identity: Identity, body: HttpBody<{
+		/** Body member doc. */
+		name: string;
+	}>, query: HttpQueries<{
+		/** Queries member doc. */
+		f?: string;
+	}>): Promise<{
+		/** Return member doc. */
+		e: string;
+	}> { return null as never; }
+	@Route('POST')
+	rows(body: HttpBody<{
+		/** Body row doc. */
+		r: string;
+	}[]>): Promise<Array<{
+		/** Array member doc. */
+		g: string;
+	}>> { return null as never; }
+	@Route('GET')
+	suffix(): Promise<({
+		/** Suffix member doc. */
+		s: string;
+	} | null)[]> { return null as never; }
+	@Route('GET')
+	created(): Promise<ApiResponse<{
+		/** ApiResponse member doc. */
+		c: string;
+	}, 201>> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	if class == nil {
+		t.Fatal("Handlers was not collected")
+	}
+	precomputeClassMetadataExpressions(info, reg, class)
+	methods := map[string]methodInfo{}
+	for _, method := range class.methods {
+		if method.preferTypia {
+			t.Fatalf("%s must not be treated as a TSF http route", method.name)
+		}
+		methods[method.name] = method
+	}
+	create := methods["create"]
+	assertContainsAll(t, create.params[1].metadataText, `typeName: "HttpBody"`, `description: "Body member doc."`)
+	assertContainsAll(t, create.params[2].metadataText, `typeName: "HttpQueries"`, `description: "Queries member doc."`)
+	assertContainsAll(t, create.returnMetadataText, `{kind: 22, type: {kind: 18`, `description: "Return member doc."`)
+	rows := methods["rows"]
+	assertContainsAll(t, rows.params[0].metadataText, `{kind: 13, typeName: "HttpBody", types: [{kind: 14, type: {kind: 18`, `description: "Body row doc."`)
+	assertContainsAll(t, rows.returnMetadataText, `{kind: 22, type: {kind: 14, type: {kind: 18`, `description: "Array member doc."`)
+	assertContainsAll(t, methods["suffix"].returnMetadataText, `{kind: 22, type: {kind: 14, type: {kind: 12, types: [{kind: 18`, `description: "Suffix member doc."`)
+	assertContainsAll(t, methods["created"].returnMetadataText, `typeName: "ApiResponse"`, `{kind: 10, literal: 201}`, `description: "ApiResponse member doc."`)
+}
+
+// Arrays of inline objects nested in an inline object keep their element member JSDoc on the
+// internal path, which also renders the members of inline objects.
+func TestInlineObjectArrayMembersKeepMemberJsDoc(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+export class Handlers {
+	create(body: HttpBody<{
+		/** Suffix holder doc. */
+		items: {
+			/** Suffix item doc. */
+			a: string;
+		}[];
+		/** Generic holder doc. */
+		gen: Array<{
+			/** Generic item doc. */
+			b: string;
+		}>;
+	}>): void {}
+}
+`)
+	class := reg.classes["Handlers"]
+	param := class.methods[0].params[0]
+	assertContainsAll(t, typeExprForNodePreferred(info, reg, param.typeText, param.typeNode, class.pos, false),
+		`description: "Suffix holder doc."`, `description: "Suffix item doc."`,
+		`description: "Generic holder doc."`, `description: "Generic item doc."`)
+}
+
+// Without member docs, the node path renders the wrappers exactly as the text path does, including
+// text with function syntax.
+func TestInternalWrapperNodePathMatchesTextPath(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+type HttpQueries<T> = T & { readonly __queries?: T };
+type ApiResponse<T, S extends number = 200> = T & { readonly __status?: S };
+export class Handlers {
+	a(body: HttpBody<{ name: string; tags: { t: string }[] }>): void {}
+	b(query: HttpQueries<{ f?: string }>): void {}
+	c(): Promise<Array<{ g: string }>> { return null as never; }
+	d(): Promise<({ s: string } | null)[]> { return null as never; }
+	e(): Promise<ApiResponse<{ c: string }, 201>> { return null as never; }
+	f(): Promise<ReadonlyArray<{ r: string }>> { return null as never; }
+	g(body: HttpBody<{ name: string; validate?: (v: string) => boolean }>, rows: { f: () => void; a: string }[]): Promise<{ cb: () => void }> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	for _, method := range class.methods {
+		for _, param := range method.params {
+			ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+			want := typeExprCtx(info, reg, param.typeText, ctx)
+			if got := internalTypeExprForNode(info, reg, param.typeText, param.typeNode, class.pos); got != want {
+				t.Fatalf("%s parameter:\nnode: %s\ntext: %s", method.name, got, want)
+			}
+		}
+		if method.returnTypeNode == nil {
+			continue
+		}
+		ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+		want := typeExprCtx(info, reg, method.returnType, ctx)
+		if got := internalTypeExprForNode(info, reg, method.returnType, method.returnTypeNode, class.pos); got != want {
+			t.Fatalf("%s return:\nnode: %s\ntext: %s", method.name, got, want)
+		}
+	}
+}
+
+// Union and intersection wrapper arguments mark their text as seen, and each wrapper level counts
+// toward the depth limit, exactly as on the text path, so recursive generics stop at the same place.
+func TestInternalWrapperNodePathMatchesTextPathForRecursiveGenerics(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type HttpBody<T> = T & { readonly __body?: T };
+type GI<T> = { v: T; r: { x: GI<T> } & { y: string } };
+type G<T> = { v: T; r: { x: G<T> } | null };
+type Deep<T> = { v: T; inner?: Deep<T[]> };
+type DeepA<T> = { v: T; inner?: DeepA<Array<T>> };
+export class Handlers {
+	a(body: HttpBody<{ x: GI<string> } & { y: string }>): void {}
+	b(body: HttpBody<{ x: G<string> } | null>): void {}
+	c(body: HttpBody<{ d: Deep<string> }>): void {}
+	d(): Promise<Array<{ d: DeepA<number> }>> { return null as never; }
+}
+`)
+	class := reg.classes["Handlers"]
+	for _, method := range class.methods {
+		for _, param := range method.params {
+			ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+			want := typeExprCtx(info, reg, param.typeText, ctx)
+			if got := internalTypeExprForNode(info, reg, param.typeText, param.typeNode, class.pos); got != want {
+				t.Fatalf("%s parameter:\nnode: %s\ntext: %s", method.name, got, want)
+			}
+		}
+		if method.returnTypeNode == nil {
+			continue
+		}
+		ctx := &typeContext{seen: map[string]bool{}, pos: class.pos}
+		want := typeExprCtx(info, reg, method.returnType, ctx)
+		if got := internalTypeExprForNode(info, reg, method.returnType, method.returnTypeNode, class.pos); got != want {
+			t.Fatalf("%s return:\nnode: %s\ntext: %s", method.name, got, want)
+		}
+	}
+}
+
+// A wrapper rendered from its node stops recursion at the same depth as the text path did. Alias
+// members already take the node path, so the expected output is pinned rather than compared with
+// typeExprCtx.
+func TestInternalWrapperNodePathKeepsRecursionDepth(t *testing.T) {
+	info, reg := loadJsDocProbe(t, `
+type Node2 = { siblings: Array<{ node: Node2 }>; list: { node: Node2 }[] };
+export class Handlers {
+	h(x: Array<{ node: Node2 }>, y: { node: Node2 }[]): void {}
+}
+`)
+	class := reg.classes["Handlers"]
+	params := class.methods[0].params
+	expr := func(index int) string {
+		return internalTypeExprForNode(info, reg, params[index].typeText, params[index].typeNode, class.pos)
+	}
+	assertContainsAll(t, expr(0),
+		`{kind: 20, name: "siblings", type: {kind: 2, typeName: "Array<{ node: Node2 }>"}, optional: false}`,
+		`{kind: 20, name: "list", type: {kind: 14, type: {kind: 2, typeName: "{ node: Node2 }"}}, optional: false}`)
+	assertContainsAll(t, expr(1),
+		`{kind: 20, name: "siblings", type: {kind: 14, type: {kind: 2, typeName: "{ node: Node2 }"}}, optional: false}`,
+		`{kind: 20, name: "list", type: {kind: 2, typeName: "{ node: Node2 }[]"}, optional: false}`)
+}
+
 // TypeScript only attaches a JSDoc block to a type member when the block does not follow another
 // token on the same line, so `{ /** doc */ a: string }` carries no member doc.
 func TestSameLineTypeMemberCommentIsNotJsDoc(t *testing.T) {

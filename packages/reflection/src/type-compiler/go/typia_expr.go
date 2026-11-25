@@ -130,6 +130,28 @@ func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node 
 		ctx.seen[key] = true
 		defer delete(ctx.seen, key)
 		return objectTypeLiteralExprForNode(info, reg, literal, node, ctx)
+	case shimast.KindArrayType:
+		// An inline object element keeps its node so its member JSDoc survives; other elements keep
+		// the text path, which renders `T[]` the same way.
+		element := node.AsArrayTypeNode().ElementType
+		if !containsInlineTypeLiteral(element) {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		elementRaw, ok := sourceTypeNodeText(info, element)
+		if !ok {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		leave, ok := enterInternalWrapperNode(info, raw, ctx)
+		if !ok {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		defer leave()
+		return "{kind: 14, type: " + internalArgTypeExprForNodeCtx(info, reg, elementRaw, element, ctx) + "}"
+	case shimast.KindTypeReference:
+		if expr, ok := internalWrapperTypeExprForNode(info, reg, raw, node, ctx); ok {
+			return expr
+		}
+		return typeExprCtx(info, reg, raw, ctx)
 	default:
 		return typeExprCtx(info, reg, raw, ctx)
 	}
@@ -146,6 +168,142 @@ func internalTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node 
 		types = append(types, internalTypeExprForNodeCtx(info, reg, childRaw, child, ctx))
 	}
 	return "{kind: " + strconv.Itoa(kind) + ", types: [" + strings.Join(types, ", ") + "]}"
+}
+
+// internalWrapperTypeExprForNode renders the wrapper generics that genericTypeExpr handles and whose
+// argument can be an inline object literal (Array, ReadonlyArray, Promise, ApiResponse, HttpBody and
+// HttpQueries) from the argument node, so the literal's member JSDoc survives. This is the path for
+// methods that are not decorated with TSF's own http verb decorators, such as routes registered
+// through a wrapper decorator. The output matches genericTypeExpr's apart from the member docs.
+// Other references, and arguments without an inline object literal, return false and keep the
+// text path.
+func internalWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) (string, bool) {
+	name, args, ok := generic(strings.TrimSpace(stripTypeComments(raw)))
+	if !ok {
+		return "", false
+	}
+	typeArgs := node.TypeArguments()
+	if len(typeArgs) == 0 || len(typeArgs) != len(args) || !containsInlineTypeLiteral(typeArgs[0]) {
+		return "", false
+	}
+	switch name {
+	case "Array", "ReadonlyArray", "Promise", "ApiResponse", "HttpBody", "HttpQueries":
+	default:
+		return "", false
+	}
+	argRaw, ok := sourceTypeNodeText(info, typeArgs[0])
+	if !ok {
+		return "", false
+	}
+	leave, ok := enterInternalWrapperNode(info, raw, ctx)
+	if !ok {
+		return "", false
+	}
+	defer leave()
+	value := func() string {
+		return internalArgTypeExprForNodeCtx(info, reg, argRaw, typeArgs[0], ctx)
+	}
+	switch name {
+	case "Array", "ReadonlyArray":
+		return "{kind: 14, type: " + value() + "}", true
+	case "Promise":
+		return "{kind: 22, type: " + value() + "}", true
+	case "ApiResponse":
+		body := value()
+		status := literalArg("200")
+		if len(args) > 1 {
+			status = literalArg(args[1])
+		}
+		return "{kind: 22, typeName: \"ApiResponse\", type: " + body + ", typeArguments: [" + body + ", " + status + "]}", true
+	case "HttpBody", "HttpQueries":
+		if len(args) != 1 {
+			return "", false
+		}
+		annotation := "httpBody"
+		if name == "HttpQueries" {
+			annotation = "httpQueries"
+		}
+		valueType := value()
+		// httpMarkerType renders the same `{} & { type: T }` annotation value from text.
+		marker := typeAnnotationMarker(name, annotation, "{kind: 18, types: [{kind: 20, name: \"type\", type: "+valueType+", optional: false}]}")
+		return "{kind: 13, typeName: " + quote(name) + ", types: [" + valueType + ", " + marker + "]}", true
+	default:
+		return "", false
+	}
+}
+
+// enterInternalWrapperNode applies typeExprCtx's guards to a wrapper rendered from its node: text
+// with function syntax stays unresolved, and a wrapper already being rendered stops the recursion.
+// It marks the wrapper as seen until the returned function runs. When it returns false, the caller
+// must fall back to typeExprCtx, which applies the same guards itself.
+func enterInternalWrapperNode(info *fileInfo, raw string, ctx *typeContext) (func(), bool) {
+	text := strings.TrimSpace(stripTypeComments(raw))
+	key := info.moduleKey + "\x00" + text
+	if isFunctionTypeSyntax(text) || ctx.seen[key] || ctx.depth+1 > 80 {
+		return nil, false
+	}
+	ctx.depth++
+	ctx.seen[key] = true
+	return func() { delete(ctx.seen, key); ctx.depth-- }, true
+}
+
+// internalArgTypeExprForNodeCtx renders a wrapper argument or array element from its node. A union
+// or intersection gets typeExprCtx's depth and seen bookkeeping, which the text path applied to it.
+func internalArgTypeExprForNodeCtx(info *fileInfo, reg *registry, raw string, node *shimast.Node, ctx *typeContext) string {
+	inner := node
+	for inner != nil && inner.Kind == shimast.KindParenthesizedType {
+		inner = inner.AsParenthesizedTypeNode().Type
+	}
+	if inner != nil && (inner.Kind == shimast.KindUnionType || inner.Kind == shimast.KindIntersectionType) {
+		text := strings.TrimSpace(strings.TrimPrefix(trimParens(strings.TrimSpace(stripTypeComments(raw))), "readonly "))
+		key := info.moduleKey + "\x00" + text
+		if ctx.seen[key] || ctx.depth+1 > 80 {
+			return typeExprCtx(info, reg, raw, ctx)
+		}
+		ctx.depth++
+		ctx.seen[key] = true
+		defer func() { delete(ctx.seen, key); ctx.depth-- }()
+	}
+	return internalTypeExprForNodeCtx(info, reg, raw, node, ctx)
+}
+
+// containsInlineTypeLiteral reports whether internalTypeExprForNodeCtx can reach an inline object
+// literal under node.
+func containsInlineTypeLiteral(node *shimast.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind {
+	case shimast.KindTypeLiteral:
+		return true
+	case shimast.KindParenthesizedType:
+		return containsInlineTypeLiteral(node.AsParenthesizedTypeNode().Type)
+	case shimast.KindArrayType:
+		return containsInlineTypeLiteral(node.AsArrayTypeNode().ElementType)
+	case shimast.KindUnionType:
+		if types := node.AsUnionTypeNode().Types; types != nil {
+			for _, child := range types.Nodes {
+				if containsInlineTypeLiteral(child) {
+					return true
+				}
+			}
+		}
+		return false
+	case shimast.KindIntersectionType:
+		if types := node.AsIntersectionTypeNode().Types; types != nil {
+			for _, child := range types.Nodes {
+				if containsInlineTypeLiteral(child) {
+					return true
+				}
+			}
+		}
+		return false
+	case shimast.KindTypeReference:
+		args := node.TypeArguments()
+		return len(args) != 0 && containsInlineTypeLiteral(args[0])
+	default:
+		return false
+	}
 }
 
 func sourceTypeNodeText(info *fileInfo, node *shimast.Node) (string, bool) {
