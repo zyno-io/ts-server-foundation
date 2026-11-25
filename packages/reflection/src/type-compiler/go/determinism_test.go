@@ -13,9 +13,11 @@ import (
 
 // The compiler queries the checker and fills its alias, Typia and failure caches on first use, so
 // metadata depends on the order in which files are visited. Compiling the same fixture repeatedly
-// must produce byte-identical JavaScript. The fixture spreads cross-file alias, interface and
-// receive-type references over several files so that a pass which ranges over a Go map, whose
-// iteration order changes on every run, reorders those first uses and changes the output.
+// must produce byte-identical JavaScript, and that JavaScript must be correct. The fixture spreads
+// cross-file alias, interface and receive-type references over several files so that a pass which
+// ranges over a Go map, whose iteration order changes on every run, reorders those first uses and
+// changes the output. entity.ts uses its own exported checker-algebra aliases: their metadata must
+// be the resolved union whether or not an importing file filled the alias cache first.
 func TestCompilerOutputIsDeterministic(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -39,16 +41,29 @@ export class SharedModel {
 	picked!: Picked;
 }
 `,
+		"entity.ts": `
+export type AccountStatus = 'active' | 'suspended' | 'deleted';
+export type LiveStatus = Exclude<AccountStatus, 'deleted'>;
+export const KINDS = ['monitor', 'probe'] as const;
+export type Kind = (typeof KINDS)[number];
+export class Account {
+	status!: LiveStatus;
+	kind!: Kind;
+}
+`,
 	}
 	for index := 0; index < 6; index++ {
 		files[fmt.Sprintf("consumer%d.ts", index)] = fmt.Sprintf(`
 import { described, Kept, Picked, Row, Status } from './shared';
+import { Kind, LiveStatus } from './entity';
 export type Local%[1]d = Kept | 'local%[1]d';
 export class Consumer%[1]d {
 	row!: Row;
 	kept!: Kept;
 	picked!: Picked;
 	local!: Local%[1]d;
+	live!: LiveStatus;
+	kind!: Kind;
 	method(status: Status, row: Partial<Row>): Kept {
 		return described<Kept>(status);
 	}
@@ -64,7 +79,8 @@ export class Consumer%[1]d {
 	const runs = 12
 	var first map[string]string
 	for run := 0; run < runs; run++ {
-		output := compileFixture(t, root, filepath.Join(root, fmt.Sprintf("out%d", run)))
+		output, account := compileFixture(t, root, filepath.Join(root, fmt.Sprintf("out%d", run)))
+		assertAccountMetadata(t, run, account)
 		if len(output) == 0 {
 			t.Fatal("the fixture emitted no JavaScript")
 		}
@@ -87,7 +103,34 @@ export class Consumer%[1]d {
 	}
 }
 
-func compileFixture(t *testing.T, root string, outDir string) map[string]string {
+// assertAccountMetadata checks that entity.ts's own class reads its exported aliases as the
+// resolved literal unions, not as an unresolved Exclude class reference or an unknown.
+func assertAccountMetadata(t *testing.T, run int, account *classInfo) {
+	t.Helper()
+	if account == nil || len(account.properties) != 2 {
+		t.Fatalf("run %d: Account was not collected", run)
+	}
+	for _, prop := range account.properties {
+		got := prop.metadataText
+		var want []string
+		switch prop.name {
+		case "status":
+			want = []string{`{kind: 10, literal: "active"}`, `{kind: 10, literal: "suspended"}`, `typeName: "LiveStatus"`}
+		case "kind":
+			want = []string{`{kind: 10, literal: "monitor"}`, `{kind: 10, literal: "probe"}`, `typeName: "Kind"`}
+		}
+		for _, item := range want {
+			if !strings.Contains(got, item) {
+				t.Fatalf("run %d: Account.%s = %s, want it to contain %s", run, prop.name, got, item)
+			}
+		}
+		if strings.Contains(got, `"deleted"`) || strings.Contains(got, "classType") || strings.HasPrefix(got, "{kind: 2") {
+			t.Fatalf("run %d: Account.%s is unresolved: %s", run, prop.name, got)
+		}
+	}
+}
+
+func compileFixture(t *testing.T, root string, outDir string) (map[string]string, *classInfo) {
 	t.Helper()
 	program, diagnostics, err := driver.LoadProgram(root, "tsconfig.json", driver.LoadProgramOptions{SingleThreaded: true, ForceEmit: true, OutDir: outDir})
 	if err != nil || len(diagnostics) != 0 {
@@ -98,6 +141,7 @@ func compileFixture(t *testing.T, root string, outDir string) map[string]string 
 		t.Fatalf("diagnostics: %v", diagnostics)
 	}
 	reg := collectRegistry(program, root, true, true)
+	account := reg.classes["Account"]
 	plans, err := buildEmissionPlans(reg, program, true, true)
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +166,7 @@ func compileFixture(t *testing.T, root string, outDir string) map[string]string 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return output
+	return output, account
 }
 
 // firstDifference returns the text around the first byte where text differs from other.

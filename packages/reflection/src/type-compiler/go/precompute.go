@@ -4,6 +4,20 @@ func precomputeMetadataExpressions(reg *registry, emitTypeAliases bool) {
 	if reg == nil {
 		return
 	}
+	// Exported alias metadata comes first, for every file. A reference to an exported
+	// alias reads its cached metadata when it is filled and expands the alias body
+	// otherwise, and the body expansion cannot resolve checker algebra such as
+	// Exclude<...> or (typeof X)[number]. Importers fill the cache on demand, but a
+	// class in the alias's own file was precomputed before the file's aliases, so
+	// whether it saw the cache depended on whether an importer had been visited
+	// first. Filling every exported alias before any class, call or emission plan
+	// gives each reference the published metadata. This runs whether or not alias
+	// registries are emitted, since importers compute the same metadata anyway.
+	for _, info := range reg.orderedFiles() {
+		if info.precompute {
+			precomputeExportedAliasMetadata(info, reg)
+		}
+	}
 	// TypeScript-Go emits files in parallel, and checker-backed Typia reads are not
 	// safe from WriteFile callbacks. Cache metadata for emitted source files first.
 	for _, info := range reg.orderedFiles() {
@@ -18,9 +32,6 @@ func precomputeMetadataExpressions(reg *registry, emitTypeAliases bool) {
 		}
 		for i := range info.calls {
 			info.calls[i].metadataText = typeExprForNodePreferred(info, reg, info.calls[i].typeText, info.calls[i].typeNode, info.calls[i].pos, info.calls[i].preferTypia)
-		}
-		if emitTypeAliases {
-			precomputeExportedAliasMetadata(info, reg)
 		}
 	}
 }
