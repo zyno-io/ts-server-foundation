@@ -934,6 +934,70 @@ describe('openapi member JSDoc on type aliases and inline object literals', () =
     });
 });
 
+@http.controller('/inline-arrays')
+class InlineArrayDocsController {
+    @http.POST('/body')
+    async body(
+        body: HttpBody<{
+            /** Suffix holder doc. */
+            items: {
+                /** Suffix item doc. */
+                a: string;
+            }[];
+            /** Generic holder doc. */
+            gen: Array<{
+                /** Generic item doc. */
+                b: number;
+            }>;
+        }>
+    ): Promise<{
+        /** Rows holder doc. */
+        rows: {
+            /** Row item doc. */
+            c: string;
+        }[];
+    }> {
+        return { rows: body.items.map(item => ({ c: item.a })) };
+    }
+}
+
+describe('openapi member JSDoc on inline array elements of TSF verb routes', () => {
+    const doc = documentFor(InlineArrayDocsController);
+    const post = () => doc.paths['/inline-arrays/body'].post!;
+    const propertyDescription = (schema: OpenApiSchemaObject, name: string) => asSchema(schema.properties?.[name]).description;
+    const elementOf = (schema: OpenApiSchemaObject, name: string) => asSchema(asSchema(schema.properties?.[name]).items as OpenApiSchemaObject);
+
+    it('keeps member docs of inline objects in T[] and Array<> body members', () => {
+        const body = asSchema(post().requestBody?.content['application/json']?.schema);
+        assert.equal(propertyDescription(body, 'items'), 'Suffix holder doc.');
+        assert.equal(propertyDescription(elementOf(body, 'items'), 'a'), 'Suffix item doc.');
+        assert.equal(propertyDescription(body, 'gen'), 'Generic holder doc.');
+        assert.equal(propertyDescription(elementOf(body, 'gen'), 'b'), 'Generic item doc.');
+    });
+
+    it('keeps member docs of inline objects in T[] return members', () => {
+        const response = asSchema(post().responses['200'].content?.['application/json']?.schema);
+        assert.equal(propertyDescription(response, 'rows'), 'Rows holder doc.');
+        assert.equal(propertyDescription(elementOf(response, 'rows'), 'c'), 'Row item doc.');
+    });
+
+    it('still validates the array elements', async () => {
+        process.env.APP_ENV = 'test';
+        const app = createApp({ controllers: [InlineArrayDocsController], enableHealthcheck: false });
+        const ok = await app.request(HttpRequest.POST('/inline-arrays/body', { items: [{ a: 'x' }], gen: [{ b: 1 }] }));
+        assert.equal(ok.statusCode, 200);
+        assert.deepStrictEqual(ok.json, { rows: [{ c: 'x' }] });
+        for (const invalid of [
+            { items: [{ a: 1 }], gen: [{ b: 1 }] },
+            { items: [{}], gen: [{ b: 1 }] },
+            { items: [{ a: 'x' }], gen: [{ b: 'one' }] },
+            { items: [{ a: 'x' }] }
+        ]) {
+            assert.equal((await app.request(HttpRequest.POST('/inline-arrays/body', invalid))).statusCode, 400, JSON.stringify(invalid));
+        }
+    });
+});
+
 /** Any JSON value. */
 type WarningsJson = unknown;
 

@@ -53,7 +53,7 @@ func resolveImport(fromFile string, spec string, reg *registry) *fileInfo {
 }
 
 func resolveReflectionPackageImport(reg *registry) *fileInfo {
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		fileName := filepath.ToSlash(info.file.FileName())
 		if strings.HasSuffix(fileName, "/@zyno-io/ts-reflection/dist/index.d.ts") ||
 			strings.HasSuffix(fileName, "/packages/reflection/dist/index.d.ts") {
@@ -331,7 +331,7 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func
 		items := []string{
 			"name: " + quote(method.name),
 			"parameters: " + paramsExpr(info, reg, method.params, class.pos, typeRef),
-			"returnType: " + referMetadataType(typeRef, cachedTypeExpr(info, reg, method.returnType, method.returnTypeNode, class.pos, method.returnMetadataText)),
+			"returnType: " + referMetadataType(typeRef, cachedMethodReturnTypeExpr(info, reg, method, class.pos)),
 		}
 		if method.description != "" {
 			items = append(items, "description: "+quote(method.description))
@@ -352,6 +352,13 @@ func classMetadata(info *fileInfo, reg *registry, class *classInfo, typeRef func
 		", methods: [" + strings.Join(methods, ", ") + "]" +
 		", hasConstructor: " + boolLit(class.hasCtor) +
 		", constructorParameters: " + paramsExpr(info, reg, class.ctor, class.pos, typeRef) + "}"
+}
+
+func cachedMethodReturnTypeExpr(info *fileInfo, reg *registry, method methodInfo, pos int) string {
+	if strings.TrimSpace(method.returnMetadataText) != "" {
+		return method.returnMetadataText
+	}
+	return methodReturnTypeExpr(info, reg, method.returnType, method.returnTypeNode, pos, false)
 }
 
 func paramsExpr(info *fileInfo, reg *registry, params []paramInfo, pos int, typeRef func(string) string) string {

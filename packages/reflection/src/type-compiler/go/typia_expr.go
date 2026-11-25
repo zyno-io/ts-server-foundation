@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -629,6 +630,97 @@ func cachedTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Nod
 	return typeExprForNode(info, reg, raw, node, pos)
 }
 
+// methodReturnTypeExpr renders a method's return type. A return type that the checker resolves to a
+// Promise or PromiseLike is rendered as a promise of its awaited type however it is spelled, so a
+// route declared `async m(): ReturnType<Service['m']>`, `Api['m']` or `Async<Dto>` describes Dto
+// rather than the Promise object.
+func methodReturnTypeExpr(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int, preferTypia bool) string {
+	expr := typeExprForNodePreferred(info, reg, raw, node, pos, preferTypia)
+	trimmed := strings.TrimSpace(expr)
+	// A promise is already rendered. A package type keeps its package boundary: its metadata is
+	// loaded from the package, and the checker's view of it names types the importer cannot reach.
+	if strings.HasPrefix(trimmed, "{kind: 22") || strings.HasPrefix(trimmed, runtimeAliasPlaceholderName+"(") ||
+		typeContainsExternalImportReference(info, reg, raw, map[string]bool{}) {
+		return expr
+	}
+	if promised, ok := checkerPromiseTypeExprForNode(info, reg, node, pos); ok {
+		return promised
+	}
+	return expr
+}
+
+// checkerPromiseTypeExprForNode renders the type of node as a promise when the checker resolves it
+// to the global Promise or PromiseLike, keeping the status of TSF's ApiResponse alias of Promise. The text paths
+// recognize these wrappers only when they are written literally; an alias, an indexed access or a
+// utility such as ReturnType reaches Typia as an ordinary object and becomes the Promise's own
+// members, such as Symbol.toStringTag.
+func checkerPromiseTypeExprForNode(info *fileInfo, reg *registry, node *shimast.Node, pos int) (string, bool) {
+	if reg == nil || reg.checker == nil || node == nil {
+		return "", false
+	}
+	return checkerPromiseTypeExpr(info, reg, reg.checker.GetTypeFromTypeNode(node), pos, 0)
+}
+
+func checkerPromiseTypeExpr(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, depth int) (string, bool) {
+	if typ == nil || depth > 8 {
+		return "", false
+	}
+	symbol := typ.Symbol()
+	if symbol == nil || (symbol.Name != "Promise" && symbol.Name != "PromiseLike") || !isTypeScriptLibSymbol(symbol) {
+		return "", false
+	}
+	if alias := typ.Alias(); alias != nil && alias.Symbol() != nil && alias.Symbol().Name == "ApiResponse" && len(alias.TypeArguments()) != 0 {
+		args := alias.TypeArguments()
+		body, ok := checkerAwaitedTypeExpr(info, reg, args[0], pos, depth+1)
+		if !ok {
+			return "", false
+		}
+		status := literalArg("200")
+		if len(args) > 1 && args[1] != nil && args[1].IsNumberLiteral() {
+			status = "{kind: 10, literal: " + typiaLiteralExpr(args[1].AsLiteralType().Value()) + "}"
+		}
+		return "{kind: 22, typeName: \"ApiResponse\", type: " + body + ", typeArguments: [" + body + ", " + status + "]}", true
+	}
+	args := shimchecker.Checker_getTypeArguments(reg.checker, typ)
+	if len(args) != 1 {
+		return "", false
+	}
+	inner, ok := checkerAwaitedTypeExpr(info, reg, args[0], pos, depth+1)
+	if !ok {
+		return "", false
+	}
+	expr := "{kind: 22, type: " + inner + "}"
+	// A named Promise alias keeps its name, as the text path keeps it for an alias written in the
+	// signature. The router and OpenAPI read TSF's response aliases, such as EmptyResponse (204) and
+	// RedirectResponse (302), by this name.
+	if alias := typ.Alias(); alias != nil && alias.Symbol() != nil && alias.Symbol().Name != "" {
+		expr = withTypeName(expr, alias.Symbol().Name)
+	}
+	return expr, true
+}
+
+// checkerAwaitedTypeExpr renders an awaited type. It fails when Typia cannot describe the type,
+// so the caller keeps the existing rendering rather than replacing it with an unknown.
+func checkerAwaitedTypeExpr(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, depth int) (string, bool) {
+	if expr, ok := checkerPromiseTypeExpr(info, reg, typ, pos, depth); ok {
+		return expr, true
+	}
+	return typiaTypeExprFromType(info, reg, typ, pos, "")
+}
+
+func isTypeScriptLibSymbol(symbol *shimast.Symbol) bool {
+	if symbol == nil || len(symbol.Declarations) == 0 {
+		return false
+	}
+	for _, declaration := range symbol.Declarations {
+		file := shimast.GetSourceFileOfNode(declaration)
+		if file == nil || !isTypeScriptLibDeclaration(filepath.ToSlash(file.FileName())) {
+			return false
+		}
+	}
+	return true
+}
+
 func preferredWrapperTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shimast.Node, pos int) (string, bool) {
 	raw = strings.TrimSpace(trimParens(raw))
 	if len(nonEmptyParts(splitTop(raw, "|"))) > 1 || len(nonEmptyParts(splitTop(raw, "&"))) > 1 {
@@ -767,7 +859,7 @@ func typiaTypeExprForNode(info *fileInfo, reg *registry, raw string, node *shima
 		return "", false
 	}
 	typ := reg.checker.GetTypeFromTypeNode(node)
-	return typiaTypeExprFromType(info, reg, typ, pos, raw)
+	return typiaTypeExprFromTypeForNode(info, reg, typ, pos, raw, node)
 }
 
 func shouldUseTypiaType(info *fileInfo, reg *registry, raw string) bool {
@@ -1453,6 +1545,12 @@ func isFrameworkMetadataName(name string) bool {
 }
 
 func typiaTypeExprFromType(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, raw string) (string, bool) {
+	return typiaTypeExprFromTypeForNode(info, reg, typ, pos, raw, nil)
+}
+
+// typiaTypeExprFromTypeForNode is typiaTypeExprFromType for a type read from node, the source type
+// node whose text is raw. The node lets source property overrides keep member JSDoc.
+func typiaTypeExprFromTypeForNode(info *fileInfo, reg *registry, typ *shimchecker.Type, pos int, raw string, node *shimast.Node) (string, bool) {
 	if typ == nil || typ.IsTypeParameter() {
 		return "", false
 	}
@@ -1484,7 +1582,9 @@ func typiaTypeExprFromType(info *fileInfo, reg *registry, typ *shimchecker.Type,
 		reg.typiaFailures[typ] = true
 		return "", false
 	}
-	expr := typiaMetadataExpr(info, reg, result.Data, true, newTypiaRenderStateForSource(pos, raw))
+	state := newTypiaRenderStateForSource(pos, raw)
+	state.sourceNode = node
+	expr := typiaMetadataExpr(info, reg, result.Data, true, state)
 	reg.typiaCache[cacheKey] = expr
 	return expr, true
 }
@@ -1497,6 +1597,8 @@ type typiaRenderState struct {
 	objects   map[*schemametadata.MetadataObjectType]bool
 	pos       int
 	sourceRaw string
+	// sourceNode is the type node sourceRaw was read from, when known.
+	sourceNode *shimast.Node
 }
 
 func newTypiaRenderState(pos ...int) *typiaRenderState {
@@ -1713,7 +1815,7 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 		}
 		overrideSources = append(overrideSources, state.sourceRaw)
 		if override, ok := typiaSourcePropertyOverrideExpr(info, reg, "", propName, state.pos, overrideSources...); ok {
-			valueExpr = override
+			valueExpr = documentedPropertyOverrideExpr(info, reg, valueExpr, override, propName, len(state.objects) == 1, state)
 		}
 		propItems := append([]string{"kind: 20", "name: " + quote(propName), "type: " + valueExpr, "optional: " + boolLit(optional)}, typiaJsDoc(prop.Description, prop.JsDocTags).fieldItems()...)
 		properties = append(properties, "{"+strings.Join(propItems, ", ")+"}")
@@ -1728,6 +1830,100 @@ func typiaObjectExpr(info *fileInfo, reg *registry, object *schemametadata.Metad
 	}
 	items = append(items, "types: ["+strings.Join(properties, ", ")+"]")
 	return typiaTaggedExpr("{"+strings.Join(items, ", ")+"}", object.Tags)
+}
+
+// documentedPropertyOverrideExpr chooses the value of a property whose source metadata overrides
+// Typia's. The override is rendered from source text, which carries no JSDoc, so it drops the docs
+// of members of inline objects in the property, such as `items: { /** doc */ a: string }[]`.
+// The override's structure always wins, so validation is unchanged; only its docs are recovered:
+//   - When Typia's value has the same structure apart from docs, Typia's value is kept, since
+//     Typia reads member JSDoc from the checker.
+//   - Otherwise, for a member of the root inline object, the member is rendered from its type
+//     node, whose node path keeps member JSDoc, and used when it has the override's structure.
+func documentedPropertyOverrideExpr(info *fileInfo, reg *registry, typiaExpr string, override string, propName string, root bool, state *typiaRenderState) string {
+	bare := withoutJsDocFields(override)
+	if withoutJsDocFields(typiaExpr) == bare {
+		return typiaExpr
+	}
+	if !root {
+		return override
+	}
+	member := sourceTypeLiteralMemberTypeNode(state.sourceNode, propName)
+	memberRaw, ok := sourceTypeNodeText(info, member)
+	if !ok {
+		return override
+	}
+	if nodeExpr := internalTypeExprForNode(info, reg, memberRaw, member, state.pos); withoutJsDocFields(nodeExpr) == bare {
+		return nodeExpr
+	}
+	return override
+}
+
+// sourceTypeLiteralMemberTypeNode returns the type node of the named property of an inline object
+// type node, looking through parentheses.
+func sourceTypeLiteralMemberTypeNode(node *shimast.Node, name string) *shimast.Node {
+	for node != nil && node.Kind == shimast.KindParenthesizedType {
+		node = node.AsParenthesizedTypeNode().Type
+	}
+	if node == nil || node.Kind != shimast.KindTypeLiteral {
+		return nil
+	}
+	file := shimast.GetSourceFileOfNode(node)
+	if file == nil {
+		return nil
+	}
+	for _, member := range node.Members() {
+		if member.Kind == shimast.KindPropertySignature && member.Type() != nil && memberName(file, member) == name {
+			return member.Type()
+		}
+	}
+	return nil
+}
+
+// withoutJsDocFields removes the JSDoc fields that jsDocInfo.fieldItems adds, leaving the structure
+// that validation reads. It scans quoted strings as units, so text inside a string literal, such
+// as a literal type `'x, description: '`, is never taken for a field.
+func withoutJsDocFields(expr string) string {
+	var out strings.Builder
+	for index := 0; index < len(expr); {
+		if expr[index] == '"' {
+			end := quotedStringEnd(expr, index)
+			out.WriteString(expr[index:end])
+			index = end
+			continue
+		}
+		if end, ok := jsDocFieldEnd(expr, index); ok {
+			index = end
+			continue
+		}
+		out.WriteByte(expr[index])
+		index++
+	}
+	return out.String()
+}
+
+// jsDocFieldEnd reports the end of a `, description: "..."`, `, deprecated: "..."` or
+// `, sunset: "..."` field that starts at index, outside any string.
+func jsDocFieldEnd(expr string, index int) (int, bool) {
+	for _, key := range []string{", description: \"", ", deprecated: \"", ", sunset: \""} {
+		if strings.HasPrefix(expr[index:], key) {
+			return quotedStringEnd(expr, index+len(key)-1), true
+		}
+	}
+	return 0, false
+}
+
+// quotedStringEnd returns the index just past the Go-quoted string that starts at start.
+func quotedStringEnd(expr string, start int) int {
+	for index := start + 1; index < len(expr); index++ {
+		switch expr[index] {
+		case '\\':
+			index++
+		case '"':
+			return index + 1
+		}
+	}
+	return len(expr)
 }
 
 func typiaNamedObjectInternalOverrideExpr(info *fileInfo, reg *registry, name string, pos int) (string, bool) {

@@ -90,7 +90,9 @@ func collectReceiveTypeCalls(info *fileInfo, reg *registry) []callInfo {
 	text := info.file.Text()
 	out := []callInfo{}
 	seen := map[int]bool{}
-	for name, fns := range receiveTypeFunctionCandidates(info, reg) {
+	functionCandidates := receiveTypeFunctionCandidates(info, reg)
+	for _, name := range sortedFunctionCandidateNames(functionCandidates) {
+		fns := functionCandidates[name]
 		if len(fns) == 0 {
 			continue
 		}
@@ -109,7 +111,9 @@ func collectReceiveTypeCalls(info *fileInfo, reg *registry) []callInfo {
 			}
 		}
 	}
-	for name, fns := range receiveTypeMethodCandidates(reg) {
+	methodCandidates := receiveTypeMethodCandidates(reg)
+	for _, name := range sortedFunctionCandidateNames(methodCandidates) {
+		fns := methodCandidates[name]
 		if len(fns) == 0 {
 			continue
 		}
@@ -125,6 +129,17 @@ func collectReceiveTypeCalls(info *fileInfo, reg *registry) []callInfo {
 		}
 	}
 	return out
+}
+
+// sortedFunctionCandidateNames orders candidate names so the first match for a call does not
+// depend on map iteration order.
+func sortedFunctionCandidateNames(candidates map[string][]functionInfo) []string {
+	names := make([]string, 0, len(candidates))
+	for name := range candidates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func receiveTypeFunctionCandidates(info *fileInfo, reg *registry) map[string][]functionInfo {
@@ -371,7 +386,7 @@ func paramsFromText(raw string) []paramInfo {
 
 func receiveTypeMethodCandidates(reg *registry) map[string][]functionInfo {
 	out := map[string][]functionInfo{}
-	for _, info := range reg.files {
+	for _, info := range reg.orderedFiles() {
 		for _, class := range info.classes {
 			methods := append(append([]methodInfo(nil), class.methods...), class.staticMethods...)
 			for _, method := range methods {
