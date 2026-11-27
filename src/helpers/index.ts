@@ -4,6 +4,7 @@ export * from './async/process';
 export * from './async/promise';
 export * from './data/array';
 export * from './data/objects';
+export * from './data/search-filters';
 export * from './data/serialization';
 export * from './data/transformer';
 export * from './io/package';

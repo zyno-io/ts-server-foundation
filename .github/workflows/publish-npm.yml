@@ -58,7 +58,8 @@ jobs:
 
           node scripts/prepare-release-packages.cjs "${BUILD_VERSION}"
 
-      - name: Publish reflection and foundation with OIDC
+      - name: Publish reflection, utils, and foundation with OIDC
         run: |
           (cd packages/reflection && npm publish --registry https://registry.npmjs.org/ --access public)
+          (cd packages/utils && npm publish --registry https://registry.npmjs.org/ --access public)
           npm publish --registry https://registry.npmjs.org/ --access public

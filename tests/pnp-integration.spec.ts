@@ -46,9 +46,12 @@ describe('packed Yarn PnP consumer', () => {
         const reflectionPackage = JSON.parse(readFileSync(join(root, 'packages', 'reflection', 'package.json'), 'utf8')) as { version: string };
         const foundationTarball = join(directory, `zyno-io-ts-server-foundation-${rootPackage.version}.tgz`);
         const reflectionTarball = join(directory, `zyno-io-ts-reflection-${reflectionPackage.version}.tgz`);
+        const utilsPackage = JSON.parse(readFileSync(join(root, 'packages', 'utils', 'package.json'), 'utf8')) as { version: string };
+        const utilsTarball = join(directory, `zyno-io-ts-utils-${utilsPackage.version}.tgz`);
 
         run('yarn', ['pack', '--out', foundationTarball], root);
         run('yarn', ['workspace', '@zyno-io/ts-reflection', 'pack', '--out', reflectionTarball], root);
+        run('yarn', ['workspace', '@zyno-io/ts-utils', 'pack', '--out', utilsTarball], root);
         mkdirSync(externalDir, { recursive: true });
         writeFileSync(
             join(externalDir, 'package.json'),
@@ -113,11 +116,13 @@ export declare function receive<T>(value?: import('@zyno-io/ts-server-foundation
                 dependencies: {
                     '@zyno-io/ts-server-foundation': `file:${foundationTarball}`,
                     '@zyno-io/ts-reflection': `file:${reflectionTarball}`,
+                    '@zyno-io/ts-utils': `file:${utilsTarball}`,
                     'pnp-receive-fixture': `file:${externalTarball}`
                 },
                 resolutions: {
                     '@zyno-io/ts-server-foundation': `file:${foundationTarball}`,
-                    '@zyno-io/ts-reflection': `file:${reflectionTarball}`
+                    '@zyno-io/ts-reflection': `file:${reflectionTarball}`,
+                    '@zyno-io/ts-utils': `file:${utilsTarball}`
                 },
                 devDependencies: {
                     '@types/node': rootPackage.devDependencies['@types/node'],

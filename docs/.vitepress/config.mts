@@ -64,6 +64,7 @@ export default defineConfig({
                 text: 'Utilities',
                 items: [
                     { text: 'Helpers', link: '/helpers' },
+                    { text: 'Search Filters', link: '/search-filters' },
                     { text: 'Temporary Workspaces', link: '/temporary-files' },
                     { text: 'Telemetry', link: '/telemetry' },
                     { text: 'Testing', link: '/testing' },
