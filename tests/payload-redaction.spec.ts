@@ -49,7 +49,7 @@ describe('payload redaction', () => {
         assert.equal(JSON.stringify(redactPayload(input, policy)), '{"__proto__":{"secret":"REDACTED"},"secret":"","details":null}');
     });
 
-    it('redacts JSON, labelled or not, and bracketed form keys', () => {
+    it('redacts JSON, labeled or not, and bracketed form keys', () => {
         const raw = Buffer.from('{"secret":"s","public":1}');
         for (const contentType of ['application/json', 'text/plain', '']) {
             assert.deepEqual(JSON.parse(redactRequestBodyForLog(contentType, raw, policy).body), { secret: REDACTED, public: 1 });

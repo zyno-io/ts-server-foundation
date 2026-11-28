@@ -1194,7 +1194,7 @@ class RtController {
     }
 }
 
-describe('inline object arrays, readonly index signatures and neighbouring comments', () => {
+describe('inline object arrays, readonly index signatures and neighboring comments', () => {
     const app = createApp({
         controllers: [RtController],
         enableHealthcheck: false
@@ -1231,7 +1231,7 @@ describe('inline object arrays, readonly index signatures and neighbouring comme
         assert.equal(ok.statusCode, 200, JSON.stringify(ok.json));
     });
 
-    it('does not glue neighbouring comments into member descriptions', () => {
+    it('does not glue neighboring comments into member descriptions', () => {
         const doc = serializeOpenApiSchema(app);
         const alias = doc.components!.schemas!.CmtAlias;
         const cls = doc.components!.schemas!.CmtClass;
