@@ -109,7 +109,7 @@ function redactParsedBody(contentType: string, rawBody: Buffer, policy: PayloadR
     const mime = mimeType(contentType);
     const text = rawBody.toString('utf8');
 
-    // TSF parses unlabelled/text bodies as JSON, so mislabelled JSON is redacted rather than fully hidden.
+    // TSF parses unlabeled/text bodies as JSON, so mislabeled JSON is redacted rather than fully hidden.
     const looksLikeJson = (mime === '' || mime === 'text/plain') && /^\s*[[{]/.test(text);
     if (mime === 'application/json' || mime.endsWith('+json') || looksLikeJson) {
         const parsed: unknown = JSON.parse(text);

@@ -667,7 +667,7 @@ func TestIndexSignatureTypeAcceptsReadonly(t *testing.T) {
 	}
 }
 
-func TestMemberJsDocIgnoresNeighbouringComments(t *testing.T) {
+func TestMemberJsDocIgnoresNeighboringComments(t *testing.T) {
 	info, reg := loadJsDocProbe(t, `
 export type CmtAlias = { a: string; // trailing line note
 	/** Alias b doc. */ b: number;

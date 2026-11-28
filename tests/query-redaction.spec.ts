@@ -160,7 +160,7 @@ describe('query redaction', () => {
         }
     });
 
-    it('honours requestLogging.redactQueryKeys', async () => {
+    it('honors requestLogging.redactQueryKeys', async () => {
         const entries: LogEntry[] = [];
 
         @http.controller('/query-redaction-custom')
