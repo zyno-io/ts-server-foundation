@@ -3,6 +3,7 @@
 The package intentionally exposes a small package-level import surface:
 
 - `@zyno-io/ts-server-foundation` for application APIs
+- `@zyno-io/ts-utils` for isomorphic zoned-date math and search-filter tokenizing; see [Search Filters](./search-filters.md)
 - `@zyno-io/ts-reflection` for browser-neutral reflection, validation, deserialization, and metadata APIs; its `/type-compiler` subpath is the standalone `ttsc` plugin
 - `@zyno-io/ts-server-foundation/otel` for OpenTelemetry bootstrap
 

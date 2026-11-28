@@ -58,9 +58,9 @@
         }
     },
     "scripts": {
-        "clean": "rm -rf dist && yarn workspace @zyno-io/ts-reflection clean",
-        "build": "yarn clean && yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
-        "build:dirty": "yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
+        "clean": "rm -rf dist && yarn workspace @zyno-io/ts-reflection clean && yarn workspace @zyno-io/ts-utils clean",
+        "build": "yarn clean && yarn workspace @zyno-io/ts-reflection build && yarn workspace @zyno-io/ts-utils build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
+        "build:dirty": "yarn workspace @zyno-io/ts-reflection build && yarn workspace @zyno-io/ts-utils build && ttsc -p tsconfig.json && yarn build:type-compiler && yarn build:devconsole && chmod +x dist/src/cli/*.js",
         "build:type-compiler": "rm -rf dist/src/type-compiler && mkdir -p dist/src/type-compiler && cp src/type-compiler/index.cjs dist/src/type-compiler/",
         "build:devconsole": "vite build --config devconsole/vite.config.ts",
         "docs:dev": "vitepress dev docs --host 0.0.0.0",
@@ -72,7 +72,7 @@
         "test": "yarn build && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
         "test:type-compiler-go": "node scripts/test-type-compiler-go.cjs",
         "test:dirty": "yarn build:dirty && yarn prepare:test-type-compiler && dotenv -e .env.test -- tsf-test",
-        "test-app": "yarn clean && yarn workspace @zyno-io/ts-reflection build && ttsc -p tsconfig.test-app.json && APP_ENV=test node dist/test-app/bootstrap.js"
+        "test-app": "yarn clean && yarn workspace @zyno-io/ts-reflection build && yarn workspace @zyno-io/ts-utils build && ttsc -p tsconfig.test-app.json && APP_ENV=test node dist/test-app/bootstrap.js"
     },
     "dependencies": {
         "@bufbuild/protobuf": "^2.16.0",
@@ -98,6 +98,7 @@
         "@types/ws": "^8.18.2",
         "@zyno-io/config": "^1.14.0",
         "@zyno-io/ts-reflection": "workspace:*",
+        "@zyno-io/ts-utils": "workspace:*",
         "bcrypt": "^6.0.0",
         "bullmq": "^6.3.4",
         "busboy": "^1.6.0",

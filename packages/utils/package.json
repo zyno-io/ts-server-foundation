@@ -1,0 +1,37 @@
+{
+    "name": "@zyno-io/ts-utils",
+    "version": "0.0.0-dev",
+    "description": "Isomorphic TypeScript utilities: zoned-date math and search-filter tokenizing",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/zyno-io/ts-server-foundation.git",
+        "directory": "packages/utils"
+    },
+    "files": [
+        "dist/",
+        "package.json",
+        "README.md",
+        "LICENSE"
+    ],
+    "type": "module",
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs"
+        }
+    },
+    "scripts": {
+        "clean": "rm -rf dist",
+        "build": "yarn clean && yarn build:types && vite build --config vite.config.ts",
+        "build:types": "tsc -p tsconfig.types.json"
+    },
+    "devDependencies": {
+        "typescript": "^7.0.2",
+        "vite": "^8.2.1"
+    }
+}

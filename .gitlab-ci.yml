@@ -103,6 +103,8 @@ test-and-build:
       - package.json
       - packages/reflection/dist/
       - packages/reflection/package.json
+      - packages/utils/dist/
+      - packages/utils/package.json
 
 mirror:
   stage: mirror
